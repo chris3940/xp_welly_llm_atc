@@ -195,6 +195,21 @@ static void draw_settings_tab() {
   ImGui::InputText("##apikey", api_key_buf, sizeof(api_key_buf),
                    ImGuiInputTextFlags_Password);
   ImGui::SameLine();
+  if (ImGui::Button("Paste")) {
+    FILE *fp = popen("pbpaste", "r"); // NOLINT(cert-env33-c,bugprone-command-processor)
+    if (fp) {
+      char clip[256] = {};
+      if (fgets(clip, sizeof(clip), fp)) {
+        // Strip trailing newline
+        size_t len = std::strlen(clip);
+        if (len > 0 && clip[len - 1] == '\n')
+          clip[len - 1] = '\0';
+        std::strncpy(api_key_buf, clip, sizeof(api_key_buf) - 1);
+      }
+      pclose(fp);
+    }
+  }
+  ImGui::SameLine();
   if (ImGui::Button("Save Key")) {
     if (settings::save_api_key(api_key_buf)) {
       key_just_saved = true;
