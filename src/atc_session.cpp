@@ -1,6 +1,10 @@
 #include "atc_session.hpp"
 #include "audio_recorder.hpp"
+#include "intent_parser.hpp"
+#include "whisper_client.hpp"
+#include "xplane_context.hpp"
 
+#include <XPLMProcessing.h>
 #include <XPLMUtilities.h>
 
 #include <cstdio>
@@ -14,11 +18,17 @@ static float last_duration_ = 0.0f;
 static size_t last_samples_ = 0;
 static size_t last_wav_bytes_ = 0;
 
+static std::vector<TranscriptEntry> transcript_;
+static intent_parser::PilotMessage last_pilot_message_;
+static constexpr float kMinRecordingDuration = 0.5f;
+
 void init() {
   state_ = PTTState::IDLE;
   last_duration_ = 0.0f;
   last_samples_ = 0;
   last_wav_bytes_ = 0;
+  transcript_.clear();
+  last_pilot_message_ = {};
 }
 
 void stop() { state_ = PTTState::IDLE; }
@@ -46,6 +56,17 @@ void on_ptt_released() {
   last_duration_ = audio_recorder::duration_seconds();
   last_samples_ = audio_recorder::buffer_samples();
 
+  // Minimum duration gate
+  if (last_duration_ < kMinRecordingDuration) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf),
+                  "[xp_wellys_atc] Recording too short (%.2fs), discarding\n",
+                  last_duration_);
+    XPLMDebugString(buf);
+    state_ = PTTState::IDLE;
+    return;
+  }
+
   auto wav = audio_recorder::encode_wav();
   last_wav_bytes_ = wav.size();
 
@@ -56,8 +77,45 @@ void on_ptt_released() {
                 last_duration_, last_samples_, last_wav_bytes_);
   XPLMDebugString(buf);
 
-  // Transition back to IDLE (Whisper not yet implemented — will change in M3)
-  state_ = PTTState::IDLE;
+  state_ = PTTState::PROCESSING;
+
+  whisper_client::transcribe_async(
+      std::move(wav), [](std::string transcript, bool success) {
+        if (success) {
+          XPLMDebugString(
+              ("[xp_wellys_atc] Transcript: " + transcript + "\n").c_str());
+
+          const auto &ctx = xplane_context::get();
+          float active_freq =
+              (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
+          char freq_str[16];
+          std::snprintf(freq_str, sizeof(freq_str), "%.3f", active_freq);
+
+          transcript_.push_back(TranscriptEntry{
+              static_cast<double>(XPLMGetElapsedTime()),
+              true,
+              transcript,
+              freq_str,
+          });
+
+          // Parse intent
+          last_pilot_message_ = intent_parser::parse(transcript, ctx);
+
+          char log[512];
+          std::snprintf(
+              log, sizeof(log),
+              "[xp_wellys_atc] Intent: %s (%.2f) callsign=\"%s\" runway=\"%s\"\n",
+              intent_parser::intent_name(last_pilot_message_.intent),
+              last_pilot_message_.confidence,
+              last_pilot_message_.callsign.c_str(),
+              last_pilot_message_.runway.c_str());
+          XPLMDebugString(log);
+        } else {
+          XPLMDebugString(
+              ("[xp_wellys_atc] Whisper error: " + transcript + "\n").c_str());
+        }
+        state_ = PTTState::IDLE;
+      });
 }
 
 PTTState ptt_state() { return state_; }
@@ -79,5 +137,15 @@ std::string ptt_state_label() {
 float last_recording_duration() { return last_duration_; }
 size_t last_recording_samples() { return last_samples_; }
 size_t last_wav_bytes() { return last_wav_bytes_; }
+
+const intent_parser::PilotMessage &last_pilot_message() {
+  return last_pilot_message_;
+}
+
+const std::vector<TranscriptEntry> &transcript_entries() {
+  return transcript_;
+}
+
+void clear_transcript() { transcript_.clear(); }
 
 } // namespace atc_session

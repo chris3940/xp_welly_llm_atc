@@ -9,6 +9,7 @@
 #include "audio_recorder.hpp"
 #include "ptt_input.hpp"
 #include "settings.hpp"
+#include "whisper_client.hpp"
 #include "xplane_context.hpp"
 
 static XPLMMenuID menu_id = nullptr;
@@ -18,6 +19,7 @@ static void menu_handler(void *, void *) { atc_ui::toggle(); }
 
 static float flight_loop_cb(float, float, int, void *) {
   xplane_context::update();
+  whisper_client::drain_callback_queue();
   return -1.0f; // called every frame
 }
 
@@ -31,6 +33,7 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
   settings::init();
   xplane_context::init();
   audio_recorder::init();
+  whisper_client::init();
   atc_ui::init();
 
   // Flight loop
@@ -58,6 +61,7 @@ PLUGIN_API void XPluginStop() {
   }
 
   atc_ui::stop();
+  whisper_client::stop();
   audio_recorder::stop();
   xplane_context::stop();
   settings::stop();

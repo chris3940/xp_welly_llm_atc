@@ -1,5 +1,6 @@
 #include "atc_ui.hpp"
 #include "atc_session.hpp"
+#include "intent_parser.hpp"
 #include "settings.hpp"
 #include "xplane_context.hpp"
 
@@ -82,6 +83,61 @@ static void draw_status_tab() {
   ImGui::Text("Engines: %s", ctx.engines_running ? "Running" : "Off");
   ImGui::Text("Aircraft: %s",
               ctx.aircraft_icao.empty() ? "---" : ctx.aircraft_icao.c_str());
+
+  // Last Parsed Intent
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Last Parsed Intent");
+
+  const auto &pm = atc_session::last_pilot_message();
+  if (!pm.raw_transcript.empty()) {
+    ImGui::Text("Intent: %s", intent_parser::intent_name(pm.intent));
+    ImGui::Text("Confidence: %.2f", pm.confidence);
+    if (!pm.callsign.empty())
+      ImGui::Text("Callsign: %s", pm.callsign.c_str());
+    if (!pm.runway.empty())
+      ImGui::Text("Runway: %s", pm.runway.c_str());
+    ImGui::TextWrapped("Transcript: %s", pm.raw_transcript.c_str());
+  } else {
+    ImGui::TextDisabled("(no transcript yet)");
+  }
+}
+
+static size_t last_transcript_count_ = 0;
+
+static void draw_transcript_tab() {
+  if (ImGui::Button("Clear")) {
+    atc_session::clear_transcript();
+    last_transcript_count_ = 0;
+  }
+
+  ImGui::Separator();
+
+  ImGui::BeginChild("TranscriptScroll", ImVec2(0, 0), false,
+                     ImGuiWindowFlags_HorizontalScrollbar);
+
+  const auto &entries = atc_session::transcript_entries();
+  for (const auto &entry : entries) {
+    int mins = static_cast<int>(entry.sim_time) / 60;
+    int secs = static_cast<int>(entry.sim_time) % 60;
+    char line[512];
+    if (entry.is_pilot) {
+      std::snprintf(line, sizeof(line), "[%02d:%02d] You: %s", mins, secs,
+                    entry.text.c_str());
+      ImGui::TextUnformatted(line);
+    } else {
+      std::snprintf(line, sizeof(line), "[%02d:%02d] ATC: %s", mins, secs,
+                    entry.text.c_str());
+      ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "%s", line);
+    }
+  }
+
+  // Auto-scroll on new entries
+  if (entries.size() != last_transcript_count_) {
+    ImGui::SetScrollHereY(1.0f);
+    last_transcript_count_ = entries.size();
+  }
+
+  ImGui::EndChild();
 }
 
 static void draw_settings_tab() {
@@ -195,6 +251,10 @@ static void draw_window(XPLMWindowID id, void *) {
   if (ImGui::BeginTabBar("MainTabs")) {
     if (ImGui::BeginTabItem("Status")) {
       draw_status_tab();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Transcript")) {
+      draw_transcript_tab();
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Settings")) {
