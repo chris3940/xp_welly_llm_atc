@@ -6,6 +6,7 @@
 
 #include "atc_session.hpp"
 #include "atc_ui.hpp"
+#include "audio_recorder.hpp"
 #include "ptt_input.hpp"
 #include "settings.hpp"
 #include "xplane_context.hpp"
@@ -31,6 +32,7 @@ PLUGIN_API int XPluginStart(char* name, char* sig, char* desc) {
 
     settings::init();
     xplane_context::init();
+    audio_recorder::init();
     atc_ui::init();
 
     // Flight loop
@@ -57,6 +59,7 @@ PLUGIN_API void XPluginStop() {
     }
 
     atc_ui::stop();
+    audio_recorder::stop();
     xplane_context::stop();
     settings::stop();
 

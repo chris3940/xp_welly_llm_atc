@@ -87,6 +87,7 @@ if(APPLE)
         "-framework CoreAudio"
         "-framework AVFoundation"
         "-framework Security"
+        "-framework CoreFoundation"
         CURL::libcurl
     )
 endif()
