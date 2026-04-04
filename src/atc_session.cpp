@@ -46,6 +46,13 @@ void on_ptt_pressed() {
     return;
   }
 
+  // Radio requires avionics power
+  const auto &ctx = xplane_context::get();
+  if (!ctx.avionics_on) {
+    XPLMDebugString("[xp_wellys_atc] PTT blocked — avionics off\n");
+    return;
+  }
+
   state_ = PTTState::RECORDING;
   audio_player::play_ptt_click();
   audio_recorder::start_recording();

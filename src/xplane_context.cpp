@@ -28,6 +28,7 @@ static XPLMDataRef dr_com1_freq = nullptr;
 static XPLMDataRef dr_com2_freq = nullptr;
 static XPLMDataRef dr_active_com = nullptr;
 static XPLMDataRef dr_aircraft_icao = nullptr;
+static XPLMDataRef dr_avionics_on = nullptr;
 static XPLMDataRef dr_barometer = nullptr;
 static XPLMDataRef dr_wind_direction = nullptr;
 static XPLMDataRef dr_wind_speed = nullptr;
@@ -147,6 +148,7 @@ void init() {
   dr_active_com =
       XPLMFindDataRef("sim/cockpit2/radios/actuators/audio_com_selection");
   dr_aircraft_icao = XPLMFindDataRef("sim/aircraft/view/acf_ICAO");
+  dr_avionics_on = XPLMFindDataRef("sim/cockpit/electrical/avionics_on");
   dr_barometer = XPLMFindDataRef("sim/weather/barometer_sealevel_inhg");
   dr_wind_direction = XPLMFindDataRef("sim/weather/wind_direction_degt");
   dr_wind_speed = XPLMFindDataRef("sim/weather/wind_speed_kt");
@@ -203,6 +205,8 @@ void update() {
     ctx.aircraft_icao = buf;
   }
 
+  if (dr_avionics_on)
+    ctx.avionics_on = (XPLMGetDatai(dr_avionics_on) != 0);
   if (dr_barometer)
     ctx.qnh_inhg = XPLMGetDataf(dr_barometer);
   if (dr_wind_direction)
