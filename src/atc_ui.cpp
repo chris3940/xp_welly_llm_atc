@@ -5,8 +5,10 @@
 #include "settings.hpp"
 #include "xplane_context.hpp"
 
+#include <XPLMDataAccess.h>
 #include <XPLMDisplay.h>
-#include <XPLMProcessing.h>
+#include <XPLMGraphics.h>
+#include <XPLMUtilities.h>
 
 #include <imgui.h>
 #include <imgui_impl_opengl2.h>
@@ -17,12 +19,17 @@
 #include <GL/gl.h>
 #endif
 
+#include <algorithm>
 #include <cstring>
 
 namespace atc_ui {
 
-static bool visible = false;
+// ── State ────────────────────────────────────────────────────────
+// The XPLM window is full-screen and invisible (DecorationNone).
+// It exists only to capture mouse/keyboard events and feed them to ImGui.
+// ImGui draws its own window on top.
 static XPLMWindowID window_id = nullptr;
+static bool visible = false;
 
 // ImGui persistent buffers
 static char api_key_buf[256] = {};
@@ -30,12 +37,24 @@ static char callsign_buf[256] = {};
 static float save_feedback_timer = 0.0f;
 static bool key_just_saved = false;
 static bool buffers_initialized = false;
-static float last_frame_time = 0.0f;
 
 static const char *voice_names[] = {"alloy", "echo", "fable",
                                     "onyx",  "nova", "shimmer"};
 static const int voice_count = 6;
 static int voice_selection = 3; // default: onyx
+
+// ── Time ─────────────────────────────────────────────────────────
+static double last_frame_time_ = 0.0;
+static double get_xp_time() {
+  static XPLMDataRef dr = nullptr;
+  if (!dr)
+    dr = XPLMFindDataRef("sim/time/total_running_time_sec");
+  return dr ? static_cast<double>(XPLMGetDataf(dr)) : 0.0;
+}
+
+static size_t last_transcript_count_ = 0;
+
+// ── Tab drawing ──────────────────────────────────────────────────
 
 static void draw_status_tab() {
   // PTT State
@@ -114,8 +133,6 @@ static void draw_status_tab() {
   }
 }
 
-static size_t last_transcript_count_ = 0;
-
 static void draw_transcript_tab() {
   if (ImGui::Button("Clear")) {
     atc_session::clear_transcript();
@@ -138,8 +155,9 @@ static void draw_transcript_tab() {
       ImGui::TextUnformatted(line);
     } else {
       const auto &cx = xplane_context::get();
-      std::string prefix =
-          cx.nearest_airport_id.empty() ? "ATC" : cx.nearest_airport_id + " ATC";
+      std::string prefix = cx.nearest_airport_id.empty()
+                               ? "ATC"
+                               : cx.nearest_airport_id + " ATC";
       std::snprintf(line, sizeof(line), "[%02d:%02d] %s: %s", mins, secs,
                     prefix.c_str(), entry.text.c_str());
       ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "%s", line);
@@ -242,108 +260,205 @@ static void draw_settings_tab() {
   }
 }
 
-static void draw_window(XPLMWindowID id, void *) {
-  if (!visible)
-    return;
+// ── XPLM window callbacks (input capture only) ──────────────────
 
+static void wnd_draw_cb(XPLMWindowID, void *) {
+  // Nothing — rendering happens in the draw phase callback
+}
+
+static int wnd_mouse_cb(XPLMWindowID wnd, int x, int y,
+                         XPLMMouseStatus status, void *) {
   int left, top, right, bottom;
-  XPLMGetWindowGeometry(id, &left, &top, &right, &bottom);
-
-  float width = static_cast<float>(right - left);
-  float height = static_cast<float>(top - bottom);
-  if (width <= 0.0f || height <= 0.0f)
-    return;
-
-  // Set up ImGui IO for this frame
+  XPLMGetWindowGeometry(wnd, &left, &top, &right, &bottom);
   ImGuiIO &io = ImGui::GetIO();
-  io.DisplaySize = ImVec2(width, height);
+  io.AddMousePosEvent(static_cast<float>(x - left),
+                      static_cast<float>(top - y));
+  if (status == xplm_MouseDown)
+    io.AddMouseButtonEvent(0, true);
+  if (status == xplm_MouseUp)
+    io.AddMouseButtonEvent(0, false);
+  return 1;
+}
 
-  float now = static_cast<float>(XPLMGetElapsedTime());
-  io.DeltaTime =
-      (last_frame_time > 0.0f) ? (now - last_frame_time) : (1.0f / 60.0f);
-  if (io.DeltaTime <= 0.0f)
-    io.DeltaTime = 1.0f / 60.0f;
-  last_frame_time = now;
+static int wnd_rclick_cb(XPLMWindowID wnd, int x, int y,
+                          XPLMMouseStatus status, void *) {
+  int left, top, right, bottom;
+  XPLMGetWindowGeometry(wnd, &left, &top, &right, &bottom);
+  ImGuiIO &io = ImGui::GetIO();
+  io.AddMousePosEvent(static_cast<float>(x - left),
+                      static_cast<float>(top - y));
+  if (status == xplm_MouseDown)
+    io.AddMouseButtonEvent(1, true);
+  if (status == xplm_MouseUp)
+    io.AddMouseButtonEvent(1, false);
+  return 1;
+}
+
+static int wnd_wheel_cb(XPLMWindowID wnd, int x, int y, int, int clicks,
+                         void *) {
+  int left, top, right, bottom;
+  XPLMGetWindowGeometry(wnd, &left, &top, &right, &bottom);
+  ImGui::GetIO().AddMousePosEvent(static_cast<float>(x - left),
+                                  static_cast<float>(top - y));
+  ImGui::GetIO().AddMouseWheelEvent(0.0f, static_cast<float>(clicks));
+  return 1;
+}
+
+static XPLMCursorStatus wnd_cursor_cb(XPLMWindowID, int, int, void *) {
+  return xplm_CursorDefault;
+}
+
+static void wnd_key_cb(XPLMWindowID, char key, XPLMKeyFlags flags, char vkey,
+                        void *, int losing_focus) {
+  if (losing_focus)
+    return;
+  ImGuiIO &io = ImGui::GetIO();
+  if (!(flags & xplm_DownFlag))
+    return;
+  if (key >= 32 && key < 127)
+    io.AddInputCharacter(static_cast<unsigned>(key));
+  if (vkey == XPLM_VK_BACK)
+    io.AddKeyEvent(ImGuiKey_Backspace, true);
+  if (vkey == XPLM_VK_DELETE)
+    io.AddKeyEvent(ImGuiKey_Delete, true);
+  if (vkey == XPLM_VK_RETURN)
+    io.AddKeyEvent(ImGuiKey_Enter, true);
+  if (vkey == XPLM_VK_ESCAPE) {
+    visible = false;
+    if (window_id)
+      XPLMSetWindowIsVisible(window_id, 0);
+  }
+}
+
+// ── Draw phase callback (ImGui rendering) ────────────────────────
+
+static int draw_phase_cb(XPLMDrawingPhase, int, void *) {
+  if (!visible)
+    return 1;
+
+  int gl, gt, gr, gb;
+  XPLMGetScreenBoundsGlobal(&gl, &gt, &gr, &gb);
+  int sw = gr - gl;
+  int sh = gt - gb;
+  if (sw <= 0 || sh <= 0)
+    return 1;
+
+  // Keep capture window sized to full screen
+  if (window_id) {
+    int wl, wt, wr, wb;
+    XPLMGetWindowGeometry(window_id, &wl, &wt, &wr, &wb);
+    if (wl != gl || wb != gb || wr != gr || wt != gt)
+      XPLMSetWindowGeometry(window_id, gl, gt, gr, gb);
+  }
 
   // Save GL state
-  GLint viewport[4];
-  glGetIntegerv(GL_VIEWPORT, viewport);
-  glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_TRANSFORM_BIT);
+  GLint prev_viewport[4];
+  glGetIntegerv(GL_VIEWPORT, prev_viewport);
+  glPushAttrib(GL_TRANSFORM_BIT | GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT |
+               GL_DEPTH_BUFFER_BIT | GL_SCISSOR_BIT | GL_TEXTURE_BIT);
+  glMatrixMode(GL_PROJECTION);
+  glPushMatrix();
+  glMatrixMode(GL_MODELVIEW);
+  glPushMatrix();
 
-  // Set GL viewport to our window area (X-Plane screen coords, origin bottom-left)
-  glViewport(left, bottom, static_cast<GLsizei>(width),
-             static_cast<GLsizei>(height));
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_LIGHTING);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+  glViewport(0, 0, sw, sh);
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  glOrtho(0, sw, sh, 0, -1, 1); // top-left origin for ImGui
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+
+  // ImGui frame setup
+  ImGuiIO &io = ImGui::GetIO();
+  double now = get_xp_time();
+  io.DeltaTime = static_cast<float>(std::max(now - last_frame_time_, 0.001));
+  last_frame_time_ = now;
+  io.DisplaySize = ImVec2(static_cast<float>(sw), static_cast<float>(sh));
 
   ImGui_ImplOpenGL2_NewFrame();
   ImGui::NewFrame();
 
-  // Position ImGui window at (0,0) within our own coordinate space
-  ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
-  ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+  // Center the ATC window
+  float win_w = 500.0f, win_h = 450.0f;
+  ImGui::SetNextWindowPos(
+      ImVec2((static_cast<float>(sw) - win_w) * 0.5f,
+             (static_cast<float>(sh) - win_h) * 0.5f),
+      ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(win_w, win_h), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(400, 300), ImVec2(1920, 1080));
 
-  ImGui::Begin("Welly's ATC", &visible,
-               ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-                   ImGuiWindowFlags_NoCollapse);
-
-  if (ImGui::BeginTabBar("MainTabs")) {
-    if (ImGui::BeginTabItem("Status")) {
-      draw_status_tab();
-      ImGui::EndTabItem();
+  bool open = visible;
+  if (ImGui::Begin("Welly's ATC##main", &open, ImGuiWindowFlags_NoCollapse)) {
+    if (ImGui::BeginTabBar("MainTabs")) {
+      if (ImGui::BeginTabItem("Status")) {
+        draw_status_tab();
+        ImGui::EndTabItem();
+      }
+      if (ImGui::BeginTabItem("Transcript")) {
+        draw_transcript_tab();
+        ImGui::EndTabItem();
+      }
+      if (ImGui::BeginTabItem("Settings")) {
+        draw_settings_tab();
+        ImGui::EndTabItem();
+      }
+      ImGui::EndTabBar();
     }
-    if (ImGui::BeginTabItem("Transcript")) {
-      draw_transcript_tab();
-      ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Settings")) {
-      draw_settings_tab();
-      ImGui::EndTabItem();
-    }
-    ImGui::EndTabBar();
   }
-
   ImGui::End();
+
+  if (!open) {
+    visible = false;
+    if (window_id)
+      XPLMSetWindowIsVisible(window_id, 0);
+  }
 
   ImGui::Render();
   ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
 
   // Restore GL state
+  glMatrixMode(GL_PROJECTION);
+  glPopMatrix();
+  glMatrixMode(GL_MODELVIEW);
+  glPopMatrix();
   glPopAttrib();
-  glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-}
+  glViewport(prev_viewport[0], prev_viewport[1], prev_viewport[2],
+             prev_viewport[3]);
 
-static int handle_mouse(XPLMWindowID, int, int, XPLMMouseStatus, void *) {
   return 1;
 }
-static XPLMCursorStatus handle_cursor(XPLMWindowID, int, int, void *) {
-  return xplm_CursorDefault;
-}
-static int handle_wheel(XPLMWindowID, int, int, int, int, void *) { return 1; }
-static void handle_key(XPLMWindowID, char, XPLMKeyFlags, char, void *, int) {}
+
+// ── Public lifecycle ─────────────────────────────────────────────
 
 void init() {
+  IMGUI_CHECKVERSION();
   ImGui::CreateContext();
+
+  ImGuiIO &io = ImGui::GetIO();
+  io.IniFilename = nullptr;
+  io.LogFilename = nullptr;
+  io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+
+  ImGui::StyleColorsDark();
+  auto &style = ImGui::GetStyle();
+  style.WindowRounding = 6.0f;
+  style.FrameRounding = 3.0f;
+  style.WindowPadding = ImVec2(8, 6);
+
   ImGui_ImplOpenGL2_Init();
+  last_frame_time_ = get_xp_time();
 
-  XPLMCreateWindow_t params{};
-  params.structSize = sizeof(params);
-  params.left = 100;
-  params.top = 550;
-  params.right = 550;
-  params.bottom = 100;
-  params.visible = 0;
-  params.drawWindowFunc = draw_window;
-  params.handleMouseClickFunc = handle_mouse;
-  params.handleCursorFunc = handle_cursor;
-  params.handleMouseWheelFunc = handle_wheel;
-  params.handleKeyFunc = handle_key;
-  params.decorateAsFloatingWindow = xplm_WindowDecorationRoundRectangle;
-  params.layer = xplm_WindowLayerFloatingWindows;
-
-  window_id = XPLMCreateWindowEx(&params);
-  XPLMSetWindowTitle(window_id, "Welly's ATC");
+  XPLMRegisterDrawCallback(draw_phase_cb, xplm_Phase_Window, 1, nullptr);
 }
 
 void stop() {
+  XPLMUnregisterDrawCallback(draw_phase_cb, xplm_Phase_Window, 1, nullptr);
+
   if (window_id) {
     XPLMDestroyWindow(window_id);
     window_id = nullptr;
@@ -356,15 +471,40 @@ void stop() {
 
 void toggle() {
   visible = !visible;
+
+  if (visible && !window_id) {
+    // Create full-screen invisible capture window
+    int gl, gt, gr, gb;
+    XPLMGetScreenBoundsGlobal(&gl, &gt, &gr, &gb);
+
+    XPLMCreateWindow_t p{};
+    p.structSize = sizeof(p);
+    p.left = gl;
+    p.bottom = gb;
+    p.right = gr;
+    p.top = gt;
+    p.visible = 1;
+    p.drawWindowFunc = wnd_draw_cb;
+    p.handleMouseClickFunc = wnd_mouse_cb;
+    p.handleKeyFunc = wnd_key_cb;
+    p.handleCursorFunc = wnd_cursor_cb;
+    p.handleMouseWheelFunc = wnd_wheel_cb;
+    p.handleRightClickFunc = wnd_rclick_cb;
+    p.refcon = nullptr;
+    p.decorateAsFloatingWindow = xplm_WindowDecorationNone;
+    p.layer = xplm_WindowLayerFloatingWindows;
+    window_id = XPLMCreateWindowEx(&p);
+  }
+
   if (window_id) {
     XPLMSetWindowIsVisible(window_id, visible ? 1 : 0);
+    if (visible)
+      XPLMBringWindowToFront(window_id);
   }
 }
 
 void draw() {
-  if (visible && window_id) {
-    draw_window(window_id, nullptr);
-  }
+  // Rendering now handled by draw_phase_cb
 }
 
 } // namespace atc_ui
