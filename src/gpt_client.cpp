@@ -101,11 +101,14 @@ void ask_async(
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
 
     CURLcode res = curl_easy_perform(curl);
 
     if (res != CURLE_OK) {
       std::string err = curl_easy_strerror(res);
+      XPLMDebugString(
+          ("[xp_wellys_atc][ERROR] GPT curl error: " + err + "\n").c_str());
       curl_slist_free_all(headers);
       curl_easy_cleanup(curl);
       enqueue_callback(
@@ -120,6 +123,10 @@ void ask_async(
     curl_easy_cleanup(curl);
 
     if (http_code != 200) {
+      XPLMDebugString(
+          ("[xp_wellys_atc][ERROR] GPT HTTP " + std::to_string(http_code) +
+           ": " + response_body + "\n")
+              .c_str());
       std::string err =
           "HTTP " + std::to_string(http_code) + ": " + response_body;
       enqueue_callback([callback, err]() { callback(err, false); });

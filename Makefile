@@ -7,7 +7,7 @@ SDK_SENTINEL   := sdk/XPLM/XPLMPlugin.h
 IMGUI_SENTINEL := vendor/imgui/imgui.h
 JSON_SENTINEL  := vendor/json.hpp
 
-.PHONY: all setup build install clean format lint
+.PHONY: all setup build install clean format lint release release-build cleanup-tags
 
 all: build
 
@@ -97,6 +97,38 @@ lint: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
 	    exit 1; }
 	cmake -B build-lint -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_OSX_ARCHITECTURES=arm64 -Wno-dev
 	clang-tidy -p build-lint --extra-arg="-isysroot" --extra-arg="$(shell xcrun --show-sdk-path)" src/*.cpp
+
+# ── Release ───────────────────────────────────────────────────────────────────
+release:
+	@if [ -z "$(VERSION)" ]; then \
+	    echo "Usage: make release VERSION=1.2.1"; exit 1; \
+	fi
+	@if ! git diff --quiet || ! git diff --cached --quiet; then \
+	    echo "Uncommitted changes present. Commit or stash first."; exit 1; \
+	fi
+	@if [ -n "$$(git ls-files --others --exclude-standard)" ]; then \
+	    echo "Untracked files present. Commit or clean up first."; exit 1; \
+	fi
+	@echo "$(VERSION)" > VERSION.txt
+	@git add VERSION.txt
+	@git commit -m "release $(VERSION)"
+	@git push origin main
+	@git tag -a "v$(VERSION)" -m "Release $(VERSION)"
+	@git push origin "v$(VERSION)"
+	@echo "Released v$(VERSION) and pushed tag to origin."
+
+release-build: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
+	@echo "=== Building xp_wellys_atc (release) ==="
+	cmake -B build -DCMAKE_BUILD_TYPE=Release -DRELEASE=ON -Wno-dev
+	cmake --build build --parallel
+	@echo ""
+	@file build/xp_wellys_atc.xpl
+	@echo "Done. Release build with version from VERSION.txt."
+
+# ── Cleanup Tags ──────────────────────────────────────────────────────────────
+cleanup-tags:
+	git fetch --prune --prune-tags origin
+	@echo "Local tags synced with remote."
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 clean:

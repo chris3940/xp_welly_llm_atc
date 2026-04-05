@@ -38,6 +38,10 @@ size_t last_wav_bytes();
 // Last parsed intent
 const intent_parser::PilotMessage &last_pilot_message();
 
+// Session stats
+int total_transcriptions();
+int total_api_calls();
+
 // Transcript access
 const std::vector<TranscriptEntry> &transcript_entries();
 void clear_transcript();

@@ -38,7 +38,11 @@ static float flight_loop_cb(float, float, int, void *) {
 }
 
 PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
+#ifdef XP_WELLYS_ATC_VERSION
+  std::snprintf(name, 256, "Welly's ATC v%s", XP_WELLYS_ATC_VERSION);
+#else
   std::snprintf(name, 256, "Welly's ATC");
+#endif
   std::snprintf(sig, 256, "ch.thWelly.wellys_atc");
   std::snprintf(desc, 256, "AI-powered ATC voice communication for VFR");
 

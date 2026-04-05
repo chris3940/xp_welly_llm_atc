@@ -92,16 +92,27 @@ void transcribe_async(
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
 
     CURLcode res = curl_easy_perform(curl);
 
     if (res != CURLE_OK) {
-      std::string err = curl_easy_strerror(res);
+      std::string err;
+      if (res == CURLE_OPERATION_TIMEDOUT) {
+        err = "[Error: transcription timed out]";
+        XPLMDebugString(
+            "[xp_wellys_atc][ERROR] Whisper API timeout (>15s)\n");
+      } else {
+        err = "Curl error: " + std::string(curl_easy_strerror(res));
+        XPLMDebugString(
+            ("[xp_wellys_atc][ERROR] Whisper curl error: " + err + "\n")
+                .c_str());
+      }
       curl_mime_free(mime);
       curl_slist_free_all(headers);
       curl_easy_cleanup(curl);
       enqueue_callback(
-          [callback, err]() { callback("Curl error: " + err, false); });
+          [callback, err]() { callback(err, false); });
       return;
     }
 
@@ -113,8 +124,11 @@ void transcribe_async(
     curl_easy_cleanup(curl);
 
     if (http_code != 200) {
-      std::string err = "HTTP " + std::to_string(http_code) + ": " +
-                        response_body;
+      std::string err = "[Error: transcription failed]";
+      XPLMDebugString(
+          ("[xp_wellys_atc][ERROR] Whisper HTTP " +
+           std::to_string(http_code) + ": " + response_body + "\n")
+              .c_str());
       enqueue_callback(
           [callback, err]() { callback(err, false); });
       return;

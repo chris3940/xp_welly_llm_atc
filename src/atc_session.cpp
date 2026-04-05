@@ -25,19 +25,32 @@ static size_t last_wav_bytes_ = 0;
 
 static std::vector<TranscriptEntry> transcript_;
 static intent_parser::PilotMessage last_pilot_message_;
+static int total_transcriptions_ = 0;
+static int total_api_calls_ = 0;
 static constexpr float kMinRecordingDuration = 0.5f;
 
 // Speak ATC response via TTS, then transition to PLAYING → IDLE
 static void speak_response(const std::string &text) {
   state_ = PTTState::PLAYING;
+  ++total_api_calls_; // TTS call
 
   tts_client::speak_async(
       text, [](std::vector<uint8_t> mp3_data, bool success) {
         if (success && !mp3_data.empty()) {
+          if (settings::debug_logging()) {
+            char dbg[128];
+            std::snprintf(
+                dbg, sizeof(dbg),
+                "[xp_wellys_atc][DEBUG] TTS response: %zu bytes MP3\n",
+                mp3_data.size());
+            XPLMDebugString(dbg);
+            XPLMDebugString("[xp_wellys_atc][DEBUG] Playback started\n");
+          }
           audio_player::play(std::move(mp3_data), settings::volume());
           // is_playing() will be polled in flight loop → when done → IDLE
         } else {
-          XPLMDebugString("[xp_wellys_atc] TTS failed, skipping playback\n");
+          XPLMDebugString(
+              "[xp_wellys_atc][ERROR] TTS failed, skipping playback\n");
           state_ = PTTState::IDLE;
         }
       });
@@ -50,6 +63,8 @@ void init() {
   last_wav_bytes_ = 0;
   transcript_.clear();
   last_pilot_message_ = {};
+  total_transcriptions_ = 0;
+  total_api_calls_ = 0;
 }
 
 void stop() { state_ = PTTState::IDLE; }
@@ -70,10 +85,18 @@ void on_ptt_pressed() {
     return;
   }
 
+  // API key required
+  if (settings::get_api_key().empty()) {
+    XPLMDebugString(
+        "[xp_wellys_atc][ERROR] PTT blocked — no API key configured\n");
+    return;
+  }
+
   state_ = PTTState::RECORDING;
   audio_player::play_ptt_click();
   audio_recorder::start_recording();
-  XPLMDebugString("[xp_wellys_atc] PTT pressed — recording started\n");
+  if (settings::debug_logging())
+    XPLMDebugString("[xp_wellys_atc][DEBUG] PTT pressed\n");
 }
 
 void on_ptt_released() {
@@ -99,12 +122,18 @@ void on_ptt_released() {
   auto wav = audio_recorder::encode_wav();
   last_wav_bytes_ = wav.size();
 
-  char buf[256];
-  std::snprintf(buf, sizeof(buf),
-                "[xp_wellys_atc] PTT released — duration=%.2fs, samples=%zu, "
-                "wav=%zu bytes\n",
-                last_duration_, last_samples_, last_wav_bytes_);
-  XPLMDebugString(buf);
+  if (settings::debug_logging()) {
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  "[xp_wellys_atc][DEBUG] Recording stopped: %.1fs, %zu "
+                  "samples\n",
+                  last_duration_, last_samples_);
+    XPLMDebugString(buf);
+    std::snprintf(buf, sizeof(buf),
+                  "[xp_wellys_atc][DEBUG] WAV encoded: %zu bytes\n",
+                  last_wav_bytes_);
+    XPLMDebugString(buf);
+  }
 
   state_ = PTTState::PROCESSING;
 
@@ -112,13 +141,27 @@ void on_ptt_released() {
       std::move(wav), [](const std::string &transcript, bool success) {
         if (!success) {
           XPLMDebugString(
-              ("[xp_wellys_atc] Whisper error: " + transcript + "\n").c_str());
+              ("[xp_wellys_atc][ERROR] Whisper error: " + transcript + "\n")
+                  .c_str());
+          // Show error in transcript
+          transcript_.push_back(TranscriptEntry{
+              static_cast<double>(XPLMGetElapsedTime()),
+              false,
+              transcript,
+              "",
+          });
           state_ = PTTState::IDLE;
           return;
         }
 
-        XPLMDebugString(
-            ("[xp_wellys_atc] Transcript: " + transcript + "\n").c_str());
+        ++total_transcriptions_;
+        ++total_api_calls_;
+
+        if (settings::debug_logging())
+          XPLMDebugString(
+              ("[xp_wellys_atc][DEBUG] Whisper response: \"" + transcript +
+               "\"\n")
+                  .c_str());
 
         const auto &ctx = xplane_context::get();
         float active_freq =
@@ -137,15 +180,19 @@ void on_ptt_released() {
         // Parse intent
         last_pilot_message_ = intent_parser::parse(transcript, ctx);
 
-        char log[512];
-        std::snprintf(
-            log, sizeof(log),
-            "[xp_wellys_atc] Intent: %s (%.2f) callsign=\"%s\" runway=\"%s\"\n",
-            intent_parser::intent_name(last_pilot_message_.intent),
-            last_pilot_message_.confidence,
-            last_pilot_message_.callsign.c_str(),
-            last_pilot_message_.runway.c_str());
-        XPLMDebugString(log);
+        if (settings::debug_logging()) {
+          char log[512];
+          std::snprintf(
+              log, sizeof(log),
+              "[xp_wellys_atc][DEBUG] Intent: %s (confidence=%.2f), "
+              "callsign=%s\n",
+              intent_parser::intent_name(last_pilot_message_.intent),
+              last_pilot_message_.confidence,
+              last_pilot_message_.callsign.empty()
+                  ? "(none)"
+                  : last_pilot_message_.callsign.c_str());
+          XPLMDebugString(log);
+        }
 
         // Process through ATC state machine
         auto atc_resp =
@@ -176,6 +223,7 @@ void on_ptt_released() {
             speak_response(fallback);
           } else {
             // GPT fallback — stays in PROCESSING until callback
+            ++total_api_calls_; // GPT call
             XPLMDebugString(
                 "[xp_wellys_atc] Routing to GPT fallback\n");
 
@@ -206,8 +254,11 @@ void on_ptt_released() {
           }
         } else {
           // Valid state machine response
-          XPLMDebugString(
-              ("[xp_wellys_atc] ATC: " + atc_resp.text + "\n").c_str());
+          if (settings::debug_logging())
+            XPLMDebugString(
+                ("[xp_wellys_atc][DEBUG] ATC response text: " +
+                 atc_resp.text + "\n")
+                    .c_str());
 
           transcript_.push_back(TranscriptEntry{
               static_cast<double>(XPLMGetElapsedTime()),
@@ -222,7 +273,9 @@ void on_ptt_released() {
 
 void update() {
   if (state_ == PTTState::PLAYING && !audio_player::is_playing()) {
-    XPLMDebugString("[xp_wellys_atc] Playback finished, returning to IDLE\n");
+    if (settings::debug_logging())
+      XPLMDebugString(
+          "[xp_wellys_atc][DEBUG] Playback finished, state -> IDLE\n");
     state_ = PTTState::IDLE;
   }
 }
@@ -256,5 +309,8 @@ const std::vector<TranscriptEntry> &transcript_entries() {
 }
 
 void clear_transcript() { transcript_.clear(); }
+
+int total_transcriptions() { return total_transcriptions_; }
+int total_api_calls() { return total_api_calls_; }
 
 } // namespace atc_session

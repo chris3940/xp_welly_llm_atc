@@ -4,6 +4,10 @@ project(xp_wellys_atc CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ── Version from VERSION.txt ────────────────────────────────────────────────
+file(READ "${CMAKE_SOURCE_DIR}/VERSION.txt" VERSION_STRING)
+string(STRIP "${VERSION_STRING}" VERSION_STRING)
+
 if(APPLE)
     if(NOT CMAKE_OSX_ARCHITECTURES)
         set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
@@ -63,6 +67,7 @@ if(APPLE)
     target_compile_definitions(xp_wellys_atc PRIVATE
         APL=1 IBM=0 LIN=0
         XPLM200=1 XPLM210=1 XPLM300=1 XPLM301=1
+        XP_WELLYS_ATC_VERSION="${VERSION_STRING}"
     )
 
     # Suppress OpenGL deprecation warnings in our code only (ImGui defines its own)

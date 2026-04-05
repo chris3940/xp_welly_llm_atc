@@ -1,6 +1,6 @@
 # Project Status — xp_wellys_atc
 
-Letzte Aktualisierung: 2026-04-05 (M7)
+Letzte Aktualisierung: 2026-04-05 (M8)
 
 ## Milestone-Ubersicht
 
@@ -13,7 +13,7 @@ Letzte Aktualisierung: 2026-04-05 (M7)
 | M5 | ATC State Machine + GPT Fallback + Full Text Pipeline | Done |
 | M6 | TTS + Audio Playback — OpenAI TTS + Core Audio MP3 | Done |
 | M7 | Joystick PTT + Settings Persistence | Done |
-| M8 | Polish — final testing, edge cases, cleanup | Offen |
+| M8 | Polish — frequency awareness, CTAF, error handling, debug logging, UI | Done |
 
 ## M5 — Was wurde gemacht
 
@@ -123,7 +123,43 @@ Letzte Aktualisierung: 2026-04-05 (M7)
 - `settings.hpp/.cpp`: `set_ptt_key_vk()` und `set_ptt_joystick_button()` Setter hinzugefuegt
 - `main.cpp`: `ptt_input::update()` im Flight Loop
 
-## Naechster Schritt
+## M8 — Was wurde gemacht
 
-- M7 in X-Plane testen (Key Binding + Joystick Binding + Persistence)
-- M8 (Polish) beginnen
+- **Frequency Awareness:**
+  - `FrequencyType` Enum (8 Types: UNKNOWN, DELIVERY, GROUND, TOWER, APPROACH, UNICOM, CTAF, ATIS)
+  - Heuristische Ableitung aus aktiver COM-Frequenz in `xplane_context::update()`
+  - Frequenz-Typ Anzeige im Status-Tab ("COM1: 119.100 MHz (Tower)")
+  - State Machine validiert Frequenz-Kontext (Ground-Freq → nur Ground-States, Tower-Freq → nur Tower-States)
+
+- **CTAF/Unicom Flow:**
+  - Non-towered Airports + UNICOM/CTAF-Frequenz → immer Unicom-Flow
+  - Traffic-Awareness Response mit Position-Extraktion (downwind/base/final/etc.)
+  - Sofort zurueck zu IDLE nach Acknowledgement (kein State-Progression)
+
+- **Error Handling:**
+  - API Key Check bei PTT Press (blockiert ohne Key, Warning im Status-Tab)
+  - Whisper: 15s Timeout, HTTP-Fehler → `[Error: transcription failed]` im Transcript
+  - GPT: 15s Timeout, Fehler → "Say again" Fallback
+  - TTS: 15s Timeout, Fehler → Text bleibt im Transcript, kein Audio
+  - Alle Fehler geloggt mit `[xp_wellys_atc][ERROR]` Prefix
+
+- **Debug Logging:**
+  - Alle Debug-Ausgaben hinter `settings::debug_logging()` Guard
+  - Strukturiertes PTT-Cycle Logging: PTT pressed → Recording stopped → WAV encoded → Whisper response → Intent → ATC response → TTS response → Playback started/finished
+
+- **UI Polish:**
+  - Version String im Window-Titel: "Welly's ATC v1.0.0"
+  - Version String im Plugin-Name (X-Plane Plugin Manager)
+  - About-Section im Settings-Tab (Version, Beschreibung, GitHub-Link)
+  - Frequenz neben jedem Transcript-Eintrag
+  - Session-Stats im Status-Tab (Transcriptions, API Calls)
+  - Warning-Anzeige wenn API Key fehlt
+
+- **Version + Release:**
+  - `VERSION.txt` (1.0.0)
+  - CMakeLists.txt liest VERSION.txt → `XP_WELLYS_ATC_VERSION` Compile-Time Define
+
+## Status
+
+Plugin ist komplett und bereit fuer den persoenlichen Einsatz.
+Future Work: GitHub Actions CI, Windows Build, Public Release.

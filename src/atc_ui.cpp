@@ -107,7 +107,8 @@ static void draw_status_tab() {
 
   float active_freq =
       (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
-  ImGui::Text("COM%d: %.3f MHz", ctx.active_com, active_freq);
+  ImGui::Text("COM%d: %.3f MHz (%s)", ctx.active_com, active_freq,
+              xplane_context::frequency_type_name(ctx.frequency_type));
 
   ImGui::Separator();
   ImGui::Text("Position: %.4f, %.4f", ctx.latitude, ctx.longitude);
@@ -137,6 +138,18 @@ static void draw_status_tab() {
   } else {
     ImGui::TextDisabled("(no transcript yet)");
   }
+
+  // Session stats
+  ImGui::Separator();
+  ImGui::Text("Session: %d transcriptions, %d API calls",
+              atc_session::total_transcriptions(),
+              atc_session::total_api_calls());
+
+  // Warning indicators
+  if (!settings::api_key_saved()) {
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.0f, 1.0f),
+                       "\xe2\x9a\xa0 API key not set");
+  }
 }
 
 static void draw_transcript_tab() {
@@ -155,17 +168,19 @@ static void draw_transcript_tab() {
     int mins = static_cast<int>(entry.sim_time) / 60;
     int secs = static_cast<int>(entry.sim_time) % 60;
     char line[512];
+    std::string freq_tag =
+        entry.frequency.empty() ? "" : " " + entry.frequency;
     if (entry.is_pilot) {
-      std::snprintf(line, sizeof(line), "[%02d:%02d] You: %s", mins, secs,
-                    entry.text.c_str());
+      std::snprintf(line, sizeof(line), "[%02d:%02d%s] You: %s", mins, secs,
+                    freq_tag.c_str(), entry.text.c_str());
       ImGui::TextUnformatted(line);
     } else {
       const auto &cx = xplane_context::get();
       std::string prefix = cx.nearest_airport_id.empty()
                                ? "ATC"
                                : cx.nearest_airport_id + " ATC";
-      std::snprintf(line, sizeof(line), "[%02d:%02d] %s: %s", mins, secs,
-                    prefix.c_str(), entry.text.c_str());
+      std::snprintf(line, sizeof(line), "[%02d:%02d%s] %s: %s", mins, secs,
+                    freq_tag.c_str(), prefix.c_str(), entry.text.c_str());
       ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "%s", line);
     }
   }
@@ -440,6 +455,18 @@ static void draw_settings_tab() {
   if (ImGui::Button("Save Settings")) {
     settings::save();
   }
+
+  // About section
+  ImGui::Separator();
+  ImGui::Spacing();
+  ImGui::TextDisabled("About");
+#ifdef XP_WELLYS_ATC_VERSION
+  ImGui::Text("Welly's ATC v%s", XP_WELLYS_ATC_VERSION);
+#else
+  ImGui::Text("Welly's ATC (dev build)");
+#endif
+  ImGui::Text("AI-powered ATC for X-Plane 12 VFR");
+  ImGui::TextDisabled("github.com/rwellinger/xp_welly_atc");
 }
 
 // ── XPLM window callbacks (input capture only) ──────────────────
@@ -609,7 +636,14 @@ static int draw_phase_cb(XPLMDrawingPhase, int, void *) {
   ImGui::SetNextWindowSizeConstraints(ImVec2(400, 300), ImVec2(1920, 1080));
 
   bool open = visible;
-  if (ImGui::Begin("Welly's ATC##main", &open, ImGuiWindowFlags_NoCollapse)) {
+#ifdef XP_WELLYS_ATC_VERSION
+  static const std::string window_title =
+      std::string("Welly's ATC v") + XP_WELLYS_ATC_VERSION + "##main";
+#else
+  static const std::string window_title = "Welly's ATC##main";
+#endif
+  if (ImGui::Begin(window_title.c_str(), &open,
+                   ImGuiWindowFlags_NoCollapse)) {
     if (ImGui::BeginTabBar("MainTabs")) {
       if (ImGui::BeginTabItem("Status")) {
         draw_status_tab();

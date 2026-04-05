@@ -5,6 +5,19 @@
 
 namespace xplane_context {
 
+enum class FrequencyType {
+  UNKNOWN,
+  DELIVERY,
+  GROUND,
+  TOWER,
+  APPROACH,
+  UNICOM,
+  CTAF,
+  ATIS,
+};
+
+const char *frequency_type_name(FrequencyType ft);
+
 struct XPlaneContext {
   double latitude = 0.0;
   double longitude = 0.0;
@@ -21,6 +34,7 @@ struct XPlaneContext {
   std::string aircraft_icao;
   std::string nearest_airport_id;
   bool is_towered_airport = false;
+  FrequencyType frequency_type = FrequencyType::UNKNOWN;
   bool avionics_on = false;
   float qnh_inhg = 29.92f;
   float wind_direction_deg = 0.0f;

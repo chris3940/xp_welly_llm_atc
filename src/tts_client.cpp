@@ -83,13 +83,14 @@ void speak_async(
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_binary_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &mp3_data);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
 
     CURLcode res = curl_easy_perform(curl);
 
     if (res != CURLE_OK) {
       std::string err = curl_easy_strerror(res);
       XPLMDebugString(
-          ("[xp_wellys_atc] TTS curl error: " + err + "\n").c_str());
+          ("[xp_wellys_atc][ERROR] TTS curl error: " + err + "\n").c_str());
       curl_slist_free_all(headers);
       curl_easy_cleanup(curl);
       enqueue_callback([callback]() { callback({}, false); });
@@ -105,7 +106,7 @@ void speak_async(
     if (http_code != 200) {
       // Response body is error JSON, not MP3
       std::string err_body(mp3_data.begin(), mp3_data.end());
-      XPLMDebugString(("[xp_wellys_atc] TTS HTTP " +
+      XPLMDebugString(("[xp_wellys_atc][ERROR] TTS HTTP " +
                         std::to_string(http_code) + ": " + err_body + "\n")
                            .c_str());
       enqueue_callback([callback]() { callback({}, false); });

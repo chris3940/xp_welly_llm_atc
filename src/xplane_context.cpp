@@ -130,6 +130,55 @@ static void build_towered_cache() {
   XPLMDebugString(log);
 }
 
+const char *frequency_type_name(FrequencyType ft) {
+  switch (ft) {
+  case FrequencyType::UNKNOWN:
+    return "Unknown";
+  case FrequencyType::DELIVERY:
+    return "Delivery";
+  case FrequencyType::GROUND:
+    return "Ground";
+  case FrequencyType::TOWER:
+    return "Tower";
+  case FrequencyType::APPROACH:
+    return "Approach";
+  case FrequencyType::UNICOM:
+    return "Unicom";
+  case FrequencyType::CTAF:
+    return "CTAF";
+  case FrequencyType::ATIS:
+    return "ATIS";
+  }
+  return "Unknown";
+}
+
+static FrequencyType derive_frequency_type(float freq_mhz, bool is_towered) {
+  // Common Unicom/CTAF frequencies
+  if ((freq_mhz >= 122.775f && freq_mhz <= 122.825f) || // 122.8
+      (freq_mhz >= 122.975f && freq_mhz <= 123.025f) || // 123.0
+      (freq_mhz >= 122.700f && freq_mhz <= 122.750f) || // 122.725
+      (freq_mhz >= 122.900f && freq_mhz <= 122.950f)) { // 122.925
+    return is_towered ? FrequencyType::CTAF : FrequencyType::UNICOM;
+  }
+  // Ground frequencies: 121.6–121.9
+  if (freq_mhz >= 121.600f && freq_mhz <= 121.975f) {
+    return FrequencyType::GROUND;
+  }
+  // Delivery: 121.0–121.5 range
+  if (freq_mhz >= 121.000f && freq_mhz <= 121.575f) {
+    return FrequencyType::DELIVERY;
+  }
+  // ATIS: 127.0–128.0
+  if (freq_mhz >= 127.000f && freq_mhz <= 128.000f) {
+    return FrequencyType::ATIS;
+  }
+  // Tower/Approach: general aviation band
+  if (freq_mhz >= 118.000f && freq_mhz <= 136.975f) {
+    return is_towered ? FrequencyType::TOWER : FrequencyType::APPROACH;
+  }
+  return FrequencyType::UNKNOWN;
+}
+
 void init() {
   dr_latitude = XPLMFindDataRef("sim/flightmodel/position/latitude");
   dr_longitude = XPLMFindDataRef("sim/flightmodel/position/longitude");
@@ -213,6 +262,14 @@ void update() {
     ctx.wind_direction_deg = XPLMGetDataf(dr_wind_direction);
   if (dr_wind_speed)
     ctx.wind_speed_kt = XPLMGetDataf(dr_wind_speed);
+
+  // Derive frequency type from active COM
+  {
+    float active_freq =
+        (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
+    ctx.frequency_type =
+        derive_frequency_type(active_freq, ctx.is_towered_airport);
+  }
 
   // Nearest airport lookup — throttled to every 60 frames (~1s)
   if (++frame_counter % 60 == 0) {

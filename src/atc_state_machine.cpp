@@ -90,19 +90,66 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
   std::string wind = format_wind(ctx.wind_direction_deg, ctx.wind_speed_kt);
   std::string apt = airport_name(ctx);
 
-  // Non-towered: SELF_ANNOUNCE handling
-  if (msg.intent == Intent::SELF_ANNOUNCE && !ctx.is_towered_airport) {
-    resp.text = "Traffic in the area, " + cs + " is " +
-                (ctx.on_ground ? "on the ground" : "in the pattern") + ".";
-    resp.next_state = ATCState::UNICOM_ACTIVE;
-    state_ = resp.next_state;
+  using FT = xplane_context::FrequencyType;
+
+  // Non-towered airport OR Unicom/CTAF frequency: force UNICOM flow
+  bool unicom_flow = !ctx.is_towered_airport ||
+                     ctx.frequency_type == FT::UNICOM ||
+                     ctx.frequency_type == FT::CTAF;
+
+  if (unicom_flow) {
+    // Traffic awareness only — no clearances
+    std::string position;
+    if (ctx.on_ground) {
+      position = "on the ground at " + apt;
+    } else {
+      // Try to extract position from transcript
+      std::string lower = msg.raw_transcript;
+      for (auto &c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      if (lower.find("downwind") != std::string::npos)
+        position = "downwind runway " + rwy;
+      else if (lower.find("base") != std::string::npos)
+        position = "base runway " + rwy;
+      else if (lower.find("final") != std::string::npos)
+        position = "final runway " + rwy;
+      else if (lower.find("crosswind") != std::string::npos)
+        position = "crosswind runway " + rwy;
+      else if (lower.find("upwind") != std::string::npos)
+        position = "upwind runway " + rwy;
+      else
+        position = "in the pattern at " + apt;
+    }
+
+    resp.text =
+        "Traffic in the area, " + cs + " reported " + position + ".";
+    resp.next_state = ATCState::IDLE; // immediately back to IDLE
+    state_ = ATCState::IDLE;
 
     char log[256];
     std::snprintf(log, sizeof(log),
-                  "[xp_wellys_atc] ATC state: %s -> UNICOM_ACTIVE\n",
-                  state_name(state_));
+                  "[xp_wellys_atc] ATC state: UNICOM_ACTIVE -> IDLE "
+                  "(non-towered/CTAF)\n");
     XPLMDebugString(log);
     return resp;
+  }
+
+  // Frequency-based state validation at towered airports
+  if (ctx.frequency_type == FT::GROUND &&
+      state_ != ATCState::IDLE &&
+      state_ != ATCState::GROUND_CONTACT &&
+      state_ != ATCState::TAXI_CLEARED) {
+    // On ground frequency but in tower state — reset
+    state_ = ATCState::IDLE;
+  }
+  if (ctx.frequency_type == FT::TOWER &&
+      state_ != ATCState::IDLE &&
+      state_ != ATCState::TOWER_CONTACT &&
+      state_ != ATCState::DEPARTURE_CLEARED &&
+      state_ != ATCState::PATTERN_ENTRY &&
+      state_ != ATCState::LANDING_CLEARED) {
+    // On tower frequency but in ground state — skip to tower
+    state_ = ATCState::IDLE;
   }
 
   switch (state_) {
@@ -209,15 +256,9 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
   }
 
   case ATCState::UNICOM_ACTIVE: {
-    // Any further self-announce or just reset to idle
-    if (msg.intent == Intent::SELF_ANNOUNCE) {
-      resp.text = "Traffic in the area, " + cs + " is " +
-                  (ctx.on_ground ? "on the ground" : "in the pattern") + ".";
-      resp.next_state = ATCState::UNICOM_ACTIVE;
-    } else {
-      // Transition back to IDLE on any other intent
-      resp.next_state = ATCState::IDLE;
-    }
+    // Should not reach here — handled by unicom_flow above
+    resp.next_state = ATCState::IDLE;
+    state_ = ATCState::IDLE;
     break;
   }
   }
