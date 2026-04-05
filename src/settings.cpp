@@ -32,11 +32,16 @@ static json default_config() {
           {"whisper_model", "whisper-1"},
           {"gpt_model", "gpt-4o-mini"},
           {"gpt_fallback_enabled", true},
-          {"pilot_callsign", "November One Two Three Alpha Bravo"},
+          {"pilot_callsign_raw", ""},
+          {"pilot_callsign", ""},
           {"active_com", 1},
           {"volume", 1.0},
           {"debug_logging", false},
-          {"audio_output_device", ""}};
+          {"audio_output_device", ""},
+          {"window_x", -1.0},
+          {"window_y", -1.0},
+          {"window_w", -1.0},
+          {"window_h", -1.0}};
 }
 
 void init() {
@@ -209,9 +214,11 @@ std::string gpt_model() {
   return cfg.value("gpt_model", std::string("gpt-4o-mini"));
 }
 bool gpt_fallback_enabled() { return cfg.value("gpt_fallback_enabled", true); }
+std::string pilot_callsign_raw() {
+  return cfg.value("pilot_callsign_raw", std::string(""));
+}
 std::string pilot_callsign() {
-  return cfg.value("pilot_callsign",
-                   std::string("November One Two Three Alpha Bravo"));
+  return cfg.value("pilot_callsign", std::string(""));
 }
 int active_com() { return cfg.value("active_com", 1); }
 float volume() { return cfg.value("volume", 1.0f); }
@@ -223,13 +230,76 @@ std::string audio_output_device() {
 // --- Setters ---
 
 void set_tts_voice(const std::string &v) { cfg["tts_voice"] = v; }
-void set_pilot_callsign(const std::string &cs) { cfg["pilot_callsign"] = cs; }
+// ── ICAO phonetic alphabet conversion ───────────────────────────
+
+static const char *phonetic_letter(char c) {
+  static const char *letters[] = {
+      "Alpha",   "Bravo",   "Charlie", "Delta",   "Echo",    "Foxtrot",
+      "Golf",    "Hotel",   "India",   "Juliet",  "Kilo",    "Lima",
+      "Mike",    "November","Oscar",   "Papa",    "Quebec",  "Romeo",
+      "Sierra",  "Tango",   "Uniform", "Victor",  "Whiskey", "X-Ray",
+      "Yankee",  "Zulu"};
+  if (c >= 'A' && c <= 'Z')
+    return letters[c - 'A'];
+  if (c >= 'a' && c <= 'z')
+    return letters[c - 'a'];
+  return nullptr;
+}
+
+static const char *phonetic_digit(char c) {
+  static const char *digits[] = {"Zero", "One", "Two",   "Three", "Four",
+                                 "Five", "Six", "Seven", "Eight", "Niner"};
+  if (c >= '0' && c <= '9')
+    return digits[c - '0'];
+  return nullptr;
+}
+
+std::string to_icao_phonetic(const std::string &raw) {
+  std::string result;
+  for (char c : raw) {
+    const char *word = phonetic_letter(c);
+    if (!word)
+      word = phonetic_digit(c);
+    if (word) {
+      if (!result.empty())
+        result += ' ';
+      result += word;
+    }
+    // Skip dashes, spaces, and other non-alphanumeric chars
+  }
+  return result;
+}
+
+void set_pilot_callsign_raw(const std::string &raw) {
+  cfg["pilot_callsign_raw"] = raw;
+  cfg["pilot_callsign"] = to_icao_phonetic(raw);
+}
 void set_volume(float v) { cfg["volume"] = v; }
 void set_gpt_fallback_enabled(bool v) { cfg["gpt_fallback_enabled"] = v; }
 void set_debug_logging(bool v) { cfg["debug_logging"] = v; }
 void set_active_com(int com) { cfg["active_com"] = com; }
 void set_audio_output_device(const std::string &uid) {
   cfg["audio_output_device"] = uid;
+}
+void set_ptt_key_vk(int vk) { cfg["ptt_key_vk"] = vk; }
+void set_ptt_joystick_button(int btn) { cfg["ptt_joystick_button"] = btn; }
+
+float window_x() { return cfg.value("window_x", -1.0f); }
+float window_y() { return cfg.value("window_y", -1.0f); }
+float window_w() { return cfg.value("window_w", -1.0f); }
+float window_h() { return cfg.value("window_h", -1.0f); }
+void set_window_geometry(float x, float y, float w, float h) {
+  cfg["window_x"] = x;
+  cfg["window_y"] = y;
+  cfg["window_w"] = w;
+  cfg["window_h"] = h;
+}
+void reset_window_geometry() {
+  cfg["window_x"] = -1.0;
+  cfg["window_y"] = -1.0;
+  cfg["window_w"] = -1.0;
+  cfg["window_h"] = -1.0;
+  save();
 }
 
 } // namespace settings

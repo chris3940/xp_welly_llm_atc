@@ -24,6 +24,9 @@ void stop();
 void on_ptt_pressed();
 void on_ptt_released();
 
+// Called every flight loop frame — checks playback completion
+void update();
+
 PTTState ptt_state();
 std::string ptt_state_label();
 

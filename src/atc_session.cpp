@@ -5,6 +5,7 @@
 #include "gpt_client.hpp"
 #include "intent_parser.hpp"
 #include "settings.hpp"
+#include "tts_client.hpp"
 #include "whisper_client.hpp"
 #include "xplane_context.hpp"
 
@@ -25,6 +26,22 @@ static size_t last_wav_bytes_ = 0;
 static std::vector<TranscriptEntry> transcript_;
 static intent_parser::PilotMessage last_pilot_message_;
 static constexpr float kMinRecordingDuration = 0.5f;
+
+// Speak ATC response via TTS, then transition to PLAYING → IDLE
+static void speak_response(const std::string &text) {
+  state_ = PTTState::PLAYING;
+
+  tts_client::speak_async(
+      text, [](std::vector<uint8_t> mp3_data, bool success) {
+        if (success && !mp3_data.empty()) {
+          audio_player::play(std::move(mp3_data), settings::volume());
+          // is_playing() will be polled in flight loop → when done → IDLE
+        } else {
+          XPLMDebugString("[xp_wellys_atc] TTS failed, skipping playback\n");
+          state_ = PTTState::IDLE;
+        }
+      });
+}
 
 void init() {
   state_ = PTTState::IDLE;
@@ -156,7 +173,7 @@ void on_ptt_released() {
                 fallback,
                 freq_str,
             });
-            state_ = PTTState::IDLE;
+            speak_response(fallback);
           } else {
             // GPT fallback — stays in PROCESSING until callback
             XPLMDebugString(
@@ -184,7 +201,7 @@ void on_ptt_released() {
                       response,
                       freq_copy,
                   });
-                  state_ = PTTState::IDLE;
+                  speak_response(response);
                 });
           }
         } else {
@@ -198,9 +215,16 @@ void on_ptt_released() {
               atc_resp.text,
               freq_str,
           });
-          state_ = PTTState::IDLE;
+          speak_response(atc_resp.text);
         }
       });
+}
+
+void update() {
+  if (state_ == PTTState::PLAYING && !audio_player::is_playing()) {
+    XPLMDebugString("[xp_wellys_atc] Playback finished, returning to IDLE\n");
+    state_ = PTTState::IDLE;
+  }
 }
 
 PTTState ptt_state() { return state_; }
@@ -208,13 +232,13 @@ PTTState ptt_state() { return state_; }
 std::string ptt_state_label() {
   switch (state_) {
   case PTTState::IDLE:
-    return "IDLE";
+    return "Ready";
   case PTTState::RECORDING:
     return "\xE2\x97\x8F REC"; // ● REC
   case PTTState::PROCESSING:
-    return "\xE2\x9F\xB3 PROCESSING"; // ⟳ PROCESSING
+    return "\xE2\x9F\xB3 Processing..."; // ⟳ Processing...
   case PTTState::PLAYING:
-    return "\xE2\x96\xB6 PLAYING"; // ▶ PLAYING
+    return "\xE2\x96\xB6 ATC speaking..."; // ▶ ATC speaking...
   }
   return "UNKNOWN";
 }

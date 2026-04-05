@@ -3,6 +3,7 @@
 #include "atc_state_machine.hpp"
 #include "audio_player.hpp"
 #include "intent_parser.hpp"
+#include "ptt_input.hpp"
 #include "settings.hpp"
 #include "xplane_context.hpp"
 
@@ -35,7 +36,7 @@ static bool visible = false;
 
 // ImGui persistent buffers
 static char api_key_buf[256] = {};
-static char callsign_buf[256] = {};
+static char callsign_raw_buf[64] = {};
 static float save_feedback_timer = 0.0f;
 static bool key_just_saved = false;
 static bool buffers_initialized = false;
@@ -55,6 +56,9 @@ static double get_xp_time() {
 }
 
 static size_t last_transcript_count_ = 0;
+static bool window_pos_reset_pending_ = false;
+static float geometry_save_timer_ = 0.0f;
+static constexpr float kGeometrySaveDelay = 0.5f; // save 0.5s after last change
 
 // ── Tab drawing ──────────────────────────────────────────────────
 
@@ -175,11 +179,138 @@ static void draw_transcript_tab() {
   ImGui::EndChild();
 }
 
+static const char *vk_name(int vk) {
+  // Common XPLM virtual key codes
+  switch (vk) {
+  case 0x08: return "Backspace";
+  case 0x09: return "Tab";
+  case 0x0D: return "Enter";
+  case 0x1B: return "Escape";
+  case 0x20: return "Space";
+  case 0x25: return "Left";
+  case 0x26: return "Up";
+  case 0x27: return "Right";
+  case 0x28: return "Down";
+  case 0x2E: return "Delete";
+  default: break;
+  }
+  // 0-9
+  if (vk >= 0x30 && vk <= 0x39) {
+    static char num[2];
+    num[0] = static_cast<char>(vk);
+    num[1] = '\0';
+    return num;
+  }
+  // A-Z
+  if (vk >= 0x41 && vk <= 0x5A) {
+    static char letter[2];
+    letter[0] = static_cast<char>(vk);
+    letter[1] = '\0';
+    return letter;
+  }
+  // F1-F12
+  if (vk >= 0x70 && vk <= 0x7B) {
+    static char fkey[4];
+    std::snprintf(fkey, sizeof(fkey), "F%d", vk - 0x70 + 1);
+    return fkey;
+  }
+  static char hex[16];
+  std::snprintf(hex, sizeof(hex), "VK 0x%02X", vk);
+  return hex;
+}
+
+static constexpr float kCaptureTimeout = 10.0f;
+
+static void draw_ptt_binding() {
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Push-to-Talk Binding");
+  ImGui::TextDisabled("(X-Plane command: xp_wellys_atc/ptt also works)");
+  ImGui::Spacing();
+
+  auto mode = ptt_input::capture_mode();
+
+  // Check for capture result
+  if (mode != ptt_input::CaptureMode::NONE) {
+    int result = ptt_input::poll_capture_result();
+    if (result >= 0) {
+      if (mode == ptt_input::CaptureMode::KEYBOARD) {
+        settings::set_ptt_key_vk(result);
+        settings::save();
+      } else {
+        settings::set_ptt_joystick_button(result);
+        settings::save();
+      }
+      mode = ptt_input::CaptureMode::NONE; // capture done
+    }
+  }
+
+  // ── Keyboard binding ──
+  int vk = settings::ptt_key_vk();
+  if (vk >= 0) {
+    ImGui::Text("Keyboard: %s", vk_name(vk));
+  } else {
+    ImGui::TextDisabled("Keyboard: (not bound)");
+  }
+  ImGui::SameLine();
+  if (mode == ptt_input::CaptureMode::KEYBOARD) {
+    float elapsed = ptt_input::capture_elapsed();
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f),
+                       "Press any key... (%.0fs)",
+                       kCaptureTimeout - elapsed);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Cancel##key")) {
+      ptt_input::cancel_capture();
+    }
+  } else {
+    if (ImGui::SmallButton("Bind key")) {
+      ptt_input::start_capture(ptt_input::CaptureMode::KEYBOARD);
+    }
+    if (vk >= 0) {
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Clear##key")) {
+        settings::set_ptt_key_vk(-1);
+        settings::save();
+      }
+    }
+  }
+
+  // ── Joystick button binding ──
+  int btn = settings::ptt_joystick_button();
+  if (btn >= 0) {
+    ImGui::Text("Joystick: Button %d", btn);
+  } else {
+    ImGui::TextDisabled("Joystick: (not bound)");
+  }
+  ImGui::SameLine();
+  if (mode == ptt_input::CaptureMode::JOYSTICK) {
+    float elapsed = ptt_input::capture_elapsed();
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f),
+                       "Press any button... (%.0fs)",
+                       kCaptureTimeout - elapsed);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Cancel##btn")) {
+      ptt_input::cancel_capture();
+    }
+  } else {
+    if (ImGui::SmallButton("Bind button")) {
+      ptt_input::start_capture(ptt_input::CaptureMode::JOYSTICK);
+    }
+    if (btn >= 0) {
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Clear##btn")) {
+        settings::set_ptt_joystick_button(-1);
+        settings::save();
+      }
+    }
+  }
+
+  ImGui::Separator();
+}
+
 static void draw_settings_tab() {
   // One-time init of buffers from settings
   if (!buffers_initialized) {
-    std::strncpy(callsign_buf, settings::pilot_callsign().c_str(),
-                 sizeof(callsign_buf) - 1);
+    std::strncpy(callsign_raw_buf, settings::pilot_callsign_raw().c_str(),
+                 sizeof(callsign_raw_buf) - 1);
     std::string voice = settings::tts_voice();
     for (int i = 0; i < voice_count; ++i) {
       if (voice == voice_names[i]) {
@@ -235,8 +366,21 @@ static void draw_settings_tab() {
 
   ImGui::Separator();
 
-  // Pilot callsign
-  ImGui::InputText("Pilot Callsign", callsign_buf, sizeof(callsign_buf));
+  // PTT Binding
+  draw_ptt_binding();
+
+  // Pilot callsign — raw registration input + phonetic preview
+  if (ImGui::InputText("Callsign (Registration)", callsign_raw_buf,
+                        sizeof(callsign_raw_buf))) {
+    settings::set_pilot_callsign_raw(callsign_raw_buf);
+  }
+  std::string phonetic = settings::pilot_callsign();
+  if (!phonetic.empty()) {
+    ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "  %s",
+                       phonetic.c_str());
+  } else {
+    ImGui::TextDisabled("  (enter registration, e.g. HB-WRO or N342B4)");
+  }
 
   // Volume
   float vol = settings::volume();
@@ -294,7 +438,6 @@ static void draw_settings_tab() {
 
   ImGui::Separator();
   if (ImGui::Button("Save Settings")) {
-    settings::set_pilot_callsign(callsign_buf);
     settings::save();
   }
 }
@@ -433,13 +576,36 @@ static int draw_phase_cb(XPLMDrawingPhase, int, void *) {
   ImGui_ImplOpenGL2_NewFrame();
   ImGui::NewFrame();
 
-  // Center the ATC window
-  float win_w = 500.0f, win_h = 450.0f;
-  ImGui::SetNextWindowPos(
-      ImVec2((static_cast<float>(sw) - win_w) * 0.5f,
-             (static_cast<float>(sh) - win_h) * 0.5f),
-      ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(win_w, win_h), ImGuiCond_FirstUseEver);
+  // Window position/size — load from settings or center
+  if (window_pos_reset_pending_) {
+    // Force re-center on next frame
+    float def_w = 500.0f, def_h = 450.0f;
+    ImGui::SetNextWindowPos(
+        ImVec2((static_cast<float>(sw) - def_w) * 0.5f,
+               (static_cast<float>(sh) - def_h) * 0.5f),
+        ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(def_w, def_h), ImGuiCond_Always);
+    window_pos_reset_pending_ = false;
+  } else {
+    float sx = settings::window_x();
+    float sy = settings::window_y();
+    float sw_s = settings::window_w();
+    float sh_s = settings::window_h();
+    if (sx >= 0.0f && sy >= 0.0f) {
+      ImGui::SetNextWindowPos(ImVec2(sx, sy), ImGuiCond_FirstUseEver);
+    } else {
+      float def_w = 500.0f, def_h = 450.0f;
+      ImGui::SetNextWindowPos(
+          ImVec2((static_cast<float>(sw) - def_w) * 0.5f,
+                 (static_cast<float>(sh) - def_h) * 0.5f),
+          ImGuiCond_FirstUseEver);
+    }
+    if (sw_s > 0.0f && sh_s > 0.0f) {
+      ImGui::SetNextWindowSize(ImVec2(sw_s, sh_s), ImGuiCond_FirstUseEver);
+    } else {
+      ImGui::SetNextWindowSize(ImVec2(500.0f, 450.0f), ImGuiCond_FirstUseEver);
+    }
+  }
   ImGui::SetNextWindowSizeConstraints(ImVec2(400, 300), ImVec2(1920, 1080));
 
   bool open = visible;
@@ -458,6 +624,26 @@ static int draw_phase_cb(XPLMDrawingPhase, int, void *) {
         ImGui::EndTabItem();
       }
       ImGui::EndTabBar();
+    }
+
+    // Save window geometry when moved/resized (debounced)
+    ImVec2 pos = ImGui::GetWindowPos();
+    ImVec2 size = ImGui::GetWindowSize();
+    float prev_x = settings::window_x();
+    float prev_y = settings::window_y();
+    float prev_w = settings::window_w();
+    float prev_h = settings::window_h();
+    if (pos.x != prev_x || pos.y != prev_y ||
+        size.x != prev_w || size.y != prev_h) {
+      settings::set_window_geometry(pos.x, pos.y, size.x, size.y);
+      geometry_save_timer_ = kGeometrySaveDelay;
+    }
+    if (geometry_save_timer_ > 0.0f) {
+      geometry_save_timer_ -= ImGui::GetIO().DeltaTime;
+      if (geometry_save_timer_ <= 0.0f) {
+        settings::save();
+        geometry_save_timer_ = 0.0f;
+      }
     }
   }
   ImGui::End();
@@ -570,6 +756,14 @@ void toggle() {
 
 void draw() {
   // Rendering now handled by draw_phase_cb
+}
+
+void reset_window_position() {
+  settings::reset_window_geometry();
+  window_pos_reset_pending_ = true;
+  // Open the window so the user can see it
+  if (!visible)
+    toggle();
 }
 
 } // namespace atc_ui

@@ -7,6 +7,7 @@ void init();
 void stop();
 void toggle();
 void draw();
+void reset_window_position();
 
 } // namespace atc_ui
 

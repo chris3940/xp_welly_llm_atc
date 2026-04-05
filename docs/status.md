@@ -1,6 +1,6 @@
 # Project Status — xp_wellys_atc
 
-Letzte Aktualisierung: 2026-04-04
+Letzte Aktualisierung: 2026-04-05 (M7)
 
 ## Milestone-Ubersicht
 
@@ -11,8 +11,9 @@ Letzte Aktualisierung: 2026-04-04
 | M3 | Whisper STT — async transcription, transcript display | Done |
 | M4 | Intent Parser — rule-based transcript → PilotIntent | Done |
 | M5 | ATC State Machine + GPT Fallback + Full Text Pipeline | Done |
-| M6 | TTS + Audio Playback — OpenAI TTS + Core Audio MP3 | Offen |
-| M7 | Polish — final testing, edge cases, cleanup | Offen |
+| M6 | TTS + Audio Playback — OpenAI TTS + Core Audio MP3 | Done |
+| M7 | Joystick PTT + Settings Persistence | Done |
+| M8 | Polish — final testing, edge cases, cleanup | Offen |
 
 ## M5 — Was wurde gemacht
 
@@ -95,7 +96,34 @@ Letzte Aktualisierung: 2026-04-04
 - `atc_ui.cpp`: Neuer "Transcript"-Tab mit scrollbarer Liste (Pilot = weiss, ATC = cyan vorbereitet), Auto-Scroll, Clear-Button
 - `main.cpp`: `whisper_client::init/stop` + `drain_callback_queue()` im Flight Loop
 
+## M6 — Was wurde gemacht
+
+- `tts_client.hpp/.cpp`: Async POST an OpenAI `/v1/audio/speech` (TTS-1), gleicher callback-queue Pattern wie whisper_client/gpt_client, MP3-Binary-Response via `CURLOPT_WRITEFUNCTION`, JSON-Body via nlohmann/json (sichere Escaping)
+- `audio_player.hpp/.cpp`: MP3 Decode via AudioToolbox (`AudioFileOpenWithCallbacks` + `ExtAudioFileRead` → float32 PCM), Playback via AudioQueue mit Triple-Buffering, Volume-Scaling im Render-Callback, `is_playing()` Atomic-Flag, `kAudioQueueProperty_IsRunning` Listener fuer Cleanup
+- `atc_session.cpp`: Neue `speak_response()` Funktion — nach jeder ATC-Antwort (State Machine, GPT Fallback, "Say again") wird TTS aufgerufen statt direkt IDLE. State-Flow: PROCESSING → PLAYING → IDLE. Neue `update()` Funktion pollt `audio_player::is_playing()` im Flight Loop
+- `main.cpp`: `tts_client::init/stop`, `audio_player::init/stop`, `tts_client::drain_callback_queue()` + `atc_session::update()` im Flight Loop
+- Status-Labels angepasst: IDLE="Ready", PROCESSING="⟳ Processing...", PLAYING="▶ ATC speaking..."
+- Device-Routing: TTS Audio wird auf gewaehltes Output-Device geroutet (gleich wie PTT Click)
+
+## M7 — Was wurde gemacht
+
+- `ptt_input.hpp/.cpp`: Komplett neu — 3 PTT-Quellen parallel:
+  - XPLMCommand (`xp_wellys_atc/ptt`) fuer X-Plane Key/Joystick Binding (bestehendes System)
+  - XPLMRegisterKeySniffer fuer direkte Keyboard VK Bindung (`settings::ptt_key_vk`)
+  - DataRef-Polling `sim/joystick/joy_buttons` (3200 Buttons) fuer direkte Joystick Bindung (`settings::ptt_joystick_button`)
+  - OR-Logik: Jede der 3 Quellen kann PTT ausloesen
+  - Capture-Mode API: `start_capture(KEYBOARD/JOYSTICK)`, `poll_capture_result()`, `cancel_capture()`
+  - 10s Timeout fuer Capture-Mode
+  - `update()` wird jeden Flight-Loop-Frame aufgerufen
+- `atc_ui.cpp`: PTT Binding Panel im Settings-Tab:
+  - Keyboard: Aktuelle Bindung anzeigen, "Bind key" Button → Capture Mode → gelber "Press any key..." Text, "Clear" Button
+  - Joystick: Aktuelle Bindung anzeigen, "Bind button" Button → Capture Mode → gelber "Press any button..." Text, "Clear" Button
+  - VK-Code zu lesbarem Namen (A-Z, 0-9, F1-F12, Space, Enter, etc.)
+  - Hinweis auf X-Plane Command als Alternative
+- `settings.hpp/.cpp`: `set_ptt_key_vk()` und `set_ptt_joystick_button()` Setter hinzugefuegt
+- `main.cpp`: `ptt_input::update()` im Flight Loop
+
 ## Naechster Schritt
 
-- M5 in X-Plane testen (PTT → sprechen → ATC Response im Transcript pruefen)
-- M6 (TTS + Audio Playback) beginnen
+- M7 in X-Plane testen (Key Binding + Joystick Binding + Persistence)
+- M8 (Polish) beginnen
