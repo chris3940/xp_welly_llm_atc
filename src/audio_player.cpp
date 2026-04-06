@@ -19,10 +19,10 @@
 #include "audio_player.hpp"
 #include "settings.hpp"
 
+#include <XPLMSound.h>
 #include <XPLMUtilities.h>
 
 #include <AudioToolbox/AudioToolbox.h>
-#include <CoreAudio/CoreAudio.h>
 
 #include <atomic>
 #include <cmath>
@@ -33,209 +33,82 @@ namespace audio_player {
 
 static constexpr float kClickFreqHz = 880.0f;
 static constexpr float kClickDurationSec = 0.08f;
-static constexpr float kSampleRate = 44100.0f;
+static constexpr float kClickSampleRate = 44100.0f;
 
-static std::vector<AudioDevice> devices_;
-
-// ── Playback state ──────────────────────────────────────────────
+// ── FMOD channel tracking ────────────────────────────────────────
 
 static std::atomic<bool> is_playing_{false};
+static FMOD_CHANNEL *active_channel_ = nullptr;
+static std::mutex channel_mutex_;
 
-// PCM buffer for decoded audio
-static std::vector<float> pcm_buffer_;
-static std::atomic<size_t> pcm_read_pos_{0};
-static size_t pcm_total_frames_ = 0;
-static int pcm_channels_ = 1;
-static float pcm_volume_ = 1.0f;
-static AudioQueueRef playback_queue_ = nullptr;
-static std::mutex playback_mutex_;
+// PCM buffer must remain valid until FMOD completion callback fires
+static std::vector<int16_t> active_pcm16_;
 
-// ── Device enumeration ───────────────────────────────────────────
-
-static std::string cf_string_to_std(CFStringRef cf) {
-  if (!cf)
-    return "";
-  char buf[256] = {};
-  if (CFStringGetCString(cf, buf, sizeof(buf), kCFStringEncodingUTF8))
-    return buf;
-  return "";
+static void pcm_complete_cb(void * /*inRefcon*/, FMOD_RESULT /*status*/) {
+  std::lock_guard<std::mutex> lock(channel_mutex_);
+  active_channel_ = nullptr;
+  is_playing_ = false;
 }
 
-void refresh_devices() {
-  devices_.clear();
-  devices_.push_back({"", "System Default"});
+// ── Core helper: play int16 PCM on given bus ─────────────────────
+// Must be called on the X-Plane main thread.
 
-  AudioObjectPropertyAddress prop{};
-  prop.mSelector = kAudioHardwarePropertyDevices;
-  prop.mScope = kAudioObjectPropertyScopeGlobal;
-  prop.mElement = kAudioObjectPropertyElementMain;
-
-  UInt32 size = 0;
-  OSStatus err = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &prop,
-                                                0, nullptr, &size);
-  if (err != noErr || size == 0)
-    return;
-
-  int count = static_cast<int>(size / sizeof(AudioDeviceID));
-  std::vector<AudioDeviceID> ids(count);
-  err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &prop, 0, nullptr,
-                                   &size, ids.data());
-  if (err != noErr)
-    return;
-
-  for (auto dev_id : ids) {
-    AudioObjectPropertyAddress stream_prop{};
-    stream_prop.mSelector = kAudioDevicePropertyStreamConfiguration;
-    stream_prop.mScope = kAudioDevicePropertyScopeOutput;
-    stream_prop.mElement = kAudioObjectPropertyElementMain;
-
-    UInt32 stream_size = 0;
-    err = AudioObjectGetPropertyDataSize(dev_id, &stream_prop, 0, nullptr,
-                                         &stream_size);
-    if (err != noErr || stream_size == 0)
-      continue;
-
-    std::vector<uint8_t> buf(stream_size);
-    auto *list = reinterpret_cast<AudioBufferList *>(buf.data());
-    err = AudioObjectGetPropertyData(dev_id, &stream_prop, 0, nullptr,
-                                     &stream_size, list);
-    if (err != noErr)
-      continue;
-
-    UInt32 out_channels = 0;
-    for (UInt32 i = 0; i < list->mNumberBuffers; ++i)
-      out_channels += list->mBuffers[i].mNumberChannels;
-    if (out_channels == 0)
-      continue;
-
-    AudioObjectPropertyAddress uid_prop{};
-    uid_prop.mSelector = kAudioDevicePropertyDeviceUID;
-    uid_prop.mScope = kAudioObjectPropertyScopeGlobal;
-    uid_prop.mElement = kAudioObjectPropertyElementMain;
-
-    CFStringRef uid_ref = nullptr;
-    UInt32 uid_size = sizeof(CFStringRef);
-    err = AudioObjectGetPropertyData(dev_id, &uid_prop, 0, nullptr, &uid_size,
-                                     static_cast<void *>(&uid_ref));
-    if (err != noErr || !uid_ref)
-      continue;
-    std::string uid = cf_string_to_std(uid_ref);
-    CFRelease(uid_ref);
-
-    AudioObjectPropertyAddress name_prop{};
-    name_prop.mSelector = kAudioObjectPropertyName;
-    name_prop.mScope = kAudioObjectPropertyScopeGlobal;
-    name_prop.mElement = kAudioObjectPropertyElementMain;
-
-    CFStringRef name_ref = nullptr;
-    UInt32 name_size = sizeof(CFStringRef);
-    err = AudioObjectGetPropertyData(dev_id, &name_prop, 0, nullptr, &name_size,
-                                     static_cast<void *>(&name_ref));
-    if (err != noErr || !name_ref)
-      continue;
-    std::string name = cf_string_to_std(name_ref);
-    CFRelease(name_ref);
-
-    if (!uid.empty() && !name.empty())
-      devices_.push_back({uid, name});
+static void play_pcm16(std::vector<int16_t> pcm16, int freq_hz, int channels,
+                       float volume, XPLMAudioBus bus) {
+  // Stop any current playback
+  {
+    std::lock_guard<std::mutex> lock(channel_mutex_);
+    if (active_channel_) {
+      XPLMStopAudio(active_channel_);
+      active_channel_ = nullptr;
+    }
   }
+  is_playing_ = false;
+
+  if (pcm16.empty()) {
+    XPLMDebugString("[xp_wellys_atc] play_pcm16: empty buffer\n");
+    return;
+  }
+
+  // Keep PCM alive for FMOD
+  active_pcm16_ = std::move(pcm16);
+
+  FMOD_CHANNEL *ch = XPLMPlayPCMOnBus(
+      active_pcm16_.data(),
+      static_cast<uint32_t>(active_pcm16_.size() * sizeof(int16_t)),
+      FMOD_SOUND_FORMAT_PCM16, freq_hz, channels,
+      /*loop=*/0, bus, pcm_complete_cb, nullptr);
+
+  if (!ch) {
+    XPLMDebugString("[xp_wellys_atc] XPLMPlayPCMOnBus failed\n");
+    return;
+  }
+
+  XPLMSetAudioVolume(ch, volume);
+
+  {
+    std::lock_guard<std::mutex> lock(channel_mutex_);
+    active_channel_ = ch;
+  }
+  is_playing_ = true;
+
+  const char *bus_name = "unknown";
+  if (bus == xplm_AudioRadioCom1)
+    bus_name = "COM1";
+  else if (bus == xplm_AudioRadioCom2)
+    bus_name = "COM2";
+  else if (bus == xplm_AudioUI)
+    bus_name = "UI";
 
   char log[128];
   std::snprintf(log, sizeof(log),
-                "[xp_wellys_atc] Found %zu audio output devices\n",
-                devices_.size());
+                "[xp_wellys_atc] Playback started: %zu samples, %d Hz, "
+                "%s bus\n",
+                active_pcm16_.size() / channels, freq_hz, bus_name);
   XPLMDebugString(log);
 }
 
-const std::vector<AudioDevice> &get_output_devices() { return devices_; }
-
-// ── Route AudioQueue to selected device ─────────────────────────
-
-static void route_to_selected_device(AudioQueueRef queue) {
-  std::string device_uid = settings::audio_output_device();
-  if (!device_uid.empty()) {
-    CFStringRef uid_ref = CFStringCreateWithCString(
-        kCFAllocatorDefault, device_uid.c_str(), kCFStringEncodingUTF8);
-    if (uid_ref) {
-      AudioQueueSetProperty(queue, kAudioQueueProperty_CurrentDevice,
-                            static_cast<const void *>(&uid_ref),
-                            sizeof(CFStringRef));
-      CFRelease(uid_ref);
-    }
-  }
-}
-
-// ── PTT click audio queue callback ──────────────────────────────
-
-static void click_queue_cb(void *, AudioQueueRef queue, AudioQueueBufferRef) {
-  AudioQueueStop(queue, false);
-  AudioQueueDispose(queue, false);
-}
-
-// ── Playback audio queue callback ───────────────────────────────
-
-static void playback_queue_cb(void *, AudioQueueRef queue,
-                              AudioQueueBufferRef buf) {
-  size_t pos = pcm_read_pos_.load();
-  size_t total_samples = pcm_total_frames_ * pcm_channels_;
-  size_t frames_requested =
-      buf->mAudioDataBytesCapacity / (sizeof(float) * pcm_channels_);
-  size_t samples_requested = frames_requested * pcm_channels_;
-
-  if (pos >= total_samples) {
-    // Done playing — fill silence and stop
-    std::memset(buf->mAudioData, 0, buf->mAudioDataBytesCapacity);
-    buf->mAudioDataByteSize = 0;
-    AudioQueueStop(queue, false);
-    is_playing_ = false;
-    return;
-  }
-
-  size_t samples_avail = total_samples - pos;
-  size_t samples_to_copy =
-      (samples_avail < samples_requested) ? samples_avail : samples_requested;
-
-  auto *out = static_cast<float *>(buf->mAudioData);
-  for (size_t i = 0; i < samples_to_copy; ++i)
-    out[i] = pcm_buffer_[pos + i] * pcm_volume_;
-
-  // Zero-fill remainder if at end
-  if (samples_to_copy < samples_requested) {
-    std::memset(out + samples_to_copy, 0,
-                (samples_requested - samples_to_copy) * sizeof(float));
-  }
-
-  buf->mAudioDataByteSize =
-      static_cast<UInt32>(samples_requested * sizeof(float));
-  pcm_read_pos_.store(pos + samples_to_copy);
-
-  AudioQueueEnqueueBuffer(queue, buf, 0, nullptr);
-
-  // Check if we've reached the end
-  if (pos + samples_to_copy >= total_samples)
-    is_playing_ = false;
-}
-
-// ── Playback done callback ──────────────────────────────────────
-
-static void playback_property_cb(void *, AudioQueueRef queue,
-                                 AudioQueuePropertyID prop_id) {
-  if (prop_id == kAudioQueueProperty_IsRunning) {
-    UInt32 is_running = 0;
-    UInt32 size = sizeof(is_running);
-    AudioQueueGetProperty(queue, kAudioQueueProperty_IsRunning, &is_running,
-                          &size);
-    if (!is_running) {
-      is_playing_ = false;
-      // Clean up on a different context to avoid deadlock
-      AudioQueueDispose(queue, false);
-      std::lock_guard<std::mutex> lock(playback_mutex_);
-      playback_queue_ = nullptr;
-    }
-  }
-}
-
-// ── MP3 decode via AudioFile ────────────────────────────────────
+// ── MP3 decode via AudioToolbox ──────────────────────────────────
 
 struct AudioFileReadContext {
   const uint8_t *data;
@@ -262,25 +135,24 @@ static SInt64 audio_file_get_size_proc(void *inClientData) {
   return static_cast<SInt64>(ctx->size);
 }
 
-static bool decode_mp3(const std::vector<uint8_t> &mp3_data,
-                       std::vector<float> &out_pcm, int &out_channels,
-                       double &out_sample_rate) {
+static bool decode_mp3_to_pcm16(const std::vector<uint8_t> &mp3_data,
+                                 std::vector<int16_t> &out_pcm,
+                                 int &out_channels, int &out_sample_rate) {
   AudioFileReadContext ctx{mp3_data.data(), mp3_data.size()};
 
   AudioFileID audio_file = nullptr;
-  OSStatus err = AudioFileOpenWithCallbacks(&ctx, audio_file_read_proc, nullptr,
-                                            audio_file_get_size_proc, nullptr,
-                                            kAudioFileMP3Type, &audio_file);
+  OSStatus err = AudioFileOpenWithCallbacks(
+      &ctx, audio_file_read_proc, nullptr, audio_file_get_size_proc, nullptr,
+      kAudioFileMP3Type, &audio_file);
   if (err != noErr) {
     char log[128];
     std::snprintf(log, sizeof(log),
-                  "[xp_wellys_atc] AudioFileOpen failed: %d\n",
+                  "[xp_wellys_atc] MP3 AudioFileOpen failed: %d\n",
                   static_cast<int>(err));
     XPLMDebugString(log);
     return false;
   }
 
-  // Get source format
   AudioStreamBasicDescription src_fmt{};
   UInt32 fmt_size = sizeof(src_fmt);
   err = AudioFileGetProperty(audio_file, kAudioFilePropertyDataFormat,
@@ -290,7 +162,6 @@ static bool decode_mp3(const std::vector<uint8_t> &mp3_data,
     return false;
   }
 
-  // Set up ExtAudioFile for conversion to float PCM
   ExtAudioFileRef ext_file = nullptr;
   err = ExtAudioFileWrapAudioFileID(audio_file, false, &ext_file);
   if (err != noErr) {
@@ -298,14 +169,15 @@ static bool decode_mp3(const std::vector<uint8_t> &mp3_data,
     return false;
   }
 
-  // Target format: float32 PCM
+  // Decode to int16 PCM (native FMOD_SOUND_FORMAT_PCM16)
   AudioStreamBasicDescription dst_fmt{};
   dst_fmt.mSampleRate = src_fmt.mSampleRate;
   dst_fmt.mFormatID = kAudioFormatLinearPCM;
-  dst_fmt.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
-  dst_fmt.mBitsPerChannel = 32;
+  dst_fmt.mFormatFlags =
+      kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+  dst_fmt.mBitsPerChannel = 16;
   dst_fmt.mChannelsPerFrame = src_fmt.mChannelsPerFrame;
-  dst_fmt.mBytesPerFrame = sizeof(float) * dst_fmt.mChannelsPerFrame;
+  dst_fmt.mBytesPerFrame = sizeof(int16_t) * dst_fmt.mChannelsPerFrame;
   dst_fmt.mFramesPerPacket = 1;
   dst_fmt.mBytesPerPacket = dst_fmt.mBytesPerFrame;
 
@@ -318,31 +190,29 @@ static bool decode_mp3(const std::vector<uint8_t> &mp3_data,
     return false;
   }
 
-  // Get total frame count
   SInt64 total_frames = 0;
   UInt32 prop_size = sizeof(total_frames);
-  err =
-      ExtAudioFileGetProperty(ext_file, kExtAudioFileProperty_FileLengthFrames,
-                              &prop_size, &total_frames);
-  if (err != noErr || total_frames <= 0) {
+  ExtAudioFileGetProperty(ext_file, kExtAudioFileProperty_FileLengthFrames,
+                          &prop_size, &total_frames);
+
+  if (total_frames <= 0) {
     ExtAudioFileDispose(ext_file);
     AudioFileClose(audio_file);
     return false;
   }
 
-  // Read all frames
-  out_pcm.resize(static_cast<size_t>(total_frames) * src_fmt.mChannelsPerFrame);
+  out_pcm.resize(static_cast<size_t>(total_frames) *
+                 src_fmt.mChannelsPerFrame);
 
   UInt32 frames_to_read = static_cast<UInt32>(total_frames);
   AudioBufferList buf_list{};
   buf_list.mNumberBuffers = 1;
   buf_list.mBuffers[0].mNumberChannels = dst_fmt.mChannelsPerFrame;
   buf_list.mBuffers[0].mDataByteSize =
-      static_cast<UInt32>(out_pcm.size() * sizeof(float));
+      static_cast<UInt32>(out_pcm.size() * sizeof(int16_t));
   buf_list.mBuffers[0].mData = out_pcm.data();
 
   err = ExtAudioFileRead(ext_file, &frames_to_read, &buf_list);
-
   ExtAudioFileDispose(ext_file);
   AudioFileClose(audio_file);
 
@@ -355,38 +225,115 @@ static bool decode_mp3(const std::vector<uint8_t> &mp3_data,
     return false;
   }
 
-  // Trim to actual frames read
   out_pcm.resize(static_cast<size_t>(frames_to_read) *
                  src_fmt.mChannelsPerFrame);
-
   out_channels = static_cast<int>(src_fmt.mChannelsPerFrame);
-  out_sample_rate = src_fmt.mSampleRate;
+  out_sample_rate = static_cast<int>(src_fmt.mSampleRate);
+
+  char log[128];
+  std::snprintf(
+      log, sizeof(log),
+      "[xp_wellys_atc] MP3 decoded: %u frames, %d ch, %d Hz\n",
+      frames_to_read, out_channels, out_sample_rate);
+  XPLMDebugString(log);
+  return true;
+}
+
+// ── WAV decode (PCM16 only) ───────────────────────────────────────
+
+static bool decode_wav_to_pcm16(const std::vector<uint8_t> &wav_data,
+                                 std::vector<int16_t> &out_pcm,
+                                 int &out_channels, int &out_sample_rate) {
+  if (wav_data.size() < 44)
+    return false;
+
+  if (wav_data[0] != 'R' || wav_data[1] != 'I' || wav_data[2] != 'F' ||
+      wav_data[3] != 'F' || wav_data[8] != 'W' || wav_data[9] != 'A' ||
+      wav_data[10] != 'V' || wav_data[11] != 'E') {
+    XPLMDebugString("[xp_wellys_atc] WAV: bad magic\n");
+    return false;
+  }
+
+  auto read_u16 = [&](size_t off) -> uint16_t {
+    return static_cast<uint16_t>(wav_data[off]) |
+           (static_cast<uint16_t>(wav_data[off + 1]) << 8);
+  };
+  auto read_u32 = [&](size_t off) -> uint32_t {
+    return static_cast<uint32_t>(wav_data[off]) |
+           (static_cast<uint32_t>(wav_data[off + 1]) << 8) |
+           (static_cast<uint32_t>(wav_data[off + 2]) << 16) |
+           (static_cast<uint32_t>(wav_data[off + 3]) << 24);
+  };
+
+  size_t pos = 12;
+  uint16_t channels = 0;
+  uint32_t sample_rate = 0;
+  uint16_t bits_per_sample = 0;
+  size_t data_offset = 0;
+  uint32_t data_size = 0;
+
+  while (pos + 8 <= wav_data.size()) {
+    char id[5] = {};
+    std::memcpy(id, wav_data.data() + pos, 4);
+    uint32_t chunk_size = read_u32(pos + 4);
+    pos += 8;
+    if (std::strcmp(id, "fmt ") == 0 && chunk_size >= 16) {
+      if (read_u16(pos) != 1) {
+        XPLMDebugString("[xp_wellys_atc] WAV: not PCM\n");
+        return false;
+      }
+      channels = read_u16(pos + 2);
+      sample_rate = read_u32(pos + 4);
+      bits_per_sample = read_u16(pos + 14);
+    } else if (std::strcmp(id, "data") == 0) {
+      data_offset = pos;
+      data_size = chunk_size;
+      break;
+    }
+    pos += chunk_size;
+  }
+
+  if (data_offset == 0 || channels == 0 || bits_per_sample != 16) {
+    char log[128];
+    std::snprintf(log, sizeof(log),
+                  "[xp_wellys_atc] WAV: invalid (ch=%u sr=%u bps=%u)\n",
+                  channels, sample_rate, bits_per_sample);
+    XPLMDebugString(log);
+    return false;
+  }
+
+  size_t num_samples = data_size / sizeof(int16_t);
+  out_pcm.resize(num_samples);
+  std::memcpy(out_pcm.data(), wav_data.data() + data_offset,
+              num_samples * sizeof(int16_t));
+
+  out_channels = static_cast<int>(channels);
+  out_sample_rate = static_cast<int>(sample_rate);
 
   char log[128];
   std::snprintf(log, sizeof(log),
-                "[xp_wellys_atc] Decoded MP3: %u frames, %d ch, %.0f Hz\n",
-                frames_to_read, out_channels, out_sample_rate);
+                "[xp_wellys_atc] WAV decoded: %zu frames, %d ch, %d Hz\n",
+                num_samples / channels, out_channels, out_sample_rate);
   XPLMDebugString(log);
-
   return true;
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────
 
 void init() {
-  refresh_devices();
   is_playing_ = false;
+  active_channel_ = nullptr;
+  XPLMDebugString("[xp_wellys_atc] Audio player initialized (FMOD radio bus)\n");
 }
 
 void stop() {
-  std::lock_guard<std::mutex> lock(playback_mutex_);
-  if (playback_queue_) {
-    AudioQueueStop(playback_queue_, true);
-    AudioQueueDispose(playback_queue_, true);
-    playback_queue_ = nullptr;
+  std::lock_guard<std::mutex> lock(channel_mutex_);
+  if (active_channel_) {
+    XPLMStopAudio(active_channel_);
+    active_channel_ = nullptr;
   }
   is_playing_ = false;
-  devices_.clear();
+  active_pcm16_.clear();
 }
 
 // ── PTT click ────────────────────────────────────────────────────
@@ -396,155 +343,67 @@ void play_ptt_click() {
   if (volume <= 0.0f)
     return;
 
-  int num_samples = static_cast<int>(kSampleRate * kClickDurationSec);
-
+  int num_samples = static_cast<int>(kClickSampleRate * kClickDurationSec);
   std::vector<int16_t> samples(num_samples);
   for (int i = 0; i < num_samples; ++i) {
-    float t = static_cast<float>(i) / kSampleRate;
+    float t = static_cast<float>(i) / kClickSampleRate;
     float sine = std::sin(2.0f * static_cast<float>(M_PI) * kClickFreqHz * t);
-
     float env = 1.0f;
-    float fade_in = 0.005f * kSampleRate;
-    float fade_out = 0.01f * kSampleRate;
+    float fade_in = 0.005f * kClickSampleRate;
+    float fade_out = 0.01f * kClickSampleRate;
     if (static_cast<float>(i) < fade_in)
       env = static_cast<float>(i) / fade_in;
     else if (static_cast<float>(i) > static_cast<float>(num_samples) - fade_out)
-      env =
-          (static_cast<float>(num_samples) - static_cast<float>(i)) / fade_out;
-
-    samples[i] = static_cast<int16_t>(sine * env * volume * 16000.0f);
+      env = (static_cast<float>(num_samples) - static_cast<float>(i)) / fade_out;
+    samples[i] = static_cast<int16_t>(sine * env * 32767.0f);
   }
 
-  AudioStreamBasicDescription fmt{};
-  fmt.mSampleRate = kSampleRate;
-  fmt.mFormatID = kAudioFormatLinearPCM;
-  fmt.mFormatFlags =
-      kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
-  fmt.mBitsPerChannel = 16;
-  fmt.mChannelsPerFrame = 1;
-  fmt.mBytesPerFrame = 2;
-  fmt.mFramesPerPacket = 1;
-  fmt.mBytesPerPacket = 2;
-
-  AudioQueueRef queue = nullptr;
-  OSStatus err = AudioQueueNewOutput(&fmt, click_queue_cb, nullptr, nullptr,
-                                     nullptr, 0, &queue);
-  if (err != noErr || !queue) {
-    XPLMDebugString(
-        "[xp_wellys_atc] Failed to create audio queue for PTT click\n");
-    return;
-  }
-
-  route_to_selected_device(queue);
-
-  AudioQueueBufferRef buf = nullptr;
-  UInt32 buf_size = static_cast<UInt32>(num_samples * 2);
-  err = AudioQueueAllocateBuffer(queue, buf_size, &buf);
-  if (err != noErr || !buf) {
-    AudioQueueDispose(queue, true);
-    return;
-  }
-
-  std::memcpy(buf->mAudioData, samples.data(), buf_size);
-  buf->mAudioDataByteSize = buf_size;
-
-  AudioQueueEnqueueBuffer(queue, buf, 0, nullptr);
-  AudioQueueStart(queue, nullptr);
+  XPLMAudioBus bus = (settings::active_com() == 2) ? xplm_AudioRadioCom2
+                                                    : xplm_AudioRadioCom1;
+  play_pcm16(std::move(samples), static_cast<int>(kClickSampleRate), 1, volume,
+             bus);
 }
 
-// ── MP3 playback ────────────────────────────────────────────────
+// ── MP3 playback (ATC responses → radio bus) ────────────────────
 
 void play(const std::vector<uint8_t> &mp3_data, float volume) {
-  // Stop any current playback
-  {
-    std::lock_guard<std::mutex> lock(playback_mutex_);
-    if (playback_queue_) {
-      AudioQueueStop(playback_queue_, true);
-      AudioQueueDispose(playback_queue_, true);
-      playback_queue_ = nullptr;
-    }
-  }
-
   if (mp3_data.empty()) {
-    XPLMDebugString("[xp_wellys_atc] play() called with empty data\n");
-    is_playing_ = false;
+    XPLMDebugString("[xp_wellys_atc] play() called with empty MP3\n");
     return;
   }
 
-  // Decode MP3 → PCM
-  double sample_rate = 0;
-  if (!decode_mp3(mp3_data, pcm_buffer_, pcm_channels_, sample_rate)) {
+  std::vector<int16_t> pcm16;
+  int channels = 0;
+  int sample_rate = 0;
+  if (!decode_mp3_to_pcm16(mp3_data, pcm16, channels, sample_rate)) {
     XPLMDebugString("[xp_wellys_atc] MP3 decode failed\n");
-    is_playing_ = false;
     return;
   }
 
-  pcm_total_frames_ = pcm_buffer_.size() / pcm_channels_;
-  pcm_read_pos_ = 0;
-  pcm_volume_ = volume;
-  is_playing_ = true;
+  XPLMAudioBus bus = (settings::active_com() == 2) ? xplm_AudioRadioCom2
+                                                    : xplm_AudioRadioCom1;
+  play_pcm16(std::move(pcm16), sample_rate, channels, volume, bus);
+}
 
-  // Set up AudioQueue for float PCM output
-  AudioStreamBasicDescription fmt{};
-  fmt.mSampleRate = sample_rate;
-  fmt.mFormatID = kAudioFormatLinearPCM;
-  fmt.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
-  fmt.mBitsPerChannel = 32;
-  fmt.mChannelsPerFrame = static_cast<UInt32>(pcm_channels_);
-  fmt.mBytesPerFrame = sizeof(float) * fmt.mChannelsPerFrame;
-  fmt.mFramesPerPacket = 1;
-  fmt.mBytesPerPacket = fmt.mBytesPerFrame;
+// ── WAV playback (test → UI bus, always audible) ────────────────
 
-  AudioQueueRef queue = nullptr;
-  OSStatus err = AudioQueueNewOutput(&fmt, playback_queue_cb, nullptr, nullptr,
-                                     nullptr, 0, &queue);
-  if (err != noErr || !queue) {
-    char log[128];
-    std::snprintf(log, sizeof(log),
-                  "[xp_wellys_atc] AudioQueueNewOutput failed: %d\n",
-                  static_cast<int>(err));
-    XPLMDebugString(log);
-    is_playing_ = false;
+void play_wav(const std::vector<uint8_t> &wav_data, float volume) {
+  if (wav_data.empty()) {
+    XPLMDebugString("[xp_wellys_atc] play_wav() called with empty data\n");
     return;
   }
 
-  // Listen for queue stop
-  AudioQueueAddPropertyListener(queue, kAudioQueueProperty_IsRunning,
-                                playback_property_cb, nullptr);
-
-  route_to_selected_device(queue);
-
-  {
-    std::lock_guard<std::mutex> lock(playback_mutex_);
-    playback_queue_ = queue;
+  std::vector<int16_t> pcm16;
+  int channels = 0;
+  int sample_rate = 0;
+  if (!decode_wav_to_pcm16(wav_data, pcm16, channels, sample_rate)) {
+    XPLMDebugString("[xp_wellys_atc] WAV decode failed\n");
+    return;
   }
 
-  // Allocate and prime 3 buffers (standard triple-buffering)
-  static constexpr int kNumBuffers = 3;
-  static constexpr UInt32 kFramesPerBuffer = 4096;
-  UInt32 buf_size = kFramesPerBuffer * fmt.mBytesPerFrame;
-
-  for (int i = 0; i < kNumBuffers; ++i) {
-    AudioQueueBufferRef buf = nullptr;
-    err = AudioQueueAllocateBuffer(queue, buf_size, &buf);
-    if (err != noErr || !buf)
-      continue;
-    // Prime the buffer by calling the callback directly
-    playback_queue_cb(nullptr, queue, buf);
-  }
-
-  err = AudioQueueStart(queue, nullptr);
-  if (err != noErr) {
-    char log[128];
-    std::snprintf(log, sizeof(log),
-                  "[xp_wellys_atc] AudioQueueStart failed: %d\n",
-                  static_cast<int>(err));
-    XPLMDebugString(log);
-    std::lock_guard<std::mutex> lock(playback_mutex_);
-    AudioQueueDispose(queue, true);
-    playback_queue_ = nullptr;
-    is_playing_ = false;
-  }
+  XPLMAudioBus bus = (settings::active_com() == 2) ? xplm_AudioRadioCom2
+                                                    : xplm_AudioRadioCom1;
+  play_pcm16(std::move(pcm16), sample_rate, channels, volume, bus);
 }
 
 bool is_playing() { return is_playing_.load(); }

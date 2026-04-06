@@ -20,8 +20,8 @@
 #include "atc_session.hpp"
 #include "atc_state_machine.hpp"
 #include "audio_player.hpp"
+#include "audio_recorder.hpp"
 #include "intent_parser.hpp"
-#include "ptt_input.hpp"
 #include "settings.hpp"
 #include "xplane_context.hpp"
 
@@ -211,141 +211,108 @@ static void draw_transcript_tab() {
   ImGui::EndChild();
 }
 
-static const char *vk_name(int vk) {
-  // Common XPLM virtual key codes
-  switch (vk) {
-  case 0x08:
-    return "Backspace";
-  case 0x09:
-    return "Tab";
-  case 0x0D:
-    return "Enter";
-  case 0x1B:
-    return "Escape";
-  case 0x20:
-    return "Space";
-  case 0x25:
-    return "Left";
-  case 0x26:
-    return "Up";
-  case 0x27:
-    return "Right";
-  case 0x28:
-    return "Down";
-  case 0x2E:
-    return "Delete";
-  default:
-    break;
-  }
-  // 0-9
-  if (vk >= 0x30 && vk <= 0x39) {
-    static char num[2];
-    num[0] = static_cast<char>(vk);
-    num[1] = '\0';
-    return num;
-  }
-  // A-Z
-  if (vk >= 0x41 && vk <= 0x5A) {
-    static char letter[2];
-    letter[0] = static_cast<char>(vk);
-    letter[1] = '\0';
-    return letter;
-  }
-  // F1-F12
-  if (vk >= 0x70 && vk <= 0x7B) {
-    static char fkey[4];
-    std::snprintf(fkey, sizeof(fkey), "F%d", vk - 0x70 + 1);
-    return fkey;
-  }
-  static char hex[16];
-  std::snprintf(hex, sizeof(hex), "VK 0x%02X", vk);
-  return hex;
-}
 
-static constexpr float kCaptureTimeout = 10.0f;
+// ── Audio test state ─────────────────────────────────────────────
 
-static void draw_ptt_binding() {
-  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Push-to-Talk Binding");
-  ImGui::TextDisabled("(X-Plane command: xp_wellys_atc/ptt also works)");
+enum class AudioTestState { IDLE, RECORDING, PLAYING };
+static AudioTestState audio_test_state_ = AudioTestState::IDLE;
+static float audio_test_timer_ = 0.0f;
+static std::vector<uint8_t> audio_test_wav_;
+static constexpr float kTestRecordDuration = 3.0f;
+
+static void draw_audio_tab() {
+  // ── Microphone / Input ──────────────────────────────────────────
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Microphone");
+  ImGui::TextDisabled("Input device: System Default");
   ImGui::Spacing();
 
-  auto mode = ptt_input::capture_mode();
+  float delta = ImGui::GetIO().DeltaTime;
 
-  // Check for capture result
-  if (mode != ptt_input::CaptureMode::NONE) {
-    int result = ptt_input::poll_capture_result();
-    if (result >= 0) {
-      if (mode == ptt_input::CaptureMode::KEYBOARD) {
-        settings::set_ptt_key_vk(result);
-        settings::save();
+  if (audio_test_state_ == AudioTestState::RECORDING) {
+    audio_test_timer_ += delta;
+    ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f),
+                       "Recording... %.1f / %.0f s", audio_test_timer_,
+                       kTestRecordDuration);
+    if (audio_test_timer_ >= kTestRecordDuration) {
+      audio_recorder::stop_recording();
+      audio_test_wav_ = audio_recorder::encode_wav();
+      audio_test_timer_ = 0.0f;
+      if (!audio_test_wav_.empty()) {
+        char log[128];
+        std::snprintf(log, sizeof(log),
+                      "[xp_wellys_atc] Audio test playback — volume: %.2f, "
+                      "wav: %zu bytes\n",
+                      settings::volume(), audio_test_wav_.size());
+        XPLMDebugString(log);
+
+        // Save WAV to disk for debugging
+        if (settings::debug_logging()) {
+          std::string path = "/tmp/xp_wellys_atc_test.wav";
+          FILE *f = std::fopen(path.c_str(), "wb");
+          if (f) {
+            std::fwrite(audio_test_wav_.data(), 1, audio_test_wav_.size(), f);
+            std::fclose(f);
+            char dbg[256];
+            std::snprintf(dbg, sizeof(dbg),
+                          "[xp_wellys_atc] Debug: test WAV saved to %s\n",
+                          path.c_str());
+            XPLMDebugString(dbg);
+          }
+        }
+
+        audio_test_state_ = AudioTestState::PLAYING;
+        audio_player::play_wav(audio_test_wav_, settings::volume());
       } else {
-        settings::set_ptt_joystick_button(result);
-        settings::save();
-      }
-      mode = ptt_input::CaptureMode::NONE; // capture done
-    }
-  }
-
-  // ── Keyboard binding ──
-  int vk = settings::ptt_key_vk();
-  if (vk >= 0) {
-    ImGui::Text("Keyboard: %s", vk_name(vk));
-  } else {
-    ImGui::TextDisabled("Keyboard: (not bound)");
-  }
-  ImGui::SameLine();
-  if (mode == ptt_input::CaptureMode::KEYBOARD) {
-    float elapsed = ptt_input::capture_elapsed();
-    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f),
-                       "Press any key... (%.0fs)", kCaptureTimeout - elapsed);
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Cancel##key")) {
-      ptt_input::cancel_capture();
-    }
-  } else {
-    if (ImGui::SmallButton("Bind key")) {
-      ptt_input::start_capture(ptt_input::CaptureMode::KEYBOARD);
-    }
-    if (vk >= 0) {
-      ImGui::SameLine();
-      if (ImGui::SmallButton("Clear##key")) {
-        settings::set_ptt_key_vk(-1);
-        settings::save();
+        audio_test_state_ = AudioTestState::IDLE;
+        XPLMDebugString("[xp_wellys_atc] Audio test: WAV encode returned empty — mic may not be working\n");
       }
     }
-  }
-
-  // ── Joystick button binding ──
-  int btn = settings::ptt_joystick_button();
-  if (btn >= 0) {
-    ImGui::Text("Joystick: Button %d", btn);
-  } else {
-    ImGui::TextDisabled("Joystick: (not bound)");
-  }
-  ImGui::SameLine();
-  if (mode == ptt_input::CaptureMode::JOYSTICK) {
-    float elapsed = ptt_input::capture_elapsed();
-    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f),
-                       "Press any button... (%.0fs)",
-                       kCaptureTimeout - elapsed);
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Cancel##btn")) {
-      ptt_input::cancel_capture();
+  } else if (audio_test_state_ == AudioTestState::PLAYING) {
+    if (audio_player::is_playing()) {
+      ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f),
+                         "Playing back test recording...");
+    } else {
+      audio_test_state_ = AudioTestState::IDLE;
     }
   } else {
-    if (ImGui::SmallButton("Bind button")) {
-      ptt_input::start_capture(ptt_input::CaptureMode::JOYSTICK);
+    if (ImGui::Button("Record Test (3s)")) {
+      audio_test_state_ = AudioTestState::RECORDING;
+      audio_test_timer_ = 0.0f;
+      audio_test_wav_.clear();
+      XPLMDebugString("[xp_wellys_atc] Audio test: starting 3s mic recording\n");
+      audio_recorder::start_recording();
     }
-    if (btn >= 0) {
-      ImGui::SameLine();
-      if (ImGui::SmallButton("Clear##btn")) {
-        settings::set_ptt_joystick_button(-1);
-        settings::save();
-      }
-    }
+    ImGui::TextDisabled("Records 3 seconds and plays back to verify mic + speakers.");
   }
 
   ImGui::Separator();
+
+  // ── Output / Speaker ────────────────────────────────────────────
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Speaker / Output");
+  ImGui::Spacing();
+
+  // Volume
+  float vol = settings::volume();
+  if (ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f)) {
+    settings::set_volume(vol);
+    settings::save();
+  }
+
+  ImGui::TextDisabled("Output: X-Plane Radio Device (Settings > Sound > Radio Device)");
+
+  if (ImGui::Button("Test Speaker")) {
+    audio_player::play_ptt_click();
+  }
+
+  ImGui::Separator();
+
+  // ── TTS Voice ───────────────────────────────────────────────────
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Text-to-Speech");
+  ImGui::Spacing();
+  if (ImGui::Combo("TTS Voice", &voice_selection, voice_names, voice_count)) {
+    settings::set_tts_voice(voice_names[voice_selection]);
+    settings::save();
+  }
 }
 
 static void draw_settings_tab() {
@@ -409,8 +376,11 @@ static void draw_settings_tab() {
 
   ImGui::Separator();
 
-  // PTT Binding
-  draw_ptt_binding();
+  // PTT — bound via X-Plane settings
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Push-to-Talk");
+  ImGui::TextDisabled("Bind via X-Plane: Settings > Joystick > Buttons & Keys");
+  ImGui::TextDisabled("Command: xp_wellys_atc/ptt");
+  ImGui::Separator();
 
   // Pilot callsign — raw registration input + phonetic preview
   if (ImGui::InputText("Callsign (Registration)", callsign_raw_buf,
@@ -423,48 +393,6 @@ static void draw_settings_tab() {
                        phonetic.c_str());
   } else {
     ImGui::TextDisabled("  (enter registration, e.g. HB-WRO or N342B4)");
-  }
-
-  // Volume
-  float vol = settings::volume();
-  if (ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f)) {
-    settings::set_volume(vol);
-  }
-
-  // Audio output device
-  {
-    const auto &devs = audio_player::get_output_devices();
-    std::string current_uid = settings::audio_output_device();
-    int current_idx = 0;
-    for (int i = 0; i < static_cast<int>(devs.size()); ++i) {
-      if (devs[i].uid == current_uid) {
-        current_idx = i;
-        break;
-      }
-    }
-    if (ImGui::BeginCombo("Audio Output",
-                          devs.empty() ? "---"
-                                       : devs[current_idx].name.c_str())) {
-      for (int i = 0; i < static_cast<int>(devs.size()); ++i) {
-        bool selected = (i == current_idx);
-        if (ImGui::Selectable(devs[i].name.c_str(), selected)) {
-          settings::set_audio_output_device(devs[i].uid);
-          settings::save();
-        }
-        if (selected)
-          ImGui::SetItemDefaultFocus();
-      }
-      ImGui::EndCombo();
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Refresh")) {
-      audio_player::refresh_devices();
-    }
-  }
-
-  // TTS Voice
-  if (ImGui::Combo("TTS Voice", &voice_selection, voice_names, voice_count)) {
-    settings::set_tts_voice(voice_names[voice_selection]);
   }
 
   // GPT Fallback
@@ -550,8 +478,10 @@ static XPLMCursorStatus wnd_cursor_cb(XPLMWindowID, int, int, void *) {
 
 static void wnd_key_cb(XPLMWindowID, char key, XPLMKeyFlags flags, char vkey,
                        void *, int losing_focus) {
-  if (losing_focus)
+  if (losing_focus) {
+    ImGui::GetIO().AddFocusEvent(false);
     return;
+  }
   ImGuiIO &io = ImGui::GetIO();
   if (!(flags & xplm_DownFlag))
     return;
@@ -631,6 +561,12 @@ static int draw_phase_cb(XPLMDrawingPhase, int, void *) {
   ImGui_ImplOpenGL2_NewFrame();
   ImGui::NewFrame();
 
+  // Re-claim keyboard focus whenever ImGui wants text input (prevents X-Plane
+  // from stealing focus while the user is typing in an input field)
+  if (ImGui::GetIO().WantTextInput && window_id) {
+    XPLMTakeKeyboardFocus(window_id);
+  }
+
   // Window position/size — load from settings or center
   if (window_pos_reset_pending_) {
     // Force re-center on next frame
@@ -680,6 +616,10 @@ static int draw_phase_cb(XPLMDrawingPhase, int, void *) {
       }
       if (ImGui::BeginTabItem("Settings")) {
         draw_settings_tab();
+        ImGui::EndTabItem();
+      }
+      if (ImGui::BeginTabItem("Audio")) {
+        draw_audio_tab();
         ImGui::EndTabItem();
       }
       ImGui::EndTabBar();

@@ -43,8 +43,6 @@ static const char *kKeychainAccount = "openai_api_key";
 
 static json default_config() {
   return {{"api_key_saved", false},
-          {"ptt_key_vk", -1},
-          {"ptt_joystick_button", -1},
           {"tts_voice", "onyx"},
           {"tts_model", "tts-1"},
           {"whisper_model", "whisper-1"},
@@ -55,7 +53,6 @@ static json default_config() {
           {"active_com", 1},
           {"volume", 1.0},
           {"debug_logging", false},
-          {"audio_output_device", ""},
           {"window_x", -1.0},
           {"window_y", -1.0},
           {"window_w", -1.0},
@@ -221,8 +218,6 @@ std::string get_api_key() { return cached_api_key; }
 // --- Getters ---
 
 bool api_key_saved() { return cfg.value("api_key_saved", false); }
-int ptt_key_vk() { return cfg.value("ptt_key_vk", -1); }
-int ptt_joystick_button() { return cfg.value("ptt_joystick_button", -1); }
 std::string tts_voice() { return cfg.value("tts_voice", std::string("onyx")); }
 std::string tts_model() { return cfg.value("tts_model", std::string("tts-1")); }
 std::string whisper_model() {
@@ -241,9 +236,6 @@ std::string pilot_callsign() {
 int active_com() { return cfg.value("active_com", 1); }
 float volume() { return cfg.value("volume", 1.0f); }
 bool debug_logging() { return cfg.value("debug_logging", false); }
-std::string audio_output_device() {
-  return cfg.value("audio_output_device", std::string(""));
-}
 
 // --- Setters ---
 
@@ -295,11 +287,6 @@ void set_volume(float v) { cfg["volume"] = v; }
 void set_gpt_fallback_enabled(bool v) { cfg["gpt_fallback_enabled"] = v; }
 void set_debug_logging(bool v) { cfg["debug_logging"] = v; }
 void set_active_com(int com) { cfg["active_com"] = com; }
-void set_audio_output_device(const std::string &uid) {
-  cfg["audio_output_device"] = uid;
-}
-void set_ptt_key_vk(int vk) { cfg["ptt_key_vk"] = vk; }
-void set_ptt_joystick_button(int btn) { cfg["ptt_joystick_button"] = btn; }
 
 float window_x() { return cfg.value("window_x", -1.0f); }
 float window_y() { return cfg.value("window_y", -1.0f); }

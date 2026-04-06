@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(xp_wellys_atc CXX)
+project(xp_wellys_atc CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -48,6 +48,7 @@ add_library(xp_wellys_atc MODULE
     src/xplane_context.cpp
     src/settings.cpp
     src/atc_ui.cpp
+    src/mic_permission.mm
     ${IMGUI_SOURCES}
 )
 
@@ -66,7 +67,7 @@ set_target_properties(xp_wellys_atc PROPERTIES
 if(APPLE)
     target_compile_definitions(xp_wellys_atc PRIVATE
         APL=1 IBM=0 LIN=0
-        XPLM200=1 XPLM210=1 XPLM300=1 XPLM301=1
+        XPLM200=1 XPLM210=1 XPLM300=1 XPLM301=1 XPLM400=1
         XP_WELLYS_ATC_VERSION="${VERSION_STRING}"
     )
 
