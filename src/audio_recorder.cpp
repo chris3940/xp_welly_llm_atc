@@ -17,6 +17,7 @@
  */
 
 #include "audio_recorder.hpp"
+#include "mic_permission.hpp"
 
 #include <XPLMUtilities.h>
 
@@ -32,9 +33,11 @@
 
 namespace audio_recorder {
 
-static constexpr unsigned kSampleRate = 16000;
+static constexpr unsigned kDesiredSampleRate = 16000;
 static constexpr unsigned kBitsPerSample = 16;
 static constexpr unsigned kNumChannels = 1;
+
+static unsigned actual_sample_rate_ = kDesiredSampleRate;
 
 static std::vector<int16_t> buffer_;
 static std::mutex buffer_mutex_;
@@ -45,11 +48,18 @@ static bool initialized_ = false;
 
 static AudioComponentInstance audio_unit_ = nullptr;
 
+static std::atomic<int> render_call_count_{0};
+
 static OSStatus render_callback(void * /*inRefCon*/,
                                 AudioUnitRenderActionFlags *io_action_flags,
                                 const AudioTimeStamp *in_time_stamp,
                                 UInt32 in_bus_number, UInt32 in_number_frames,
                                 AudioBufferList * /*io_data*/) {
+  int call_count = ++render_call_count_;
+  if (call_count == 1) {
+    XPLMDebugString("[xp_wellys_atc] Render callback firing (first call)\n");
+  }
+
   AudioBufferList buf_list;
   buf_list.mNumberBuffers = 1;
   buf_list.mBuffers[0].mDataByteSize = in_number_frames * sizeof(int16_t);
@@ -59,9 +69,17 @@ static OSStatus render_callback(void * /*inRefCon*/,
   buf_list.mBuffers[0].mData = temp.data();
 
   OSStatus status = AudioUnitRender(audio_unit_, io_action_flags, in_time_stamp,
-                                    in_bus_number, in_number_frames, &buf_list);
-  if (status != noErr)
+                                    1, in_number_frames, &buf_list);
+  if (status != noErr) {
+    if (call_count <= 3) {
+      char log[128];
+      std::snprintf(log, sizeof(log),
+                    "[xp_wellys_atc] AudioUnitRender error: %d (call #%d)\n",
+                    static_cast<int>(status), call_count);
+      XPLMDebugString(log);
+    }
     return status;
+  }
 
   if (recording_.load()) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
@@ -71,7 +89,50 @@ static OSStatus render_callback(void * /*inRefCon*/,
   return noErr;
 }
 
+static void log_default_input_device() {
+  AudioObjectPropertyAddress prop{};
+  prop.mSelector = kAudioHardwarePropertyDefaultInputDevice;
+  prop.mScope = kAudioObjectPropertyScopeGlobal;
+  prop.mElement = kAudioObjectPropertyElementMain;
+
+  AudioDeviceID dev_id = kAudioDeviceUnknown;
+  UInt32 size = sizeof(dev_id);
+  OSStatus err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &prop, 0,
+                                            nullptr, &size, &dev_id);
+  if (err != noErr || dev_id == kAudioDeviceUnknown) {
+    XPLMDebugString("[xp_wellys_atc] No default input device found\n");
+    return;
+  }
+
+  AudioObjectPropertyAddress name_prop{};
+  name_prop.mSelector = kAudioObjectPropertyName;
+  name_prop.mScope = kAudioObjectPropertyScopeGlobal;
+  name_prop.mElement = kAudioObjectPropertyElementMain;
+  CFStringRef name_ref = nullptr;
+  UInt32 name_size = sizeof(CFStringRef);
+  err = AudioObjectGetPropertyData(dev_id, &name_prop, 0, nullptr, &name_size,
+                                   static_cast<void *>(&name_ref));
+  if (err == noErr && name_ref) {
+    char name[256] = {};
+    CFStringGetCString(name_ref, name, sizeof(name), kCFStringEncodingUTF8);
+    CFRelease(name_ref);
+    char log[320];
+    std::snprintf(log, sizeof(log),
+                  "[xp_wellys_atc] Default input device: \"%s\" (id=%u)\n",
+                  name, static_cast<unsigned>(dev_id));
+    XPLMDebugString(log);
+  }
+}
+
 void init() {
+  if (!mic_permission::check_and_request()) {
+    XPLMDebugString(
+        "[xp_wellys_atc] Audio recorder: no microphone permission, "
+        "recording will not work\n");
+  }
+
+  log_default_input_device();
+
   AudioComponentDescription desc{};
   desc.componentType = kAudioUnitType_Output;
   desc.componentSubType = kAudioUnitSubType_HALOutput;
@@ -108,9 +169,53 @@ void init() {
                        kAudioUnitScope_Output, 0, &disable_output,
                        sizeof(disable_output));
 
-  // Set input format: 16kHz mono 16-bit signed integer PCM
+  // Explicitly set input device to system default input
+  AudioObjectPropertyAddress default_input_prop{};
+  default_input_prop.mSelector = kAudioHardwarePropertyDefaultInputDevice;
+  default_input_prop.mScope = kAudioObjectPropertyScopeGlobal;
+  default_input_prop.mElement = kAudioObjectPropertyElementMain;
+  AudioDeviceID input_device = kAudioDeviceUnknown;
+  UInt32 dev_size = sizeof(input_device);
+  AudioObjectGetPropertyData(kAudioObjectSystemObject, &default_input_prop, 0,
+                             nullptr, &dev_size, &input_device);
+  if (input_device != kAudioDeviceUnknown) {
+    status = AudioUnitSetProperty(audio_unit_,
+                                  kAudioOutputUnitProperty_CurrentDevice,
+                                  kAudioUnitScope_Global, 0, &input_device,
+                                  sizeof(input_device));
+    char log[128];
+    std::snprintf(log, sizeof(log),
+                  "[xp_wellys_atc] Set AudioUnit input device id=%u: %s\n",
+                  static_cast<unsigned>(input_device),
+                  status == noErr ? "OK" : "FAILED");
+    XPLMDebugString(log);
+  }
+
+  // Log the device's native (hardware) format
+  AudioStreamBasicDescription hw_fmt{};
+  UInt32 hw_fmt_size = sizeof(hw_fmt);
+  status = AudioUnitGetProperty(audio_unit_, kAudioUnitProperty_StreamFormat,
+                                kAudioUnitScope_Input, 1, &hw_fmt, &hw_fmt_size);
+  if (status == noErr) {
+    char log[256];
+    std::snprintf(log, sizeof(log),
+                  "[xp_wellys_atc] Hardware input format: %.0f Hz, %u ch, "
+                  "%u bps, formatFlags=0x%X\n",
+                  hw_fmt.mSampleRate,
+                  static_cast<unsigned>(hw_fmt.mChannelsPerFrame),
+                  static_cast<unsigned>(hw_fmt.mBitsPerChannel),
+                  static_cast<unsigned>(hw_fmt.mFormatFlags));
+    XPLMDebugString(log);
+  }
+
+  // Use the device's native sample rate to avoid AudioUnit conversion errors
+  // (e.g. -10863 when converting 24kHz AirPods → 16kHz).
+  // Only convert to int16 PCM; Whisper accepts any sample rate.
+  double device_rate = (hw_fmt.mSampleRate > 0) ? hw_fmt.mSampleRate
+                                                 : kDesiredSampleRate;
+
   AudioStreamBasicDescription format{};
-  format.mSampleRate = kSampleRate;
+  format.mSampleRate = device_rate;
   format.mFormatID = kAudioFormatLinearPCM;
   format.mFormatFlags =
       kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
@@ -128,6 +233,24 @@ void init() {
     AudioComponentInstanceDispose(audio_unit_);
     audio_unit_ = nullptr;
     return;
+  }
+
+  // Read back actual format — HALOutput may not do sample rate conversion
+  AudioStreamBasicDescription actual_fmt{};
+  UInt32 fmt_size = sizeof(actual_fmt);
+  status = AudioUnitGetProperty(audio_unit_, kAudioUnitProperty_StreamFormat,
+                                kAudioUnitScope_Output, 1, &actual_fmt,
+                                &fmt_size);
+  if (status == noErr) {
+    actual_sample_rate_ = static_cast<unsigned>(actual_fmt.mSampleRate);
+    char log[192];
+    std::snprintf(log, sizeof(log),
+                  "[xp_wellys_atc] Audio format: device %.0f Hz, client %u Hz "
+                  "(%u ch, %u bps)\n",
+                  device_rate, actual_sample_rate_,
+                  static_cast<unsigned>(actual_fmt.mChannelsPerFrame),
+                  static_cast<unsigned>(actual_fmt.mBitsPerChannel));
+    XPLMDebugString(log);
   }
 
   // Set render callback on input bus
@@ -154,8 +277,13 @@ void init() {
   }
 
   initialized_ = true;
-  XPLMDebugString(
-      "[xp_wellys_atc] Audio recorder initialized (16kHz mono 16-bit)\n");
+  {
+    char log[128];
+    std::snprintf(log, sizeof(log),
+                  "[xp_wellys_atc] Audio recorder initialized (%uHz mono 16-bit)\n",
+                  actual_sample_rate_);
+    XPLMDebugString(log);
+  }
 }
 
 void stop() {
@@ -183,11 +311,18 @@ void start_recording() {
     buffer_.clear();
   }
 
+  render_call_count_ = 0;
   recording_ = true;
   OSStatus status = AudioOutputUnitStart(audio_unit_);
   if (status != noErr) {
-    XPLMDebugString("[xp_wellys_atc] Error: failed to start AudioUnit\n");
+    char log[128];
+    std::snprintf(log, sizeof(log),
+                  "[xp_wellys_atc] Error: AudioOutputUnitStart failed: %d\n",
+                  static_cast<int>(status));
+    XPLMDebugString(log);
     recording_ = false;
+  } else {
+    XPLMDebugString("[xp_wellys_atc] AudioUnit started OK\n");
   }
 }
 
@@ -195,6 +330,30 @@ void stop_recording() {
   recording_ = false;
   if (audio_unit_) {
     AudioOutputUnitStop(audio_unit_);
+  }
+  {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    // Compute peak level
+    int16_t peak = 0;
+    for (auto s : buffer_) {
+      int16_t abs_s = (s < 0) ? static_cast<int16_t>(-s) : s;
+      if (abs_s > peak)
+        peak = abs_s;
+    }
+    float peak_pct = (static_cast<float>(peak) / 32767.0f) * 100.0f;
+
+    char log[256];
+    std::snprintf(log, sizeof(log),
+                  "[xp_wellys_atc] Recording stopped: %zu samples captured, "
+                  "render callbacks: %d, peak: %d (%.1f%%)\n",
+                  buffer_.size(), render_call_count_.load(),
+                  static_cast<int>(peak), peak_pct);
+    XPLMDebugString(log);
+    if (buffer_.empty() && render_call_count_.load() == 0) {
+      XPLMDebugString(
+          "[xp_wellys_atc] ERROR: No audio captured. Check: System Settings "
+          "> Privacy & Security > Microphone > enable X-Plane\n");
+    }
   }
 }
 
@@ -244,8 +403,9 @@ std::vector<uint8_t> encode_wav() {
   write_u32(16);           // subchunk size
   write_u16(1);            // PCM format
   write_u16(kNumChannels); // channels
-  write_u32(kSampleRate);  // sample rate
-  write_u32(size_t{kSampleRate} * kNumChannels * sizeof(int16_t)); // byte rate
+  write_u32(actual_sample_rate_);  // sample rate
+  write_u32(size_t{actual_sample_rate_} * kNumChannels *
+            sizeof(int16_t));                        // byte rate
   write_u16(size_t{kNumChannels} * sizeof(int16_t)); // block align
   write_u16(kBitsPerSample);                         // bits per sample
 
@@ -264,7 +424,8 @@ float duration_seconds() {
   std::lock_guard<std::mutex> lock(buffer_mutex_);
   if (buffer_.empty())
     return 0.0f;
-  return static_cast<float>(buffer_.size()) / static_cast<float>(kSampleRate);
+  return static_cast<float>(buffer_.size()) /
+         static_cast<float>(actual_sample_rate_);
 }
 
 size_t buffer_samples() {
