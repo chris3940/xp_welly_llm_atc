@@ -24,6 +24,7 @@
 
 #include "atc_session.hpp"
 #include "atc_state_machine.hpp"
+#include "atc_templates.hpp"
 #include "atc_ui.hpp"
 #include "audio_player.hpp"
 #include "audio_recorder.hpp"
@@ -67,6 +68,7 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
   XPLMDebugString("[xp_wellys_atc] Plugin started\n");
 
   settings::init();
+  atc_templates::init();
   xplane_context::init();
   audio_recorder::init();
   audio_player::init();
@@ -112,6 +114,7 @@ PLUGIN_API void XPluginStop() {
   audio_player::stop();
   audio_recorder::stop();
   xplane_context::stop();
+  atc_templates::stop();
   settings::stop();
 
   XPLMDebugString("[xp_wellys_atc] Plugin stopped\n");

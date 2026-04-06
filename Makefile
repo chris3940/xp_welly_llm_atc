@@ -80,6 +80,10 @@ install:
 	else \
 	    echo "Kept existing settings.json"; \
 	fi
+	@cp data/atc_templates.json "$(PLUGIN_DIR)/data/"
+	@echo "Installed: $(PLUGIN_DIR)/data/atc_templates.json"
+	@cp data/atc_prompt_templates.json "$(PLUGIN_DIR)/data/"
+	@echo "Installed: $(PLUGIN_DIR)/data/atc_prompt_templates.json"
 	@echo "Installed and signed."
 
 # ── Lint ──────────────────────────────────────────────────────────────────────

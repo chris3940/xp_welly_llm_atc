@@ -18,6 +18,7 @@
 
 #include "atc_session.hpp"
 #include "atc_state_machine.hpp"
+#include "atc_templates.hpp"
 #include "audio_player.hpp"
 #include "audio_recorder.hpp"
 #include "gpt_client.hpp"
@@ -208,62 +209,16 @@ void on_ptt_released() {
           XPLMDebugString(log);
         }
 
-        // Process through ATC state machine
-        auto atc_resp = atc_state_machine::process(last_pilot_message_, ctx);
-
+        // Two-stage intent resolution
         bool needs_gpt =
-            atc_resp.text.empty() || last_pilot_message_.confidence < 0.6f ||
+            last_pilot_message_.confidence < 0.7f ||
             last_pilot_message_.intent == intent_parser::PilotIntent::UNKNOWN;
 
-        if (needs_gpt) {
-          if (!settings::gpt_fallback_enabled()) {
-            // Generic fallback
-            std::string cs = last_pilot_message_.callsign.empty()
-                                 ? settings::pilot_callsign()
-                                 : last_pilot_message_.callsign;
-            std::string fallback = "Say again, " + cs + ".";
-            XPLMDebugString(
-                ("[xp_wellys_atc] ATC (fallback): " + fallback + "\n").c_str());
+        if (!needs_gpt) {
+          // High confidence: process through state machine directly
+          auto atc_resp =
+              atc_state_machine::process(last_pilot_message_, ctx);
 
-            transcript_.push_back(TranscriptEntry{
-                static_cast<double>(XPLMGetElapsedTime()),
-                false,
-                fallback,
-                freq_str,
-            });
-            speak_response(fallback);
-          } else {
-            // GPT fallback — stays in PROCESSING until callback
-            ++total_api_calls_; // GPT call
-            XPLMDebugString("[xp_wellys_atc] Routing to GPT fallback\n");
-
-            std::string freq_copy = freq_str;
-            gpt_client::ask_async(
-                transcript, ctx,
-                [freq_copy](std::string response, bool gpt_success) {
-                  if (gpt_success) {
-                    XPLMDebugString(
-                        ("[xp_wellys_atc] GPT response: " + response + "\n")
-                            .c_str());
-                  } else {
-                    XPLMDebugString(
-                        ("[xp_wellys_atc] GPT error: " + response + "\n")
-                            .c_str());
-                    std::string cs = settings::pilot_callsign();
-                    response = "Say again, " + cs + ".";
-                  }
-
-                  transcript_.push_back(TranscriptEntry{
-                      static_cast<double>(XPLMGetElapsedTime()),
-                      false,
-                      response,
-                      freq_copy,
-                  });
-                  speak_response(response);
-                });
-          }
-        } else {
-          // Valid state machine response
           if (settings::debug_logging())
             XPLMDebugString(("[xp_wellys_atc][DEBUG] ATC response text: " +
                              atc_resp.text + "\n")
@@ -276,6 +231,107 @@ void on_ptt_released() {
               freq_str,
           });
           speak_response(atc_resp.text);
+        } else if (!settings::gpt_fallback_enabled()) {
+          // GPT disabled — use state machine with _INVALID fallback
+          auto atc_resp =
+              atc_state_machine::process(last_pilot_message_, ctx);
+          std::string response = atc_resp.text;
+          if (response.empty()) {
+            std::string cs = last_pilot_message_.callsign.empty()
+                                 ? settings::pilot_callsign()
+                                 : last_pilot_message_.callsign;
+            response = "Say again, " + cs + ".";
+          }
+
+          XPLMDebugString(
+              ("[xp_wellys_atc] ATC (fallback): " + response + "\n").c_str());
+          transcript_.push_back(TranscriptEntry{
+              static_cast<double>(XPLMGetElapsedTime()),
+              false,
+              response,
+              freq_str,
+          });
+          speak_response(response);
+        } else {
+          // GPT intent classification
+          ++total_api_calls_;
+
+          using FT = xplane_context::FrequencyType;
+          bool is_towered =
+              ctx.is_towered_airport &&
+              ctx.frequency_type != FT::UNICOM &&
+              ctx.frequency_type != FT::CTAF;
+
+          std::string state_str = atc_state_machine::state_name(
+              atc_state_machine::get_state());
+          auto valid =
+              atc_templates::valid_intents(is_towered, state_str);
+
+          std::string valid_list;
+          for (const auto &v : valid) {
+            if (!valid_list.empty())
+              valid_list += ", ";
+            valid_list += v;
+          }
+
+          std::string sys_prompt =
+              atc_templates::get_prompt("gpt_classify_prompt");
+          if (sys_prompt.empty()) {
+            sys_prompt =
+                "You are an ATC intent classifier. The pilot is in "
+                "state {state}. Valid intents: {valid_intents}. The "
+                "pilot said: \"{transcript}\"\nRespond with ONLY the "
+                "intent name, nothing else. If none match, respond "
+                "with \"_INVALID\".";
+          }
+          sys_prompt = atc_templates::fill(
+              sys_prompt,
+              {{"state", state_str},
+               {"valid_intents", valid_list},
+               {"transcript", transcript}});
+
+          XPLMDebugString(
+              "[xp_wellys_atc] Routing to GPT intent classification\n");
+
+          std::string freq_copy = freq_str;
+          auto msg_copy = last_pilot_message_;
+          const auto &ctx_copy = ctx;
+
+          gpt_client::classify_intent_async(
+              transcript, sys_prompt,
+              // NOLINTNEXTLINE(bugprone-exception-escape)
+              [freq_copy, msg_copy, ctx_copy, is_towered,
+               state_str](std::string intent_key, bool gpt_success) {
+                if (!gpt_success)
+                  intent_key = "_INVALID";
+
+                if (settings::debug_logging()) {
+                  XPLMDebugString(
+                      ("[xp_wellys_atc][DEBUG] GPT classified intent: " +
+                       intent_key + "\n")
+                          .c_str());
+                }
+
+                auto vars =
+                    atc_state_machine::build_vars(msg_copy, ctx_copy);
+                auto tmpl = atc_templates::lookup(
+                    is_towered, state_str, intent_key);
+                std::string response =
+                    atc_templates::fill(tmpl.response_template, vars);
+
+                // Apply state transition
+                auto next_state =
+                    atc_state_machine::state_from_name(tmpl.next_state);
+                atc_state_machine::set_state(next_state);
+
+                transcript_.push_back(TranscriptEntry{
+                    static_cast<double>(XPLMGetElapsedTime()),
+                    false,
+                    response,
+                    freq_copy,
+                });
+                speak_response(response);
+              });
         }
       });
 }

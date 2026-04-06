@@ -17,6 +17,7 @@
  */
 
 #include "whisper_client.hpp"
+#include "atc_templates.hpp"
 #include "settings.hpp"
 
 #include <XPLMUtilities.h>
@@ -95,6 +96,14 @@ void transcribe_async(
     part = curl_mime_addpart(mime);
     curl_mime_name(part, "language");
     curl_mime_data(part, "en", CURL_ZERO_TERMINATED);
+
+    // Prompt hint to guide Whisper toward aviation phraseology
+    std::string whisper_prompt = atc_templates::get_prompt("whisper_prompt");
+    if (!whisper_prompt.empty()) {
+      part = curl_mime_addpart(mime);
+      curl_mime_name(part, "prompt");
+      curl_mime_data(part, whisper_prompt.c_str(), CURL_ZERO_TERMINATED);
+    }
 
     // Auth header
     std::string auth_header = "Authorization: Bearer " + api_key;

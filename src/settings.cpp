@@ -129,6 +129,8 @@ void init() {
 
 void stop() {}
 
+std::string get_data_dir() { return data_dir_path; }
+
 void save() {
   std::string json_path = data_dir_path + "/settings.json";
   std::ofstream out(json_path);

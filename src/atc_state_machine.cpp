@@ -17,6 +17,7 @@
  */
 
 #include "atc_state_machine.hpp"
+#include "atc_templates.hpp"
 #include "settings.hpp"
 
 #include <XPLMUtilities.h>
@@ -97,16 +98,77 @@ const char *state_name(ATCState state) {
   return "UNKNOWN";
 }
 
+ATCState state_from_name(const std::string &name) {
+  if (name == "IDLE")
+    return ATCState::IDLE;
+  if (name == "GROUND_CONTACT")
+    return ATCState::GROUND_CONTACT;
+  if (name == "TAXI_CLEARED")
+    return ATCState::TAXI_CLEARED;
+  if (name == "TOWER_CONTACT")
+    return ATCState::TOWER_CONTACT;
+  if (name == "DEPARTURE_CLEARED")
+    return ATCState::DEPARTURE_CLEARED;
+  if (name == "PATTERN_ENTRY")
+    return ATCState::PATTERN_ENTRY;
+  if (name == "LANDING_CLEARED")
+    return ATCState::LANDING_CLEARED;
+  if (name == "UNICOM_ACTIVE")
+    return ATCState::UNICOM_ACTIVE;
+  return ATCState::IDLE;
+}
+
+void set_state(ATCState state) {
+  char log[256];
+  std::snprintf(log, sizeof(log),
+                "[xp_wellys_atc] ATC state (external): %s -> %s\n",
+                state_name(state_), state_name(state));
+  XPLMDebugString(log);
+  state_ = state;
+}
+
+static std::string extract_position(const intent_parser::PilotMessage &msg,
+                                    const xplane_context::XPlaneContext &ctx) {
+  std::string rwy = get_runway(msg);
+  std::string apt = airport_name(ctx);
+
+  if (ctx.on_ground)
+    return "on the ground at " + apt;
+
+  std::string lower = msg.raw_transcript;
+  for (auto &c : lower)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+  if (lower.find("downwind") != std::string::npos)
+    return "downwind runway " + rwy;
+  if (lower.find("base") != std::string::npos)
+    return "base runway " + rwy;
+  if (lower.find("final") != std::string::npos)
+    return "final runway " + rwy;
+  if (lower.find("crosswind") != std::string::npos)
+    return "crosswind runway " + rwy;
+  if (lower.find("upwind") != std::string::npos)
+    return "upwind runway " + rwy;
+  return "in the pattern at " + apt;
+}
+
+std::map<std::string, std::string>
+build_vars(const intent_parser::PilotMessage &msg,
+           const xplane_context::XPlaneContext &ctx) {
+  return {
+      {"callsign", get_callsign(msg)},
+      {"airport", airport_name(ctx)},
+      {"runway", get_runway(msg)},
+      {"wind", format_wind(ctx.wind_direction_deg, ctx.wind_speed_kt)},
+      {"qnh", format_qnh(ctx.qnh_inhg)},
+      {"frequency", "121.9"}, // TODO: derive from xplane_context
+      {"position", extract_position(msg, ctx)},
+  };
+}
+
 ATCResponse process(const intent_parser::PilotMessage &msg,
                     const xplane_context::XPlaneContext &ctx) {
-  using Intent = intent_parser::PilotIntent;
   ATCResponse resp;
-
-  std::string cs = get_callsign(msg);
-  std::string rwy = get_runway(msg);
-  std::string qnh = format_qnh(ctx.qnh_inhg);
-  std::string wind = format_wind(ctx.wind_direction_deg, ctx.wind_speed_kt);
-  std::string apt = airport_name(ctx);
 
   using FT = xplane_context::FrequencyType;
 
@@ -116,45 +178,22 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
                      ctx.frequency_type == FT::CTAF;
 
   if (unicom_flow) {
-    // Traffic awareness only — no clearances
-    std::string position;
-    if (ctx.on_ground) {
-      position = "on the ground at " + apt;
-    } else {
-      // Try to extract position from transcript
-      std::string lower = msg.raw_transcript;
-      for (auto &c : lower)
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-      if (lower.find("downwind") != std::string::npos)
-        position = "downwind runway " + rwy;
-      else if (lower.find("base") != std::string::npos)
-        position = "base runway " + rwy;
-      else if (lower.find("final") != std::string::npos)
-        position = "final runway " + rwy;
-      else if (lower.find("crosswind") != std::string::npos)
-        position = "crosswind runway " + rwy;
-      else if (lower.find("upwind") != std::string::npos)
-        position = "upwind runway " + rwy;
-      else
-        position = "in the pattern at " + apt;
-    }
+    auto vars = build_vars(msg, ctx);
+    std::string intent_key = intent_parser::intent_template_key(msg.intent);
+    auto tmpl = atc_templates::lookup(false, "IDLE", intent_key);
 
-    resp.text = "Traffic in the area, " + cs + " reported " + position + ".";
-    resp.next_state = ATCState::IDLE; // immediately back to IDLE
+    resp.text = atc_templates::fill(tmpl.response_template, vars);
+    resp.next_state = ATCState::IDLE;
     state_ = ATCState::IDLE;
 
-    char log[256];
-    std::snprintf(log, sizeof(log),
-                  "[xp_wellys_atc] ATC state: UNICOM_ACTIVE -> IDLE "
-                  "(non-towered/CTAF)\n");
-    XPLMDebugString(log);
+    XPLMDebugString("[xp_wellys_atc] ATC state: UNICOM_ACTIVE -> IDLE "
+                    "(non-towered/CTAF)\n");
     return resp;
   }
 
   // Frequency-based state validation at towered airports
   if (ctx.frequency_type == FT::GROUND && state_ != ATCState::IDLE &&
       state_ != ATCState::GROUND_CONTACT && state_ != ATCState::TAXI_CLEARED) {
-    // On ground frequency but in tower state — reset
     state_ = ATCState::IDLE;
   }
   if (ctx.frequency_type == FT::TOWER && state_ != ATCState::IDLE &&
@@ -162,119 +201,18 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
       state_ != ATCState::DEPARTURE_CLEARED &&
       state_ != ATCState::PATTERN_ENTRY &&
       state_ != ATCState::LANDING_CLEARED) {
-    // On tower frequency but in ground state — skip to tower
     state_ = ATCState::IDLE;
   }
 
-  switch (state_) {
-  case ATCState::IDLE: {
-    if (msg.intent == Intent::INITIAL_CALL) {
-      // Check if targeting ground/delivery → GROUND_CONTACT
-      std::string lower = msg.raw_transcript;
-      for (auto &c : lower)
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  // Template-based response lookup
+  auto vars = build_vars(msg, ctx);
+  std::string intent_key = intent_parser::intent_template_key(msg.intent);
+  std::string state_str = state_name(state_);
 
-      if (lower.find("ground") != std::string::npos ||
-          lower.find("delivery") != std::string::npos) {
-        resp.text = cs + ", " + apt + " Ground, information Alpha, runway " +
-                    rwy + ", QNH " + qnh + ", taxi to holding point runway " +
-                    rwy + " via Alpha.";
-        resp.next_state = ATCState::GROUND_CONTACT;
-        resp.requires_readback = true;
-      }
-      // Check if targeting tower → TOWER_CONTACT (e.g., arriving aircraft)
-      else if (lower.find("tower") != std::string::npos) {
-        resp.text = cs + ", " + apt + " Tower, runway " + rwy +
-                    ", hold short, number one.";
-        resp.next_state = ATCState::TOWER_CONTACT;
-        resp.requires_readback = false;
-      }
-    }
-    break;
-  }
-
-  case ATCState::GROUND_CONTACT: {
-    if (msg.intent == Intent::REQUEST_TAXI) {
-      resp.text = cs + ", taxi to holding point runway " + rwy +
-                  " via Alpha, QNH " + qnh + ".";
-      resp.next_state = ATCState::TAXI_CLEARED;
-      resp.requires_readback = true;
-    }
-    break;
-  }
-
-  case ATCState::TAXI_CLEARED: {
-    if (msg.intent == Intent::INITIAL_CALL) {
-      std::string lower = msg.raw_transcript;
-      for (auto &c : lower)
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-
-      if (lower.find("tower") != std::string::npos) {
-        resp.text = cs + ", " + apt + " Tower, runway " + rwy +
-                    ", hold short, number one.";
-        resp.next_state = ATCState::TOWER_CONTACT;
-        resp.requires_readback = false;
-      }
-    }
-    break;
-  }
-
-  case ATCState::TOWER_CONTACT: {
-    if (msg.intent == Intent::READY_FOR_DEPARTURE) {
-      resp.text =
-          cs + ", runway " + rwy + ", cleared for takeoff, wind " + wind + ".";
-      resp.next_state = ATCState::DEPARTURE_CLEARED;
-      resp.requires_readback = true;
-    } else if (msg.intent == Intent::REQUEST_LANDING ||
-               (msg.intent == Intent::REPORT_POSITION && !ctx.on_ground)) {
-      resp.text = cs + ", number one, runway " + rwy + ", report final.";
-      resp.next_state = ATCState::PATTERN_ENTRY;
-      resp.requires_readback = false;
-    }
-    break;
-  }
-
-  case ATCState::DEPARTURE_CLEARED: {
-    if (msg.intent == Intent::READBACK) {
-      resp.text = cs + ", frequency change approved, good day.";
-      resp.next_state = ATCState::IDLE;
-      resp.requires_readback = false;
-    }
-    break;
-  }
-
-  case ATCState::PATTERN_ENTRY: {
-    if (msg.intent == Intent::REPORT_POSITION) {
-      std::string lower = msg.raw_transcript;
-      for (auto &c : lower)
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-
-      if (lower.find("final") != std::string::npos) {
-        resp.text =
-            cs + ", runway " + rwy + ", cleared to land, wind " + wind + ".";
-        resp.next_state = ATCState::LANDING_CLEARED;
-        resp.requires_readback = true;
-      }
-    }
-    break;
-  }
-
-  case ATCState::LANDING_CLEARED: {
-    if (msg.intent == Intent::RUNWAY_VACATED) {
-      resp.text = cs + ", contact ground on 121.9, good day.";
-      resp.next_state = ATCState::IDLE;
-      resp.requires_readback = false;
-    }
-    break;
-  }
-
-  case ATCState::UNICOM_ACTIVE: {
-    // Should not reach here — handled by unicom_flow above
-    resp.next_state = ATCState::IDLE;
-    state_ = ATCState::IDLE;
-    break;
-  }
-  }
+  auto tmpl = atc_templates::lookup(true, state_str, intent_key);
+  resp.text = atc_templates::fill(tmpl.response_template, vars);
+  resp.next_state = state_from_name(tmpl.next_state);
+  resp.requires_readback = tmpl.requires_readback;
 
   // Apply state transition if we have a response
   if (!resp.text.empty()) {

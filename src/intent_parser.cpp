@@ -320,10 +320,24 @@ static bool match_request_taxi(const std::string &t) {
          contains(t, "taxiing");
 }
 
+static bool match_radio_check(const std::string &t) {
+  return contains(t, "radio check") || contains(t, "how do you read");
+}
+
+static bool match_report_position_downwind(const std::string &t) {
+  return contains(t, "downwind");
+}
+
+static bool match_report_position_base(const std::string &t) {
+  return contains(t, "base") && !contains(t, "base leg to final");
+}
+
+static bool match_report_position_final(const std::string &t) {
+  return contains(t, "final") && !contains(t, "full stop");
+}
+
 static bool match_report_position(const std::string &t) {
-  return contains(t, "downwind") || contains(t, "base") ||
-         contains(t, "final") || contains(t, "crosswind") ||
-         contains(t, "upwind");
+  return contains(t, "crosswind") || contains(t, "upwind");
 }
 
 static bool match_request_landing(const std::string &t) {
@@ -336,13 +350,29 @@ static bool match_request_frequency(const std::string &t) {
          contains(t, "with you");
 }
 
+static bool has_facility_keyword(const std::string &t,
+                                 const std::string &facility) {
+  return starts_with(t, facility) || contains(t, " " + facility + ",") ||
+         contains(t, " " + facility + " ") || ends_with(t, " " + facility);
+}
+
+static bool match_initial_call_ground(const std::string &t) {
+  return has_facility_keyword(t, "ground") ||
+         has_facility_keyword(t, "delivery");
+}
+
+static bool match_initial_call_inbound(const std::string &t) {
+  return has_facility_keyword(t, "tower") &&
+         (contains(t, "inbound") || contains(t, "landing") ||
+          contains(t, "full stop"));
+}
+
+static bool match_initial_call_tower(const std::string &t) {
+  return has_facility_keyword(t, "tower");
+}
+
 static bool match_initial_call(const std::string &t) {
-  return starts_with(t, "ground") || starts_with(t, "tower") ||
-         starts_with(t, "delivery") ||
-         // Also match "zurich ground", "kennedy tower", etc.
-         contains(t, " ground,") || contains(t, " tower,") ||
-         contains(t, " delivery,") || contains(t, " ground ") ||
-         contains(t, " tower ") || contains(t, " delivery ");
+  return match_initial_call_ground(t) || match_initial_call_tower(t);
 }
 
 static bool match_readback(const std::string &t) {
@@ -369,14 +399,22 @@ static bool match_readback(const std::string &t) {
 // Rules in priority order
 static const std::vector<IntentRule> kRules = {
     {PilotIntent::UNABLE, 0.95f, match_unable},
+    {PilotIntent::RADIO_CHECK, 0.95f, match_radio_check},
     {PilotIntent::SELF_ANNOUNCE, 0.90f, match_self_announce},
     {PilotIntent::READY_FOR_DEPARTURE, 0.90f, match_ready_for_departure},
     {PilotIntent::RUNWAY_VACATED, 0.90f, match_runway_vacated},
     {PilotIntent::REQUEST_TAXI, 0.90f, match_request_taxi},
-    {PilotIntent::REPORT_POSITION, 0.90f, match_report_position},
+    {PilotIntent::REPORT_POSITION_DOWNWIND, 0.90f,
+     match_report_position_downwind},
+    {PilotIntent::REPORT_POSITION_BASE, 0.90f, match_report_position_base},
+    {PilotIntent::REPORT_POSITION_FINAL, 0.90f, match_report_position_final},
+    {PilotIntent::REPORT_POSITION, 0.85f, match_report_position},
     {PilotIntent::REQUEST_LANDING, 0.85f, match_request_landing},
     {PilotIntent::REQUEST_FREQUENCY, 0.80f, match_request_frequency},
-    {PilotIntent::INITIAL_CALL, 0.85f, match_initial_call},
+    {PilotIntent::INITIAL_CALL_GROUND, 0.85f, match_initial_call_ground},
+    {PilotIntent::INITIAL_CALL_INBOUND, 0.85f, match_initial_call_inbound},
+    {PilotIntent::INITIAL_CALL_TOWER, 0.85f, match_initial_call_tower},
+    {PilotIntent::INITIAL_CALL, 0.80f, match_initial_call},
     {PilotIntent::READBACK, 0.75f, match_readback},
 };
 
@@ -388,14 +426,28 @@ const char *intent_name(PilotIntent intent) {
   switch (intent) {
   case PilotIntent::UNKNOWN:
     return "UNKNOWN";
+  case PilotIntent::RADIO_CHECK:
+    return "RADIO_CHECK";
   case PilotIntent::INITIAL_CALL:
     return "INITIAL_CALL";
+  case PilotIntent::INITIAL_CALL_GROUND:
+    return "INITIAL_CALL_GROUND";
+  case PilotIntent::INITIAL_CALL_TOWER:
+    return "INITIAL_CALL_TOWER";
+  case PilotIntent::INITIAL_CALL_INBOUND:
+    return "INITIAL_CALL_INBOUND";
   case PilotIntent::REQUEST_TAXI:
     return "REQUEST_TAXI";
   case PilotIntent::READY_FOR_DEPARTURE:
     return "READY_FOR_DEPARTURE";
   case PilotIntent::REPORT_POSITION:
     return "REPORT_POSITION";
+  case PilotIntent::REPORT_POSITION_DOWNWIND:
+    return "REPORT_POSITION_DOWNWIND";
+  case PilotIntent::REPORT_POSITION_BASE:
+    return "REPORT_POSITION_BASE";
+  case PilotIntent::REPORT_POSITION_FINAL:
+    return "REPORT_POSITION_FINAL";
   case PilotIntent::REQUEST_LANDING:
     return "REQUEST_LANDING";
   case PilotIntent::RUNWAY_VACATED:
@@ -410,6 +462,17 @@ const char *intent_name(PilotIntent intent) {
     return "SELF_ANNOUNCE";
   }
   return "UNKNOWN";
+}
+
+const char *intent_template_key(PilotIntent intent) {
+  switch (intent) {
+  case PilotIntent::INITIAL_CALL:
+    return "INITIAL_CALL_TOWER"; // default fallback for generic initial call
+  case PilotIntent::REPORT_POSITION:
+    return "REPORT_POSITION";
+  default:
+    return intent_name(intent);
+  }
 }
 
 PilotMessage parse(const std::string &transcript,
@@ -443,8 +506,10 @@ PilotMessage parse(const std::string &transcript,
     msg.confidence = 0.3f;
   }
 
-  if (msg.intent == PilotIntent::INITIAL_CALL && !ctx.is_towered_airport &&
-      contains(text, "tower")) {
+  if ((msg.intent == PilotIntent::INITIAL_CALL ||
+       msg.intent == PilotIntent::INITIAL_CALL_TOWER ||
+       msg.intent == PilotIntent::INITIAL_CALL_INBOUND) &&
+      !ctx.is_towered_airport && contains(text, "tower")) {
     msg.confidence = 0.4f;
   }
 

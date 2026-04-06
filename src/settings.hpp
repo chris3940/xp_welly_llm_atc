@@ -33,6 +33,9 @@ std::string load_api_key();
 void delete_api_key();
 std::string get_api_key();
 
+// Data directory path
+std::string get_data_dir();
+
 // Getters
 bool api_key_saved();
 std::string tts_voice();

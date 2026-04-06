@@ -17,6 +17,7 @@
  */
 
 #include "gpt_client.hpp"
+#include "atc_templates.hpp"
 #include "settings.hpp"
 
 #include <XPLMUtilities.h>
@@ -64,15 +65,20 @@ void ask_async(
   std::string model = settings::gpt_model();
 
   std::string system_prompt =
-      "You are an ATC controller at " + airport +
-      " airport. "
-      "The pilot is flying VFR. Respond using standard ICAO phraseology only. "
-      "Plain text, no markdown. Maximum 2 sentences. "
-      "The pilot's callsign is " +
-      callsign +
-      ". "
-      "Current conditions: on ground=" +
-      (on_ground ? "true" : "false") + ".";
+      atc_templates::get_prompt("gpt_fallback_prompt");
+  if (system_prompt.empty()) {
+    system_prompt =
+        "You are an ATC controller at {airport} airport. The pilot is "
+        "flying VFR. Respond using standard ICAO phraseology only. "
+        "Plain text, no markdown. Maximum 2 sentences. The pilot's "
+        "callsign is {callsign}. Current conditions: on "
+        "ground={on_ground}.";
+  }
+  system_prompt = atc_templates::fill(
+      system_prompt,
+      {{"airport", airport},
+       {"callsign", callsign},
+       {"on_ground", on_ground ? "true" : "false"}});
 
   // NOLINTNEXTLINE(bugprone-exception-escape)
   std::thread([pilot_text, system_prompt, model,
@@ -156,6 +162,106 @@ void ask_async(
       } catch (const std::exception &e) {
         std::string err = std::string("JSON parse error: ") + e.what();
         enqueue_callback([callback, err]() { callback(err, false); });
+      }
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+    }
+  }).detach();
+}
+
+void classify_intent_async(
+    const std::string &transcript, const std::string &system_prompt,
+    std::function<void(std::string intent_key, bool success)> callback) {
+
+  // NOLINTNEXTLINE(bugprone-exception-escape)
+  std::thread([transcript, system_prompt,
+               callback = std::move(callback)]() {
+    try {
+      std::string api_key = settings::get_api_key();
+      if (api_key.empty()) {
+        enqueue_callback(
+            [callback]() { callback("_INVALID", false); });
+        return;
+      }
+
+      CURL *curl = curl_easy_init();
+      if (!curl) {
+        enqueue_callback(
+            [callback]() { callback("_INVALID", false); });
+        return;
+      }
+
+      nlohmann::json body = {
+          {"model", "gpt-4o-mini"},
+          {"messages",
+           {{{"role", "system"}, {"content", system_prompt}},
+            {{"role", "user"}, {"content", transcript}}}},
+          {"max_tokens", 20},
+          {"temperature", 0.0}};
+
+      std::string body_str = body.dump();
+
+      std::string auth_header = "Authorization: Bearer " + api_key;
+      struct curl_slist *headers = nullptr;
+      headers = curl_slist_append(headers, auth_header.c_str());
+      headers = curl_slist_append(headers, "Content-Type: application/json");
+
+      std::string response_body;
+
+      curl_easy_setopt(curl, CURLOPT_URL,
+                       "https://api.openai.com/v1/chat/completions");
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
+      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+
+      CURLcode res = curl_easy_perform(curl);
+
+      if (res != CURLE_OK) {
+        std::string err = curl_easy_strerror(res);
+        XPLMDebugString(
+            ("[xp_wellys_atc][ERROR] GPT classify curl error: " + err + "\n")
+                .c_str());
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        enqueue_callback(
+            [callback]() { callback("_INVALID", false); });
+        return;
+      }
+
+      long http_code = 0;
+      curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+      curl_slist_free_all(headers);
+      curl_easy_cleanup(curl);
+
+      if (http_code != 200) {
+        XPLMDebugString(("[xp_wellys_atc][ERROR] GPT classify HTTP " +
+                         std::to_string(http_code) + "\n")
+                            .c_str());
+        enqueue_callback(
+            [callback]() { callback("_INVALID", false); });
+        return;
+      }
+
+      try {
+        auto j = nlohmann::json::parse(response_body);
+        std::string content =
+            j["choices"][0]["message"]["content"].get<std::string>();
+        // Trim whitespace
+        while (!content.empty() && std::isspace(content.front()))
+          content.erase(content.begin());
+        while (!content.empty() && std::isspace(content.back()))
+          content.pop_back();
+        enqueue_callback(
+            [callback, content]() { callback(content, true); });
+      } catch (const std::exception &e) {
+        XPLMDebugString(
+            ("[xp_wellys_atc][ERROR] GPT classify parse error: " +
+             std::string(e.what()) + "\n")
+                .c_str());
+        enqueue_callback(
+            [callback]() { callback("_INVALID", false); });
       }
     } catch (...) { // NOLINT(bugprone-empty-catch)
     }

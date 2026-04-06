@@ -42,6 +42,7 @@ add_library(xp_wellys_atc MODULE
     src/whisper_client.cpp
     src/intent_parser.cpp
     src/atc_state_machine.cpp
+    src/atc_templates.cpp
     src/gpt_client.cpp
     src/tts_client.cpp
     src/audio_player.cpp

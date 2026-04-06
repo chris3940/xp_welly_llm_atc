@@ -33,6 +33,10 @@ void ask_async(
     const std::string &pilot_text, const xplane_context::XPlaneContext &ctx,
     std::function<void(std::string response, bool success)> callback);
 
+void classify_intent_async(
+    const std::string &transcript, const std::string &system_prompt,
+    std::function<void(std::string intent_key, bool success)> callback);
+
 void drain_callback_queue();
 
 } // namespace gpt_client

@@ -27,10 +27,17 @@ namespace intent_parser {
 
 enum class PilotIntent {
   UNKNOWN,
+  RADIO_CHECK,
   INITIAL_CALL,
+  INITIAL_CALL_GROUND,
+  INITIAL_CALL_TOWER,
+  INITIAL_CALL_INBOUND,
   REQUEST_TAXI,
   READY_FOR_DEPARTURE,
   REPORT_POSITION,
+  REPORT_POSITION_DOWNWIND,
+  REPORT_POSITION_BASE,
+  REPORT_POSITION_FINAL,
   REQUEST_LANDING,
   RUNWAY_VACATED,
   READBACK,
@@ -54,6 +61,7 @@ PilotMessage parse(const std::string &transcript,
                    const xplane_context::XPlaneContext &ctx);
 
 const char *intent_name(PilotIntent intent);
+const char *intent_template_key(PilotIntent intent);
 
 } // namespace intent_parser
 

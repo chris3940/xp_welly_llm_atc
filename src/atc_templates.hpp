@@ -1,0 +1,55 @@
+/*
+ * xp_wellys_atc - AI-powered ATC voice communication for X-Plane 12
+ * Copyright (C) 2026 thWelly & Claude (Anthropic)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#ifndef ATC_TEMPLATES_HPP
+#define ATC_TEMPLATES_HPP
+
+#include <map>
+#include <string>
+#include <vector>
+
+namespace atc_templates {
+
+struct TemplateEntry {
+  std::string response_template;
+  std::string next_state;
+  bool requires_readback = false;
+};
+
+void init();
+void stop();
+void reload();
+
+// Lookup template for state+intent, falls back to _INVALID for that state
+TemplateEntry lookup(bool is_towered, const std::string &state,
+                     const std::string &intent_key);
+
+// Return valid intent keys for a given state (excluding _INVALID)
+std::vector<std::string> valid_intents(bool is_towered,
+                                       const std::string &state);
+
+// Replace {key} placeholders in template string with values from vars
+std::string fill(const std::string &tmpl,
+                 const std::map<std::string, std::string> &vars);
+
+// Get a prompt template by key (e.g. "whisper_prompt", "gpt_classify_prompt")
+std::string get_prompt(const std::string &key);
+
+} // namespace atc_templates
+
+#endif // ATC_TEMPLATES_HPP

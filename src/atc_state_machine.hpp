@@ -22,6 +22,7 @@
 #include "intent_parser.hpp"
 #include "xplane_context.hpp"
 
+#include <map>
 #include <string>
 
 namespace atc_state_machine {
@@ -49,6 +50,13 @@ void reset();
 
 ATCState get_state();
 const char *state_name(ATCState state);
+
+ATCState state_from_name(const std::string &name);
+void set_state(ATCState state);
+
+std::map<std::string, std::string>
+build_vars(const intent_parser::PilotMessage &msg,
+           const xplane_context::XPlaneContext &ctx);
 
 ATCResponse process(const intent_parser::PilotMessage &msg,
                     const xplane_context::XPlaneContext &ctx);

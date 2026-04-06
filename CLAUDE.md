@@ -59,16 +59,18 @@ xp_wellys_atc/
 │   ├── ptt_input.hpp/.cpp      # Push-to-talk (keyboard + joystick)
 │   ├── audio_recorder.hpp/.cpp # Core Audio mic capture → WAV buffer
 │   ├── whisper_client.hpp/.cpp # OpenAI Whisper API
-│   ├── intent_parser.hpp/.cpp  # Rule-based transcript → PilotIntent
-│   ├── atc_state_machine.hpp/.cpp  # VFR ATC logic + response generation
-│   ├── gpt_client.hpp/.cpp     # GPT-4o-mini fallback
+│   ├── intent_parser.hpp/.cpp  # Rule-based transcript → PilotIntent (with sub-variants)
+│   ├── atc_state_machine.hpp/.cpp  # VFR ATC logic + template-based response generation
+│   ├── atc_templates.hpp/.cpp  # JSON template engine for ATC responses
+│   ├── gpt_client.hpp/.cpp     # GPT-4o-mini fallback + intent classification
 │   ├── tts_client.hpp/.cpp     # OpenAI TTS API
 │   ├── audio_player.hpp/.cpp   # Core Audio MP3 playback
 │   ├── xplane_context.hpp/.cpp # X-Plane DataRef reader
 │   ├── settings.hpp/.cpp       # JSON config + Keychain API key
 │   └── atc_ui.hpp/.cpp         # Dear ImGui window
 ├── data/
-│   └── settings.json           # Runtime config, never committed
+│   ├── settings.json           # Runtime config, never committed
+│   └── atc_templates.json      # ATC response templates (towered + uncontrolled)
 ├── sdk/                        # make setup, not committed
 └── vendor/                     # make setup, not committed
 ```
@@ -93,17 +95,19 @@ Each module uses a C++ namespace with `init()` and `stop()` lifecycle functions 
 
 **`whisper_client`** — POSTs WAV buffer to OpenAI `/v1/audio/transcriptions` via libcurl multipart. Returns `std::string` transcript. Runs on `std::thread`.
 
-**`intent_parser`** — Rule-based keyword/pattern matching on transcript text + `XPlaneContext`. Returns `PilotMessage` with `PilotIntent` enum and confidence score.
+**`intent_parser`** — Rule-based keyword/pattern matching on transcript text + `XPlaneContext`. Returns `PilotMessage` with `PilotIntent` enum and confidence score. Supports sub-variant intents: `INITIAL_CALL_GROUND/TOWER/INBOUND`, `REPORT_POSITION_DOWNWIND/BASE/FINAL`, `RADIO_CHECK`. Provides `intent_template_key()` mapping enum to JSON template keys.
 
-**`atc_state_machine`** — Owns current `ATCState`. On valid `PilotIntent`, transitions state and returns `ATCResponse` text using phraseology templates.
+**`atc_templates`** — JSON template engine. Loads `data/atc_templates.json` at init. Provides `lookup(is_towered, state, intent_key)` for template resolution with `_INVALID` fallback, `fill(template, vars)` for variable substitution, and `valid_intents()` for GPT classification prompts. Supports hot-reload via `reload()`.
 
-**`gpt_client`** — Called by `atc_state_machine` when intent confidence is low or intent is `UNKNOWN`. POSTs to OpenAI `/v1/chat/completions` with ATC system prompt. Runs on `std::thread`.
+**`atc_state_machine`** — Owns current `ATCState`. On valid `PilotIntent`, transitions state and returns `ATCResponse` text via template lookup. Provides `build_vars()` for constructing template variable maps, `state_from_name()` for string-to-enum conversion, and `set_state()` for external state transitions (GPT path).
+
+**`gpt_client`** — Two functions: `ask_async()` for full ATC response generation (emergency fallback), and `classify_intent_async()` for lightweight intent classification (max_tokens=20, temperature=0.0, gpt-4o-mini). Both POST to OpenAI `/v1/chat/completions`. Run on `std::thread`.
 
 **`tts_client`** — POSTs ATC response text to OpenAI `/v1/audio/speech`. Returns MP3 as `std::vector<uint8_t>`. Runs on `std::thread`.
 
 **`audio_player`** — Decodes MP3 via `AudioToolbox ExtAudioFile`. Plays PCM via Core Audio default output. Respects `settings.volume`.
 
-**`atc_session`** — Owns the PTT state machine (`IDLE → RECORDING → PROCESSING → PLAYING`). Coordinates the full pipeline. Blocks new PTT input while `PROCESSING` or `PLAYING`.
+**`atc_session`** — Owns the PTT state machine (`IDLE → RECORDING → PROCESSING → PLAYING`). Coordinates the full pipeline with two-stage intent resolution: high-confidence intents (≥0.7) go directly through the state machine; low-confidence or UNKNOWN intents route to GPT intent classification. Blocks new PTT input while `PROCESSING` or `PLAYING`.
 
 **`atc_ui`** — Dear ImGui window with Transcript panel, Status bar, and Settings tab.
 
@@ -130,17 +134,23 @@ struct XPlaneContext {
 
 enum class PilotIntent {
     UNKNOWN,
-    INITIAL_CALL,
+    RADIO_CHECK,
+    INITIAL_CALL,             // generic fallback
+    INITIAL_CALL_GROUND,      // "ground" / "delivery"
+    INITIAL_CALL_TOWER,       // "tower" (without inbound)
+    INITIAL_CALL_INBOUND,     // "tower" + "inbound"/"landing"
     REQUEST_TAXI,
     READY_FOR_DEPARTURE,
-    TRAFFIC_REPORT,
+    REPORT_POSITION,          // generic (crosswind/upwind)
+    REPORT_POSITION_DOWNWIND,
+    REPORT_POSITION_BASE,
+    REPORT_POSITION_FINAL,
     REQUEST_LANDING,
-    REPORT_POSITION,        // downwind / base / final
     RUNWAY_VACATED,
-    REQUEST_FREQUENCY,
     READBACK,
+    REQUEST_FREQUENCY,
     UNABLE,
-    SELF_ANNOUNCE,          // CTAF only
+    SELF_ANNOUNCE,            // CTAF only
 };
 
 struct PilotMessage {

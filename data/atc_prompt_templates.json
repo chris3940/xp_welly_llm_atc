@@ -1,0 +1,14 @@
+{
+  "whisper_prompt": {
+    "description": "Sent as 'prompt' parameter to OpenAI Whisper API to improve transcription of aviation radio communication. No variables — this is a static context hint that biases Whisper toward ATC vocabulary and NATO phonetic alphabet.",
+    "prompt": "ATC radio communication. ICAO phraseology. Callsigns use NATO phonetic alphabet: Alpha, Bravo, Charlie, Delta, Echo, Foxtrot, Golf, Hotel, India, Juliet, Kilo, Lima, Mike, November, Oscar, Papa, Quebec, Romeo, Sierra, Tango, Uniform, Victor, Whiskey, X-ray, Yankee, Zulu. Common phrases: request taxi, holding short, ready for departure, cleared for takeoff, downwind, base, final, cleared to land, runway vacated, radio check, inbound for landing, touch and go, QNH, wilco, roger."
+  },
+  "gpt_classify_prompt": {
+    "description": "System prompt for GPT-4o-mini intent classification. Used when the local keyword parser returns low confidence (<0.7) or UNKNOWN. GPT picks the best matching intent from the valid options for the current ATC state. Variables: {state} = current ATC state (e.g. IDLE, TOWER_CONTACT), {valid_intents} = comma-separated list of allowed intents, {transcript} = pilot's spoken text from Whisper.",
+    "prompt": "You are an ATC intent classifier. The pilot is in state {state}. Valid intents: {valid_intents}. The pilot said: \"{transcript}\"\nRespond with ONLY the intent name, nothing else. If none match, respond with \"_INVALID\"."
+  },
+  "gpt_fallback_prompt": {
+    "description": "System prompt for GPT-4o-mini full ATC response generation. Used as emergency fallback when both the local parser and intent classification fail. GPT generates a complete ATC response in ICAO phraseology. Variables: {airport} = nearest airport ICAO code, {callsign} = pilot callsign (NATO phonetic), {on_ground} = true/false.",
+    "prompt": "You are an ATC controller at {airport} airport. The pilot is flying VFR. Respond using standard ICAO phraseology only. Plain text, no markdown. Maximum 2 sentences. The pilot's callsign is {callsign}. Current conditions: on ground={on_ground}."
+  }
+}
