@@ -97,6 +97,11 @@
         "next_state": "PATTERN_ENTRY",
         "requires_readback": false
       },
+      "REQUEST_TOUCH_AND_GO": {
+        "response": "{callsign}, runway {runway}, cleared touch and go, wind {wind}.",
+        "next_state": "TOUCH_AND_GO_CLEARED",
+        "requires_readback": true
+      },
       "READBACK": {
         "response": "{callsign}, readback correct.",
         "next_state": "TOWER_CONTACT",
@@ -156,9 +161,51 @@
         "next_state": "LANDING_CLEARED",
         "requires_readback": true
       },
+      "REQUEST_TOUCH_AND_GO": {
+        "response": "{callsign}, runway {runway}, cleared touch and go, wind {wind}.",
+        "next_state": "TOUCH_AND_GO_CLEARED",
+        "requires_readback": true
+      },
+      "GO_AROUND": {
+        "response": "{callsign}, roger, fly runway heading, climb and maintain pattern altitude, re-enter {pattern_direction} downwind runway {runway}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
+      },
       "_INVALID": {
         "response": "{callsign}, report your position.",
         "next_state": "PATTERN_ENTRY",
+        "requires_readback": false
+      }
+    },
+    "TOUCH_AND_GO_CLEARED": {
+      "REPORT_POSITION_DOWNWIND": {
+        "response": "{callsign}, number one, runway {runway}, continue approach, report final.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": false
+      },
+      "REPORT_POSITION_BASE": {
+        "response": "{callsign}, number one, runway {runway}, continue approach.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": false
+      },
+      "REPORT_POSITION_FINAL": {
+        "response": "{callsign}, runway {runway}, cleared to land, wind {wind}.",
+        "next_state": "LANDING_CLEARED",
+        "requires_readback": true
+      },
+      "REQUEST_TOUCH_AND_GO": {
+        "response": "{callsign}, runway {runway}, cleared touch and go, wind {wind}.",
+        "next_state": "TOUCH_AND_GO_CLEARED",
+        "requires_readback": true
+      },
+      "GO_AROUND": {
+        "response": "{callsign}, roger, fly runway heading, re-enter {pattern_direction} downwind runway {runway}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
+      },
+      "_INVALID": {
+        "response": "{callsign}, report your position.",
+        "next_state": "TOUCH_AND_GO_CLEARED",
         "requires_readback": false
       }
     },
@@ -167,6 +214,11 @@
         "response": "{callsign}, contact ground on {frequency}, good day.",
         "next_state": "IDLE",
         "requires_readback": false
+      },
+      "GO_AROUND": {
+        "response": "{callsign}, roger, fly runway heading, climb and maintain pattern altitude, re-enter {pattern_direction} downwind runway {runway}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
       },
       "READBACK": {
         "response": "",

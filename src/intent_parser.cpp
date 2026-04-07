@@ -355,8 +355,18 @@ static bool match_report_position(const std::string &t) {
 }
 
 static bool match_request_landing(const std::string &t) {
-  return contains(t, "inbound") || contains(t, "landing") ||
-         contains(t, "full stop") || contains(t, "touch and go");
+  return (contains(t, "inbound") || contains(t, "landing") ||
+          contains(t, "full stop")) &&
+         !contains(t, "touch and go");
+}
+
+static bool match_request_touch_and_go(const std::string &t) {
+  return contains(t, "touch and go");
+}
+
+static bool match_go_around(const std::string &t) {
+  return contains(t, "going around") || contains(t, "go around") ||
+         contains(t, "missed approach");
 }
 
 static bool match_request_frequency(const std::string &t) {
@@ -419,10 +429,12 @@ static bool match_readback(const std::string &t) {
 static const std::vector<IntentRule> kRules = {
     {PilotIntent::UNABLE, 0.95f, match_unable},
     {PilotIntent::RADIO_CHECK, 0.95f, match_radio_check},
+    {PilotIntent::GO_AROUND, 0.95f, match_go_around},
     {PilotIntent::SELF_ANNOUNCE, 0.90f, match_self_announce},
     {PilotIntent::READBACK, 0.90f, match_readback},
     {PilotIntent::READY_FOR_DEPARTURE, 0.90f, match_ready_for_departure},
     {PilotIntent::RUNWAY_VACATED, 0.90f, match_runway_vacated},
+    {PilotIntent::REQUEST_TOUCH_AND_GO, 0.90f, match_request_touch_and_go},
     {PilotIntent::REQUEST_TAXI_PARKING, 0.90f, match_request_taxi_parking},
     {PilotIntent::REQUEST_TAXI, 0.90f, match_request_taxi},
     {PilotIntent::REPORT_POSITION_DOWNWIND, 0.90f,
@@ -472,6 +484,10 @@ const char *intent_name(PilotIntent intent) {
     return "REPORT_POSITION_FINAL";
   case PilotIntent::REQUEST_LANDING:
     return "REQUEST_LANDING";
+  case PilotIntent::REQUEST_TOUCH_AND_GO:
+    return "REQUEST_TOUCH_AND_GO";
+  case PilotIntent::GO_AROUND:
+    return "GO_AROUND";
   case PilotIntent::RUNWAY_VACATED:
     return "RUNWAY_VACATED";
   case PilotIntent::READBACK:

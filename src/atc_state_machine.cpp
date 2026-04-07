@@ -101,6 +101,8 @@ const char *state_name(ATCState state) {
     return "PATTERN_ENTRY";
   case ATCState::LANDING_CLEARED:
     return "LANDING_CLEARED";
+  case ATCState::TOUCH_AND_GO_CLEARED:
+    return "TOUCH_AND_GO_CLEARED";
   case ATCState::UNICOM_ACTIVE:
     return "UNICOM_ACTIVE";
   }
@@ -122,6 +124,8 @@ ATCState state_from_name(const std::string &name) {
     return ATCState::PATTERN_ENTRY;
   if (name == "LANDING_CLEARED")
     return ATCState::LANDING_CLEARED;
+  if (name == "TOUCH_AND_GO_CLEARED")
+    return ATCState::TOUCH_AND_GO_CLEARED;
   if (name == "UNICOM_ACTIVE")
     return ATCState::UNICOM_ACTIVE;
   return ATCState::IDLE;
@@ -246,7 +250,8 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
       if (state_ != ATCState::IDLE && state_ != ATCState::TOWER_CONTACT &&
           state_ != ATCState::DEPARTURE_CLEARED &&
           state_ != ATCState::PATTERN_ENTRY &&
-          state_ != ATCState::LANDING_CLEARED) {
+          state_ != ATCState::LANDING_CLEARED &&
+          state_ != ATCState::TOUCH_AND_GO_CLEARED) {
         state_ = ATCState::IDLE;
       }
     }
