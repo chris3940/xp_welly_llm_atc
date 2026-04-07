@@ -20,6 +20,7 @@
 #include "atis_generator.hpp"
 #include "atc_session.hpp"
 #include "atc_state_machine.hpp"
+#include "atc_templates.hpp"
 #include "flight_phase.hpp"
 #include "audio_player.hpp"
 #include "audio_recorder.hpp"
@@ -525,6 +526,33 @@ static void draw_settings_tab() {
 
 // ── ATC Commands Panel ──────────────────────────────────────────
 
+static const char *intent_display_label(const std::string &key) {
+  static const std::pair<const char *, const char *> labels[] = {
+      {"INITIAL_CALL_GROUND", "Initial Call (Ground)"},
+      {"INITIAL_CALL_TOWER", "Initial Call (Tower)"},
+      {"INITIAL_CALL_INBOUND", "Initial Call (Inbound)"},
+      {"REQUEST_TAXI", "Request Taxi"},
+      {"REQUEST_TAXI_PARKING", "Request Taxi to Parking"},
+      {"READY_FOR_DEPARTURE", "Ready for Departure"},
+      {"REPORT_POSITION", "Report Position"},
+      {"REPORT_POSITION_DOWNWIND", "Report Downwind"},
+      {"REPORT_POSITION_BASE", "Report Base"},
+      {"REPORT_POSITION_FINAL", "Report Final"},
+      {"REQUEST_LANDING", "Request Landing"},
+      {"REQUEST_TOUCH_AND_GO", "Request Touch & Go"},
+      {"GO_AROUND", "Go Around"},
+      {"RUNWAY_VACATED", "Runway Vacated"},
+      {"READBACK", "Readback"},
+      {"REQUEST_FREQUENCY", "Request Frequency"},
+      {"RADIO_CHECK", "Radio Check"},
+      {"SELF_ANNOUNCE", "Self Announce"},
+  };
+  for (const auto &p : labels)
+    if (key == p.first)
+      return p.second;
+  return key.c_str();
+}
+
 static const char *freq_type_label(xplane_context::FrequencyType ft) {
   switch (ft) {
   case xplane_context::FrequencyType::ATIS:
@@ -633,6 +661,46 @@ static void draw_atc_panel() {
 
         if (is_active)
           ImGui::PopStyleColor();
+      }
+    }
+
+    ImGui::Separator();
+
+    // Pilot action buttons
+    {
+      using FT = xplane_context::FrequencyType;
+      bool is_towered = ctx.is_towered_airport &&
+                        ctx.frequency_type != FT::UNICOM &&
+                        ctx.frequency_type != FT::CTAF;
+      std::string state_str =
+          atc_state_machine::state_name(atc_state_machine::get_state());
+      auto valid = atc_templates::valid_intents(is_towered, state_str);
+
+      if (!valid.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Pilot Actions");
+        ImGui::TextDisabled("State: %s", state_str.c_str());
+
+        bool is_idle =
+            atc_session::ptt_state() == atc_session::PTTState::IDLE;
+
+        for (const auto &key : valid) {
+          const char *label = intent_display_label(key);
+          char btn_id[128];
+          std::snprintf(btn_id, sizeof(btn_id), "%s##pilot_%s", label,
+                        key.c_str());
+
+          if (!is_idle)
+            ImGui::BeginDisabled();
+
+          if (ImGui::Button(btn_id, ImVec2(-1, 0))) {
+            auto intent = intent_parser::intent_from_key(key);
+            if (intent != intent_parser::PilotIntent::UNKNOWN)
+              atc_session::inject_intent(intent);
+          }
+
+          if (!is_idle)
+            ImGui::EndDisabled();
+        }
       }
     }
 
