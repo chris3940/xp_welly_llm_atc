@@ -23,6 +23,7 @@ jobs:
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -Wno-dev
 
       - name: Run clang-tidy
