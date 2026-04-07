@@ -12,6 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install LLVM
+        run: brew install llvm
+
       - name: Setup dependencies
         run: make setup
 
@@ -23,7 +26,7 @@ jobs:
             -Wno-dev
 
       - name: Run clang-tidy
-        run: clang-tidy -p build src/*.cpp
+        run: $(brew --prefix llvm)/bin/clang-tidy -p build src/*.cpp
 
   build-macos:
     needs: [lint]
