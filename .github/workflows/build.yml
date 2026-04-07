@@ -1,0 +1,76 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+jobs:
+  lint:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup dependencies
+        run: make setup
+
+      - name: Configure (generate compile_commands.json)
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -Wno-dev
+
+      - name: Run clang-tidy
+        run: clang-tidy -p build src/*.cpp
+
+  build-macos:
+    needs: [lint]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup dependencies
+        run: make setup
+
+      - name: Build
+        run: |
+          RELEASE_FLAG=""
+          if [ "${{ github.event_name }}" = "release" ]; then RELEASE_FLAG="-DRELEASE=ON"; fi
+          cmake -B build -DCMAKE_BUILD_TYPE=Release $RELEASE_FLAG -Wno-dev
+          cmake --build build --parallel
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xp_wellys_atc-macos
+          path: build/xp_wellys_atc.xpl
+
+  release:
+    if: github.event_name == 'release'
+    needs: [lint, build-macos]
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: xp_wellys_atc-macos
+          path: dist/macos
+
+      - name: Build ZIP
+        run: |
+          mkdir -p dist/xp_wellys_atc/mac_x64
+          mkdir -p dist/xp_wellys_atc/data
+          cp dist/macos/xp_wellys_atc.xpl dist/xp_wellys_atc/mac_x64/xp_wellys_atc.xpl
+          cp data/atc_templates.json dist/xp_wellys_atc/data/
+          cd dist && zip -r xp_wellys_atc.zip xp_wellys_atc/
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/xp_wellys_atc.zip
