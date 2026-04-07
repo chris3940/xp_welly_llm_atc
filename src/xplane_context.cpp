@@ -453,7 +453,8 @@ void update() {
 
   if (dr_y_agl) {
     float y_agl = XPLMGetDataf(dr_y_agl);
-    ctx.on_ground = (y_agl < 0.5f) && (ctx.groundspeed_kts < 5.0f);
+    ctx.height_agl_ft = y_agl * 3.28084f;
+    ctx.on_ground = (y_agl < 0.5f);
   }
 
   if (dr_n1_percent) {

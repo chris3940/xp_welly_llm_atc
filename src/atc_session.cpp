@@ -19,6 +19,7 @@
 #include "atc_session.hpp"
 #include "atis_generator.hpp"
 #include "atc_state_machine.hpp"
+#include "flight_phase.hpp"
 #include "atc_templates.hpp"
 #include "audio_player.hpp"
 #include "audio_recorder.hpp"
@@ -418,6 +419,9 @@ void update() {
   float dt = 1.0f / 60.0f; // approximate per-frame at ~60fps
   if (atis_cooldown_ > 0.0f)
     atis_cooldown_ -= dt;
+
+  // Flight-phase auto-correction of ATC state
+  atc_state_machine::check_auto_correction(flight_phase::get(), dt);
 
   // ATIS playback trigger — requires avionics + tuning delay
   const auto &ctx = xplane_context::get();

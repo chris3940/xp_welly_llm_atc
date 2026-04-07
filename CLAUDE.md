@@ -67,11 +67,13 @@ xp_wellys_atc/
 │   ├── audio_player.hpp/.cpp   # Core Audio MP3 playback
 │   ├── atis_generator.hpp/.cpp # ATIS broadcast generation + letter management
 │   ├── xplane_context.hpp/.cpp # X-Plane DataRef reader
+│   ├── flight_phase.hpp/.cpp   # Flight phase detection + precondition guards
 │   ├── settings.hpp/.cpp       # JSON config + Keychain API key
 │   └── atc_ui.hpp/.cpp         # Dear ImGui window
 ├── data/
 │   ├── settings.json           # Runtime config, never committed
-│   └── atc_templates.json      # ATC response templates (towered + uncontrolled)
+│   ├── atc_templates.json      # ATC response templates (towered + uncontrolled)
+│   └── flight_rules.json       # Flight phase thresholds, preconditions, auto-corrections
 ├── sdk/                        # make setup, not committed
 └── vendor/                     # make setup, not committed
 ```
@@ -102,7 +104,9 @@ Each module uses a C++ namespace with `init()` and `stop()` lifecycle functions 
 
 **`atc_templates`** — JSON template engine. Loads `data/atc_templates.json` at init. Provides `lookup(is_towered, state, intent_key)` for template resolution with `_INVALID` fallback, `fill(template, vars)` for variable substitution, and `valid_intents()` for GPT classification prompts. Supports hot-reload via `reload()`.
 
-**`atc_state_machine`** — Owns current `ATCState`. On valid `PilotIntent`, transitions state and returns `ATCResponse` text via template lookup. Provides `build_vars()` for constructing template variable maps, `state_from_name()` for string-to-enum conversion, and `set_state()` for external state transitions (GPT path).
+**`flight_phase`** — Detects current flight phase from `XPlaneContext` each frame: `PARKED`, `GROUND_READY`, `TAXI`, `TAKEOFF_ROLL`, `CLIMB`, `PATTERN`, `FINAL_APPROACH`, `LANDING_ROLL`, `CRUISE`. Uses configurable thresholds from `data/flight_rules.json` with temporal hysteresis to prevent jitter. Provides `check_precondition(intent_key, phase)` for hard guards in the state machine (returns rejection message if intent is invalid for current phase) and `get_auto_corrections(atc_state)` for automatic state correction when flight phase and ATC state diverge. Supports hot-reload via `reload()`.
+
+**`atc_state_machine`** — Owns current `ATCState`. On valid `PilotIntent`, transitions state and returns `ATCResponse` text via template lookup. Before template lookup, applies flight-phase precondition guards from `flight_rules.json` — invalid intents for the current phase are rejected with configurable ATC messages. Provides `check_auto_correction(phase, dt)` to automatically correct state/phase mismatches (e.g., landed but still in `PATTERN_ENTRY` → auto-reset to `IDLE` after configurable delay). Also provides `build_vars()` for constructing template variable maps, `state_from_name()` for string-to-enum conversion, and `set_state()` for external state transitions (GPT path).
 
 **`gpt_client`** — Two functions: `ask_async()` for full ATC response generation (emergency fallback), and `classify_intent_async()` for lightweight intent classification (max_tokens=20, temperature=0.0, gpt-4o-mini). Both POST to OpenAI `/v1/chat/completions`. Run on `std::thread`.
 
@@ -139,7 +143,8 @@ struct XPlaneContext {
     float       indicated_airspeed_kts;
     float       vertical_speed_fpm;
     float       heading_true;
-    bool        on_ground;
+    float       height_agl_ft;          // y_agl in feet, used by flight_phase
+    bool        on_ground;              // purely geometric (y_agl < 0.5ft)
     bool        engines_running;
     float       com1_freq_mhz, com2_freq_mhz;
     int         active_com;             // 1 or 2
@@ -158,6 +163,18 @@ struct XPlaneContext {
     double      airport_lat, airport_lon; // airport position (for range checks)
     std::vector<RunwayInfo> runways;    // all runways at nearest airport
     std::string active_runway;          // wind-determined (e.g. "28", "09L")
+};
+
+enum class FlightPhase {
+    PARKED,                       // engines off, on ground, GS < 2 kt
+    GROUND_READY,                 // engines on, on ground, GS < 5 kt
+    TAXI,                         // engines on, on ground, 5 ≤ GS < 40 kt
+    TAKEOFF_ROLL,                 // on ground, GS ≥ 40 kt (prev ground phase)
+    CLIMB,                        // airborne, VS > +300 fpm
+    PATTERN,                      // airborne, near airport, AGL < 3000 ft
+    FINAL_APPROACH,               // airborne, descending, runway-aligned
+    LANDING_ROLL,                 // on ground, GS > 40 kt (prev airborne phase)
+    CRUISE,                       // airborne, all other
 };
 
 enum class PilotIntent {

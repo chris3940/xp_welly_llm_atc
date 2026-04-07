@@ -19,6 +19,7 @@
 #include "atc_state_machine.hpp"
 #include "atis_generator.hpp"
 #include "atc_templates.hpp"
+#include "flight_phase.hpp"
 #include "settings.hpp"
 
 #include <XPLMUtilities.h>
@@ -316,6 +317,24 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
     }
   }
 
+  // Flight-phase precondition check
+  {
+    std::string intent_key = intent_parser::intent_template_key(msg.intent);
+    auto phase = flight_phase::get();
+    std::string rejection = flight_phase::check_precondition(intent_key, phase);
+    if (!rejection.empty()) {
+      auto vars = build_vars(msg, ctx);
+      resp.text = atc_templates::fill(rejection, vars);
+      resp.next_state = state_;
+      char log[256];
+      std::snprintf(log, sizeof(log),
+                    "[xp_wellys_atc] Phase guard: %s blocked in phase %s\n",
+                    intent_key.c_str(), flight_phase::phase_name(phase));
+      XPLMDebugString(log);
+      return resp;
+    }
+  }
+
   // Template-based response lookup
   auto vars = build_vars(msg, ctx);
   std::string intent_key = intent_parser::intent_template_key(msg.intent);
@@ -345,6 +364,62 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
   }
 
   return resp;
+}
+
+// ── Auto-correction state ────────────────────────────────────────
+
+static std::string active_correction_key_;
+static float correction_timer_ = 0.0f;
+
+void check_auto_correction(flight_phase::FlightPhase phase, float dt) {
+  if (state_ == ATCState::IDLE || state_ == ATCState::UNICOM_ACTIVE)
+    return;
+
+  std::string current_state = state_name(state_);
+  auto *corrections = flight_phase::get_auto_corrections(current_state);
+  if (!corrections)
+    return;
+
+  // Find first matching correction condition
+  for (const auto &[cond_name, ac] : *corrections) {
+    bool matches = false;
+    for (auto p : ac.phases) {
+      if (phase == p) {
+        matches = true;
+        break;
+      }
+    }
+
+    if (matches) {
+      std::string key = current_state + ":" + cond_name;
+      if (key != active_correction_key_) {
+        active_correction_key_ = key;
+        correction_timer_ = 0.0f;
+      }
+      correction_timer_ += dt;
+
+      if (correction_timer_ >= ac.delay_sec) {
+        ATCState new_state = state_from_name(ac.next_state);
+        char log[256];
+        std::snprintf(
+            log, sizeof(log),
+            "[xp_wellys_atc] Auto-correction: %s -> %s (phase=%s, "
+            "condition=%s, after %.1fs)\n",
+            state_name(state_), state_name(new_state),
+            flight_phase::phase_name(phase), cond_name.c_str(),
+            correction_timer_);
+        XPLMDebugString(log);
+        state_ = new_state;
+        active_correction_key_.clear();
+        correction_timer_ = 0.0f;
+      }
+      return;
+    }
+  }
+
+  // No matching condition — reset timer
+  active_correction_key_.clear();
+  correction_timer_ = 0.0f;
 }
 
 } // namespace atc_state_machine

@@ -20,6 +20,7 @@
 #include "atis_generator.hpp"
 #include "atc_session.hpp"
 #include "atc_state_machine.hpp"
+#include "flight_phase.hpp"
 #include "audio_player.hpp"
 #include "audio_recorder.hpp"
 #include "intent_parser.hpp"
@@ -100,9 +101,10 @@ static void draw_status_tab() {
     ImGui::Text("%s", label.c_str());
   }
 
-  // ATC State
+  // Flight Phase + ATC State
   ImGui::SameLine();
-  ImGui::Text("   ATC State: %s",
+  ImGui::Text("   %s | %s",
+              flight_phase::phase_name(flight_phase::get()),
               atc_state_machine::state_name(atc_state_machine::get_state()));
   ImGui::SameLine();
   if (ImGui::SmallButton("Reset")) {
