@@ -53,6 +53,7 @@ static json default_config() {
           {"active_com", 1},
           {"volume", 1.0},
           {"debug_logging", false},
+          {"pattern_direction", "left"},
           {"window_x", -1.0},
           {"window_y", -1.0},
           {"window_w", -1.0},
@@ -238,6 +239,9 @@ std::string pilot_callsign() {
 int active_com() { return cfg.value("active_com", 1); }
 float volume() { return cfg.value("volume", 1.0f); }
 bool debug_logging() { return cfg.value("debug_logging", false); }
+std::string pattern_direction() {
+  return cfg.value("pattern_direction", std::string("left"));
+}
 
 // --- Setters ---
 
@@ -289,6 +293,9 @@ void set_volume(float v) { cfg["volume"] = v; }
 void set_gpt_fallback_enabled(bool v) { cfg["gpt_fallback_enabled"] = v; }
 void set_debug_logging(bool v) { cfg["debug_logging"] = v; }
 void set_active_com(int com) { cfg["active_com"] = com; }
+void set_pattern_direction(const std::string &v) {
+  cfg["pattern_direction"] = v;
+}
 
 float window_x() { return cfg.value("window_x", -1.0f); }
 float window_y() { return cfg.value("window_y", -1.0f); }

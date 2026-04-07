@@ -200,6 +200,7 @@ build_vars(const intent_parser::PilotMessage &msg,
       {"tower_frequency", format_freq(tower_freq)},
       {"ground_frequency", format_freq(ground_freq)},
       {"position", extract_position(msg, ctx)},
+      {"pattern_direction", settings::pattern_direction()},
   };
 }
 

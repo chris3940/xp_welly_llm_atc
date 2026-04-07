@@ -47,6 +47,7 @@ std::string pilot_callsign();
 int active_com();
 float volume();
 bool debug_logging();
+std::string pattern_direction();
 
 // Setters
 void set_tts_voice(const std::string &v);
@@ -57,6 +58,7 @@ void set_volume(float v);
 void set_gpt_fallback_enabled(bool v);
 void set_debug_logging(bool v);
 void set_active_com(int com);
+void set_pattern_direction(const std::string &v);
 
 // Window geometry (-1 = use default/center)
 float window_x();

@@ -67,6 +67,9 @@ static const char *voice_names[] = {"alloy", "echo", "fable",
 static const int voice_count = 6;
 static int voice_selection = 3; // default: onyx
 
+static const char *pattern_dir_names[] = {"left", "right"};
+static int pattern_dir_selection = 0; // default: left
+
 // ── Time ─────────────────────────────────────────────────────────
 static double last_frame_time_ = 0.0;
 static double get_xp_time() {
@@ -396,6 +399,8 @@ static void draw_settings_tab() {
         break;
       }
     }
+    std::string pdir = settings::pattern_direction();
+    pattern_dir_selection = (pdir == "right") ? 1 : 0;
     buffers_initialized = true;
   }
 
@@ -462,6 +467,13 @@ static void draw_settings_tab() {
                        phonetic.c_str());
   } else {
     ImGui::TextDisabled("  (enter registration, e.g. HB-WRO or N342B4)");
+  }
+
+  // Pattern direction (left/right hand traffic)
+  if (ImGui::Combo("Pattern Direction", &pattern_dir_selection,
+                    pattern_dir_names, 2)) {
+    settings::set_pattern_direction(pattern_dir_names[pattern_dir_selection]);
+    settings::save();
   }
 
   // GPT Fallback
