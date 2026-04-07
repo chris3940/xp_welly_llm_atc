@@ -43,7 +43,9 @@ static const char *kKeychainAccount = "openai_api_key";
 
 static json default_config() {
   return {{"api_key_saved", false},
-          {"tts_voice", "onyx"},
+          {"tts_voice_atis", "nova"},
+          {"tts_voice_tower", "onyx"},
+          {"tts_voice_ground", "echo"},
           {"tts_model", "tts-1"},
           {"whisper_model", "whisper-1"},
           {"gpt_model", "gpt-4o-mini"},
@@ -114,6 +116,15 @@ void init() {
   } else {
     cfg = default_config();
     save();
+  }
+
+  // Migrate old tts_voice → tts_voice_tower
+  if (cfg.contains("tts_voice") && !cfg.contains("tts_voice_tower")) {
+    cfg["tts_voice_tower"] = cfg["tts_voice"];
+    cfg.erase("tts_voice");
+    save();
+  } else if (cfg.contains("tts_voice")) {
+    cfg.erase("tts_voice");
   }
 
   if (cfg.value("api_key_saved", false)) {
@@ -221,7 +232,15 @@ std::string get_api_key() { return cached_api_key; }
 // --- Getters ---
 
 bool api_key_saved() { return cfg.value("api_key_saved", false); }
-std::string tts_voice() { return cfg.value("tts_voice", std::string("onyx")); }
+std::string tts_voice_atis() {
+  return cfg.value("tts_voice_atis", std::string("nova"));
+}
+std::string tts_voice_tower() {
+  return cfg.value("tts_voice_tower", std::string("onyx"));
+}
+std::string tts_voice_ground() {
+  return cfg.value("tts_voice_ground", std::string("echo"));
+}
 std::string tts_model() { return cfg.value("tts_model", std::string("tts-1")); }
 std::string whisper_model() {
   return cfg.value("whisper_model", std::string("whisper-1"));
@@ -245,7 +264,11 @@ std::string pattern_direction() {
 
 // --- Setters ---
 
-void set_tts_voice(const std::string &v) { cfg["tts_voice"] = v; }
+void set_tts_voice_atis(const std::string &v) { cfg["tts_voice_atis"] = v; }
+void set_tts_voice_tower(const std::string &v) { cfg["tts_voice_tower"] = v; }
+void set_tts_voice_ground(const std::string &v) {
+  cfg["tts_voice_ground"] = v;
+}
 // ── ICAO phonetic alphabet conversion ───────────────────────────
 
 static const char *phonetic_letter(char c) {

@@ -57,8 +57,17 @@ static constexpr float kAtisCooldownSec = 30.0f;
 static float atis_tuned_timer_ = 0.0f;        // how long tuned to ATIS freq
 static constexpr float kAtisTuneDelaySec = 2.0f; // wait before playing
 
+// Determine TTS voice based on frequency type
+static std::string voice_for_freq(xplane_context::FrequencyType ft) {
+  using FT = xplane_context::FrequencyType;
+  if (ft == FT::GROUND)
+    return settings::tts_voice_ground();
+  return settings::tts_voice_tower();
+}
+
 // Speak ATC response via TTS, then transition to PLAYING → IDLE
-static void speak_response(const std::string &text, float speed = 1.0f) {
+static void speak_response(const std::string &text, float speed = 1.0f,
+                           const std::string &voice = "") {
   state_ = PTTState::PLAYING;
   ++total_api_calls_; // TTS call
 
@@ -81,7 +90,7 @@ static void speak_response(const std::string &text, float speed = 1.0f) {
           state_ = PTTState::IDLE;
         }
       },
-      speed);
+      speed, voice);
 }
 
 void init() {
@@ -273,7 +282,8 @@ void on_ptt_released() {
                 atc_resp.text,
                 freq_str,
             });
-            speak_response(atc_resp.text);
+            speak_response(atc_resp.text, 1.0f,
+                           voice_for_freq(ctx.frequency_type));
           }
         } else if (!settings::gpt_fallback_enabled()) {
           // GPT disabled — use state machine with _INVALID fallback
@@ -295,7 +305,8 @@ void on_ptt_released() {
               response,
               freq_str,
           });
-          speak_response(response);
+          speak_response(response, 1.0f,
+                         voice_for_freq(ctx.frequency_type));
         } else {
           // GPT intent classification
           ++total_api_calls_;
@@ -346,14 +357,15 @@ void on_ptt_released() {
               "[xp_wellys_atc] Routing to GPT intent classification\n");
 
           std::string freq_copy = freq_str;
+          std::string voice_copy = voice_for_freq(ctx.frequency_type);
           auto msg_copy = last_pilot_message_;
           const auto &ctx_copy = ctx;
 
           gpt_client::classify_intent_async(
               transcript, sys_prompt,
               // NOLINTNEXTLINE(bugprone-exception-escape)
-              [freq_copy, msg_copy, ctx_copy](std::string intent_key,
-                                              bool gpt_success) {
+              [freq_copy, voice_copy, msg_copy,
+               ctx_copy](std::string intent_key, bool gpt_success) {
                 if (!gpt_success)
                   intent_key = "_INVALID";
 
@@ -393,7 +405,7 @@ void on_ptt_released() {
                       atc_resp.text,
                       freq_copy,
                   });
-                  speak_response(atc_resp.text);
+                  speak_response(atc_resp.text, 1.0f, voice_copy);
                 }
               });
         }
@@ -458,7 +470,7 @@ void update() {
 
     atis_playing_ = true;
     atis_cooldown_ = kAtisCooldownSec;
-    speak_response(atis_text, 0.85f);
+    speak_response(atis_text, 0.85f, settings::tts_voice_atis());
   }
 }
 

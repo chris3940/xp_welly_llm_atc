@@ -347,6 +347,16 @@ static bool match_request_taxi_parking(const std::string &t) {
 }
 
 static bool match_request_taxi(const std::string &t) {
+  // Exclude frequency-change readbacks that happen to contain "taxi"
+  if (contains(t, "contact ground") || contains(t, "contact tower") ||
+      contains(t, "contact approach") || contains(t, "contact departure"))
+    return false;
+  // Exclude taxi instruction readbacks
+  if (contains(t, "taxi") &&
+      (contains(t, "holding point") || contains(t, "hold short") ||
+       contains(t, "via") || contains(t, "qnh") ||
+       contains(t, "hold position")))
+    return false;
   return contains(t, "taxi") || contains(t, "request taxi") ||
          contains(t, "taxiing");
 }
@@ -421,6 +431,20 @@ static bool match_initial_call(const std::string &t) {
 
 static bool match_readback(const std::string &t) {
   if (contains(t, "wilco") || contains(t, "roger"))
+    return true;
+  // Frequency change acknowledgment
+  if (contains(t, "contact ground") || contains(t, "contact tower") ||
+      contains(t, "contact approach") || contains(t, "contact departure"))
+    return true;
+  // Common readback sign-off phrases
+  if (contains(t, "goodbye") || contains(t, "good bye") ||
+      contains(t, "good day") || contains(t, "see you"))
+    return true;
+  // Taxi instruction readback (repeating instructions, not requesting)
+  if (contains(t, "taxi") &&
+      (contains(t, "holding point") || contains(t, "hold short") ||
+       contains(t, "via") || contains(t, "qnh") ||
+       contains(t, "hold position")))
     return true;
   // Common takeoff/landing readback patterns
   if (contains(t, "cleared") &&

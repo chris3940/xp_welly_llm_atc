@@ -262,6 +262,30 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
     return resp;
   }
 
+  // Unknown frequency at towered airport → hint correct frequency
+  if (ctx.frequency_type == FT::UNKNOWN && ctx.is_towered_airport) {
+    using PI = intent_parser::PilotIntent;
+    if (msg.intent != PI::READBACK) {
+      auto vars = build_vars(msg, ctx);
+      bool needs_ground = (msg.intent == PI::INITIAL_CALL_GROUND ||
+                           msg.intent == PI::REQUEST_TAXI ||
+                           msg.intent == PI::REQUEST_TAXI_PARKING);
+      std::string freq_hint;
+      if (needs_ground && !ctx.tower_only) {
+        freq_hint = "{callsign}, you are not on the correct frequency. "
+                    "Contact {airport} Ground on {ground_frequency}.";
+      } else {
+        freq_hint = "{callsign}, you are not on the correct frequency. "
+                    "Contact {airport} Tower on {tower_frequency}.";
+      }
+      resp.text = atc_templates::fill(freq_hint, vars);
+      resp.next_state = state_;
+      XPLMDebugString(
+          "[xp_wellys_atc] ATC: wrong frequency, hint given\n");
+      return resp;
+    }
+  }
+
   // Frequency-based state validation at towered airports
   // Skip validation for: unknown freq (pilot between frequencies) and
   // tower-only airports on tower freq (all states valid on single frequency)

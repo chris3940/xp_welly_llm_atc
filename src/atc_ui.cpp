@@ -66,7 +66,9 @@ static bool buffers_initialized = false;
 static const char *voice_names[] = {"alloy", "echo", "fable",
                                     "onyx",  "nova", "shimmer"};
 static const int voice_count = 6;
-static int voice_selection = 3; // default: onyx
+static int voice_sel_atis = 4;   // default: nova
+static int voice_sel_tower = 3;  // default: onyx
+static int voice_sel_ground = 1; // default: echo
 
 static const char *pattern_dir_names[] = {"left", "right"};
 static int pattern_dir_selection = 0; // default: left
@@ -380,11 +382,20 @@ static void draw_audio_tab() {
 
   ImGui::Separator();
 
-  // ── TTS Voice ───────────────────────────────────────────────────
+  // ── TTS Voices ──────────────────────────────────────────────────
   ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Text-to-Speech");
   ImGui::Spacing();
-  if (ImGui::Combo("TTS Voice", &voice_selection, voice_names, voice_count)) {
-    settings::set_tts_voice(voice_names[voice_selection]);
+  if (ImGui::Combo("ATIS Voice", &voice_sel_atis, voice_names, voice_count)) {
+    settings::set_tts_voice_atis(voice_names[voice_sel_atis]);
+    settings::save();
+  }
+  if (ImGui::Combo("Tower Voice", &voice_sel_tower, voice_names, voice_count)) {
+    settings::set_tts_voice_tower(voice_names[voice_sel_tower]);
+    settings::save();
+  }
+  if (ImGui::Combo("Ground Voice", &voice_sel_ground, voice_names,
+                    voice_count)) {
+    settings::set_tts_voice_ground(voice_names[voice_sel_ground]);
     settings::save();
   }
 }
@@ -394,13 +405,17 @@ static void draw_settings_tab() {
   if (!buffers_initialized) {
     std::strncpy(callsign_raw_buf, settings::pilot_callsign_raw().c_str(),
                  sizeof(callsign_raw_buf) - 1);
-    std::string voice = settings::tts_voice();
-    for (int i = 0; i < voice_count; ++i) {
-      if (voice == voice_names[i]) {
-        voice_selection = i;
-        break;
+    auto init_voice_sel = [](const std::string &voice, int &sel) {
+      for (int i = 0; i < voice_count; ++i) {
+        if (voice == voice_names[i]) {
+          sel = i;
+          break;
+        }
       }
-    }
+    };
+    init_voice_sel(settings::tts_voice_atis(), voice_sel_atis);
+    init_voice_sel(settings::tts_voice_tower(), voice_sel_tower);
+    init_voice_sel(settings::tts_voice_ground(), voice_sel_ground);
     std::string pdir = settings::pattern_direction();
     pattern_dir_selection = (pdir == "right") ? 1 : 0;
     buffers_initialized = true;
