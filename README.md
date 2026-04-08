@@ -9,6 +9,7 @@ Talk to ATC using your microphone via push-to-talk. The plugin transcribes your 
 - **Push-to-Talk** — via X-Plane command binding (keyboard or joystick)
 - **Speech-to-Text** — OpenAI Whisper transcription
 - **ATC State Machine** — VFR phraseology for towered and non-towered airports
+- **Flight Phase Detection** — context-aware guards prevent unrealistic ATC interactions based on aircraft state (parked, taxi, airborne, etc.)
 - **ATIS Generation** — automatic ATIS broadcasts from live sim weather data
 - **GPT Fallback** — GPT-4o-mini handles ambiguous or unrecognized intents
 - **Text-to-Speech** — natural ATC voice responses via OpenAI TTS
@@ -67,6 +68,8 @@ Settings are stored in `data/settings.json`:
 | `gpt_fallback_enabled` | `true` | Use GPT when intent confidence is low |
 | `pattern_direction` | `left` | Traffic pattern direction (left/right) |
 | `debug_logging` | `false` | Enable verbose debug output |
+
+Flight phase detection thresholds, ATC precondition guards, and auto-correction rules are configured in `data/flight_rules.json`. This file can be edited without rebuilding the plugin.
 
 **Push-to-Talk** is configured via X-Plane's keyboard or joystick settings. The plugin registers the command `xp_wellys_atc/ptt` which can be bound to any key or joystick button in X-Plane.
 

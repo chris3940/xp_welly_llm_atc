@@ -20,6 +20,8 @@
 #include "atis_generator.hpp"
 #include "atc_session.hpp"
 #include "atc_state_machine.hpp"
+#include "atc_templates.hpp"
+#include "flight_phase.hpp"
 #include "audio_player.hpp"
 #include "audio_recorder.hpp"
 #include "intent_parser.hpp"
@@ -65,7 +67,9 @@ static bool buffers_initialized = false;
 static const char *voice_names[] = {"alloy", "echo", "fable",
                                     "onyx",  "nova", "shimmer"};
 static const int voice_count = 6;
-static int voice_selection = 3; // default: onyx
+static int voice_sel_atis = 4;   // default: nova
+static int voice_sel_tower = 3;  // default: onyx
+static int voice_sel_ground = 1; // default: echo
 
 static const char *pattern_dir_names[] = {"left", "right"};
 static int pattern_dir_selection = 0; // default: left
@@ -100,9 +104,10 @@ static void draw_status_tab() {
     ImGui::Text("%s", label.c_str());
   }
 
-  // ATC State
+  // Flight Phase + ATC State
   ImGui::SameLine();
-  ImGui::Text("   ATC State: %s",
+  ImGui::Text("   %s | %s",
+              flight_phase::phase_name(flight_phase::get()),
               atc_state_machine::state_name(atc_state_machine::get_state()));
   ImGui::SameLine();
   if (ImGui::SmallButton("Reset")) {
@@ -378,11 +383,20 @@ static void draw_audio_tab() {
 
   ImGui::Separator();
 
-  // ── TTS Voice ───────────────────────────────────────────────────
+  // ── TTS Voices ──────────────────────────────────────────────────
   ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Text-to-Speech");
   ImGui::Spacing();
-  if (ImGui::Combo("TTS Voice", &voice_selection, voice_names, voice_count)) {
-    settings::set_tts_voice(voice_names[voice_selection]);
+  if (ImGui::Combo("ATIS Voice", &voice_sel_atis, voice_names, voice_count)) {
+    settings::set_tts_voice_atis(voice_names[voice_sel_atis]);
+    settings::save();
+  }
+  if (ImGui::Combo("Tower Voice", &voice_sel_tower, voice_names, voice_count)) {
+    settings::set_tts_voice_tower(voice_names[voice_sel_tower]);
+    settings::save();
+  }
+  if (ImGui::Combo("Ground Voice", &voice_sel_ground, voice_names,
+                    voice_count)) {
+    settings::set_tts_voice_ground(voice_names[voice_sel_ground]);
     settings::save();
   }
 }
@@ -392,13 +406,17 @@ static void draw_settings_tab() {
   if (!buffers_initialized) {
     std::strncpy(callsign_raw_buf, settings::pilot_callsign_raw().c_str(),
                  sizeof(callsign_raw_buf) - 1);
-    std::string voice = settings::tts_voice();
-    for (int i = 0; i < voice_count; ++i) {
-      if (voice == voice_names[i]) {
-        voice_selection = i;
-        break;
+    auto init_voice_sel = [](const std::string &voice, int &sel) {
+      for (int i = 0; i < voice_count; ++i) {
+        if (voice == voice_names[i]) {
+          sel = i;
+          break;
+        }
       }
-    }
+    };
+    init_voice_sel(settings::tts_voice_atis(), voice_sel_atis);
+    init_voice_sel(settings::tts_voice_tower(), voice_sel_tower);
+    init_voice_sel(settings::tts_voice_ground(), voice_sel_ground);
     std::string pdir = settings::pattern_direction();
     pattern_dir_selection = (pdir == "right") ? 1 : 0;
     buffers_initialized = true;
@@ -508,6 +526,33 @@ static void draw_settings_tab() {
 
 // ── ATC Commands Panel ──────────────────────────────────────────
 
+static const char *intent_display_label(const std::string &key) {
+  static const std::pair<const char *, const char *> labels[] = {
+      {"INITIAL_CALL_GROUND", "Initial Call (Ground)"},
+      {"INITIAL_CALL_TOWER", "Initial Call (Tower)"},
+      {"INITIAL_CALL_INBOUND", "Initial Call (Inbound)"},
+      {"REQUEST_TAXI", "Request Taxi"},
+      {"REQUEST_TAXI_PARKING", "Request Taxi to Parking"},
+      {"READY_FOR_DEPARTURE", "Ready for Departure"},
+      {"REPORT_POSITION", "Report Position"},
+      {"REPORT_POSITION_DOWNWIND", "Report Downwind"},
+      {"REPORT_POSITION_BASE", "Report Base"},
+      {"REPORT_POSITION_FINAL", "Report Final"},
+      {"REQUEST_LANDING", "Request Landing"},
+      {"REQUEST_TOUCH_AND_GO", "Request Touch & Go"},
+      {"GO_AROUND", "Go Around"},
+      {"RUNWAY_VACATED", "Runway Vacated"},
+      {"READBACK", "Readback"},
+      {"REQUEST_FREQUENCY", "Request Frequency"},
+      {"RADIO_CHECK", "Radio Check"},
+      {"SELF_ANNOUNCE", "Self Announce"},
+  };
+  for (const auto &p : labels)
+    if (key == p.first)
+      return p.second;
+  return key.c_str();
+}
+
 static const char *freq_type_label(xplane_context::FrequencyType ft) {
   switch (ft) {
   case xplane_context::FrequencyType::ATIS:
@@ -616,6 +661,142 @@ static void draw_atc_panel() {
 
         if (is_active)
           ImGui::PopStyleColor();
+      }
+    }
+
+    ImGui::Separator();
+
+    // Pilot action buttons — filtered by frequency + flight phase
+    {
+      using FT = xplane_context::FrequencyType;
+      bool is_towered = ctx.is_towered_airport &&
+                        ctx.frequency_type != FT::UNICOM &&
+                        ctx.frequency_type != FT::CTAF;
+      std::string state_str =
+          atc_state_machine::state_name(atc_state_machine::get_state());
+      auto valid = atc_templates::valid_intents(is_towered, state_str);
+
+      // Filter by frequency type and flight phase
+      auto phase = flight_phase::get();
+      valid.erase(
+          std::remove_if(
+              valid.begin(), valid.end(),
+              [&](const std::string &key) {
+                // Frequency filter
+                if (!flight_phase::is_intent_valid_for_frequency(
+                        key, ctx.frequency_type)) {
+                  // Exception: tower-only airports allow ground intents on
+                  // tower freq
+                  if (!(ctx.tower_only && ctx.frequency_type == FT::TOWER))
+                    return true;
+                }
+                // Flight phase filter
+                if (!flight_phase::check_precondition(key, phase).empty())
+                  return true;
+                return false;
+              }),
+          valid.end());
+
+      // Inject READBACK at top if pending and not already in list
+      if (atc_state_machine::is_readback_pending()) {
+        if (std::find(valid.begin(), valid.end(), "READBACK") == valid.end())
+          valid.insert(valid.begin(), "READBACK");
+      }
+
+      // Button category for grouping
+      enum class BtnCat { GROUND_OPS, TOWER_OPS, PATTERN, GENERAL };
+      auto intent_category = [](const std::string &key) -> BtnCat {
+        if (key == "INITIAL_CALL_GROUND" || key == "REQUEST_TAXI" ||
+            key == "REQUEST_TAXI_PARKING")
+          return BtnCat::GROUND_OPS;
+        if (key == "INITIAL_CALL_TOWER" || key == "READY_FOR_DEPARTURE" ||
+            key == "RUNWAY_VACATED")
+          return BtnCat::TOWER_OPS;
+        if (key == "REPORT_POSITION" || key == "REPORT_POSITION_DOWNWIND" ||
+            key == "REPORT_POSITION_BASE" ||
+            key == "REPORT_POSITION_FINAL" || key == "REQUEST_LANDING" ||
+            key == "REQUEST_TOUCH_AND_GO" || key == "GO_AROUND" ||
+            key == "INITIAL_CALL_INBOUND")
+          return BtnCat::PATTERN;
+        return BtnCat::GENERAL;
+      };
+      auto category_label = [](BtnCat cat) -> const char * {
+        switch (cat) {
+        case BtnCat::GROUND_OPS:
+          return "Ground Operations";
+        case BtnCat::TOWER_OPS:
+          return "Tower Operations";
+        case BtnCat::PATTERN:
+          return "Pattern / Approach";
+        case BtnCat::GENERAL:
+          return "General";
+        }
+        return "";
+      };
+
+      // Sort by category
+      std::stable_sort(valid.begin(), valid.end(),
+                       [&](const std::string &a, const std::string &b) {
+                         return static_cast<int>(intent_category(a)) <
+                                static_cast<int>(intent_category(b));
+                       });
+
+      if (!valid.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Pilot Actions");
+        ImGui::TextDisabled("State: %s | Phase: %s", state_str.c_str(),
+                            flight_phase::phase_name(phase));
+
+        bool is_idle =
+            atc_session::ptt_state() == atc_session::PTTState::IDLE;
+
+        // Build vars once for tooltip substitution
+        intent_parser::PilotMessage dummy_msg{};
+        dummy_msg.callsign = settings::pilot_callsign();
+        dummy_msg.runway = ctx.active_runway;
+        auto vars = atc_state_machine::build_vars(dummy_msg, ctx);
+
+        BtnCat last_cat = static_cast<BtnCat>(-1);
+        for (const auto &key : valid) {
+          BtnCat cat = intent_category(key);
+          if (cat != last_cat) {
+            if (last_cat != static_cast<BtnCat>(-1))
+              ImGui::Spacing();
+            ImGui::TextDisabled("%s", category_label(cat));
+            last_cat = cat;
+          }
+
+          const char *label = intent_display_label(key);
+          char btn_id[128];
+          std::snprintf(btn_id, sizeof(btn_id), "%s##pilot_%s", label,
+                        key.c_str());
+
+          if (!is_idle)
+            ImGui::BeginDisabled();
+
+          if (ImGui::Button(btn_id, ImVec2(-1, 0))) {
+            auto intent = intent_parser::intent_from_key(key);
+            if (intent != intent_parser::PilotIntent::UNKNOWN)
+              atc_session::inject_intent(intent);
+          }
+
+          // Tooltip with pilot phraseology
+          if (ImGui::IsItemHovered()) {
+            std::string phrase_tmpl =
+                flight_phase::get_pilot_phraseology(key);
+            if (!phrase_tmpl.empty()) {
+              std::string phrase =
+                  atc_templates::fill(phrase_tmpl, vars);
+              ImGui::SetTooltip("%s", phrase.c_str());
+            }
+          }
+
+          if (!is_idle)
+            ImGui::EndDisabled();
+        }
+      } else if (ctx.frequency_type == FT::ATIS ||
+                 ctx.frequency_type == FT::UNKNOWN) {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Pilot Actions");
+        ImGui::TextDisabled("Tune to a Ground or Tower frequency");
       }
     }
 
@@ -906,7 +1087,8 @@ void init() {
   ImGui::CreateContext();
 
   ImGuiIO &io = ImGui::GetIO();
-  io.IniFilename = nullptr;
+  static std::string ini_path = settings::get_data_dir() + "/imgui.ini";
+  io.IniFilename = ini_path.c_str();
   io.LogFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 

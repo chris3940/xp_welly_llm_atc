@@ -38,7 +38,9 @@ std::string get_data_dir();
 
 // Getters
 bool api_key_saved();
-std::string tts_voice();
+std::string tts_voice_atis();
+std::string tts_voice_tower();
+std::string tts_voice_ground();
 std::string tts_model();
 std::string whisper_model();
 std::string gpt_model();
@@ -50,7 +52,9 @@ bool debug_logging();
 std::string pattern_direction();
 
 // Setters
-void set_tts_voice(const std::string &v);
+void set_tts_voice_atis(const std::string &v);
+void set_tts_voice_tower(const std::string &v);
+void set_tts_voice_ground(const std::string &v);
 std::string pilot_callsign_raw();
 void set_pilot_callsign_raw(const std::string &raw);
 std::string to_icao_phonetic(const std::string &raw);

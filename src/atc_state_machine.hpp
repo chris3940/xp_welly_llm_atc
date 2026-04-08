@@ -19,6 +19,7 @@
 #ifndef ATC_STATE_MACHINE_HPP
 #define ATC_STATE_MACHINE_HPP
 
+#include "flight_phase.hpp"
 #include "intent_parser.hpp"
 #include "xplane_context.hpp"
 
@@ -51,6 +52,7 @@ void reset();
 
 ATCState get_state();
 const char *state_name(ATCState state);
+bool is_readback_pending();
 
 ATCState state_from_name(const std::string &name);
 void set_state(ATCState state);
@@ -61,6 +63,10 @@ build_vars(const intent_parser::PilotMessage &msg,
 
 ATCResponse process(const intent_parser::PilotMessage &msg,
                     const xplane_context::XPlaneContext &ctx);
+
+// Check and apply auto-corrections based on flight phase mismatches.
+// Call every frame from atc_session::update(). Uses dt for delay timers.
+void check_auto_correction(flight_phase::FlightPhase phase, float dt);
 
 } // namespace atc_state_machine
 

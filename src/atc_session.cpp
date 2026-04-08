@@ -19,6 +19,7 @@
 #include "atc_session.hpp"
 #include "atis_generator.hpp"
 #include "atc_state_machine.hpp"
+#include "flight_phase.hpp"
 #include "atc_templates.hpp"
 #include "audio_player.hpp"
 #include "audio_recorder.hpp"
@@ -49,6 +50,10 @@ static int total_transcriptions_ = 0;
 static int total_api_calls_ = 0;
 static constexpr float kMinRecordingDuration = 0.5f;
 
+// Queued intent (e.g. readback button pressed during playback)
+static bool pending_inject_ = false;
+static intent_parser::PilotIntent pending_intent_ = intent_parser::PilotIntent::UNKNOWN;
+
 // ATIS playback state
 static bool atis_playing_ = false;
 static float atis_cooldown_ = 0.0f;
@@ -56,8 +61,17 @@ static constexpr float kAtisCooldownSec = 30.0f;
 static float atis_tuned_timer_ = 0.0f;        // how long tuned to ATIS freq
 static constexpr float kAtisTuneDelaySec = 2.0f; // wait before playing
 
+// Determine TTS voice based on frequency type
+static std::string voice_for_freq(xplane_context::FrequencyType ft) {
+  using FT = xplane_context::FrequencyType;
+  if (ft == FT::GROUND)
+    return settings::tts_voice_ground();
+  return settings::tts_voice_tower();
+}
+
 // Speak ATC response via TTS, then transition to PLAYING → IDLE
-static void speak_response(const std::string &text, float speed = 1.0f) {
+static void speak_response(const std::string &text, float speed = 1.0f,
+                           const std::string &voice = "") {
   state_ = PTTState::PLAYING;
   ++total_api_calls_; // TTS call
 
@@ -80,7 +94,7 @@ static void speak_response(const std::string &text, float speed = 1.0f) {
           state_ = PTTState::IDLE;
         }
       },
-      speed);
+      speed, voice);
 }
 
 void init() {
@@ -272,7 +286,8 @@ void on_ptt_released() {
                 atc_resp.text,
                 freq_str,
             });
-            speak_response(atc_resp.text);
+            speak_response(atc_resp.text, 1.0f,
+                           voice_for_freq(ctx.frequency_type));
           }
         } else if (!settings::gpt_fallback_enabled()) {
           // GPT disabled — use state machine with _INVALID fallback
@@ -294,7 +309,8 @@ void on_ptt_released() {
               response,
               freq_str,
           });
-          speak_response(response);
+          speak_response(response, 1.0f,
+                         voice_for_freq(ctx.frequency_type));
         } else {
           // GPT intent classification
           ++total_api_calls_;
@@ -345,14 +361,15 @@ void on_ptt_released() {
               "[xp_wellys_atc] Routing to GPT intent classification\n");
 
           std::string freq_copy = freq_str;
+          std::string voice_copy = voice_for_freq(ctx.frequency_type);
           auto msg_copy = last_pilot_message_;
           const auto &ctx_copy = ctx;
 
           gpt_client::classify_intent_async(
               transcript, sys_prompt,
               // NOLINTNEXTLINE(bugprone-exception-escape)
-              [freq_copy, msg_copy, ctx_copy](std::string intent_key,
-                                              bool gpt_success) {
+              [freq_copy, voice_copy, msg_copy,
+               ctx_copy](std::string intent_key, bool gpt_success) {
                 if (!gpt_success)
                   intent_key = "_INVALID";
 
@@ -392,7 +409,7 @@ void on_ptt_released() {
                       atc_resp.text,
                       freq_copy,
                   });
-                  speak_response(atc_resp.text);
+                  speak_response(atc_resp.text, 1.0f, voice_copy);
                 }
               });
         }
@@ -412,12 +429,23 @@ void update() {
             "[xp_wellys_atc][DEBUG] Playback finished, state -> IDLE\n");
     }
     state_ = PTTState::IDLE;
+
+    // Execute queued intent (e.g. readback button pressed during playback)
+    if (pending_inject_) {
+      pending_inject_ = false;
+      auto queued = pending_intent_;
+      pending_intent_ = intent_parser::PilotIntent::UNKNOWN;
+      inject_intent(queued);
+    }
   }
 
   // ATIS cooldown timer
   float dt = 1.0f / 60.0f; // approximate per-frame at ~60fps
   if (atis_cooldown_ > 0.0f)
     atis_cooldown_ -= dt;
+
+  // Flight-phase auto-correction of ATC state
+  atc_state_machine::check_auto_correction(flight_phase::get(), dt);
 
   // ATIS playback trigger — requires avionics + tuning delay
   const auto &ctx = xplane_context::get();
@@ -454,7 +482,7 @@ void update() {
 
     atis_playing_ = true;
     atis_cooldown_ = kAtisCooldownSec;
-    speak_response(atis_text, 0.85f);
+    speak_response(atis_text, 0.85f, settings::tts_voice_atis());
   }
 }
 
@@ -496,5 +524,52 @@ std::string last_atc_response() {
 
 int total_transcriptions() { return total_transcriptions_; }
 int total_api_calls() { return total_api_calls_; }
+
+void inject_intent(intent_parser::PilotIntent intent) {
+  if (state_ == PTTState::PLAYING) {
+    // Queue intent to execute after playback finishes
+    pending_inject_ = true;
+    pending_intent_ = intent;
+    return;
+  }
+  if (state_ != PTTState::IDLE)
+    return;
+
+  const auto &ctx = xplane_context::get();
+  float active_freq =
+      (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
+  char freq_str[16];
+  std::snprintf(freq_str, sizeof(freq_str), "%.3f", active_freq);
+
+  intent_parser::PilotMessage msg{};
+  msg.raw_transcript =
+      std::string("[") + intent_parser::intent_name(intent) + "]";
+  msg.intent = intent;
+  msg.confidence = 1.0f;
+  msg.callsign = settings::pilot_callsign();
+  msg.runway = ctx.active_runway;
+  last_pilot_message_ = msg;
+
+  transcript_.push_back(TranscriptEntry{
+      static_cast<double>(XPLMGetElapsedTime()),
+      true,
+      msg.raw_transcript,
+      freq_str,
+  });
+
+  auto atc_resp = atc_state_machine::process(msg, ctx);
+
+  if (atc_resp.text.empty()) {
+    state_ = PTTState::IDLE;
+  } else {
+    transcript_.push_back(TranscriptEntry{
+        static_cast<double>(XPLMGetElapsedTime()),
+        false,
+        atc_resp.text,
+        freq_str,
+    });
+    speak_response(atc_resp.text, 1.0f, voice_for_freq(ctx.frequency_type));
+  }
+}
 
 } // namespace atc_session

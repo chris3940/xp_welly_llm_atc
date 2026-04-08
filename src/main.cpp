@@ -27,6 +27,7 @@
 #include "atc_state_machine.hpp"
 #include "atc_templates.hpp"
 #include "atc_ui.hpp"
+#include "flight_phase.hpp"
 #include "audio_player.hpp"
 #include "audio_recorder.hpp"
 #include "gpt_client.hpp"
@@ -45,6 +46,8 @@ static void menu_handler(void *, void *item_ref) {
   if (idx == 0)
     atc_ui::toggle();
   else if (idx == 1)
+    atc_ui::toggle_atc_panel();
+  else if (idx == 2)
     atc_ui::reset_window_position();
 }
 
@@ -56,9 +59,15 @@ static int atc_panel_cmd_handler(XPLMCommandRef, XPLMCommandPhase phase,
 }
 
 static int atis_check_counter_ = 0;
+static float last_elapsed_ = 0.0f;
 
 static float flight_loop_cb(float, float, int, void *) {
+  float now = XPLMGetElapsedTime();
+  float dt = (last_elapsed_ > 0.0f) ? (now - last_elapsed_) : (1.0f / 60.0f);
+  last_elapsed_ = now;
+
   xplane_context::update();
+  flight_phase::update(xplane_context::get(), dt);
   // Check ATIS for updates ~1/s (every 60 frames)
   if (++atis_check_counter_ % 60 == 0)
     atis_generator::check_for_update(xplane_context::get());
@@ -84,6 +93,7 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
   settings::init();
   atc_templates::init();
   xplane_context::init();
+  flight_phase::init();
   atis_generator::init();
   audio_recorder::init();
   audio_player::init();
@@ -113,8 +123,10 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
                            menu_container_idx, menu_handler, nullptr);
   XPLMAppendMenuItem(menu_id, "Open / Close", nullptr, 0);
   // NOLINTBEGIN(performance-no-int-to-ptr)
-  XPLMAppendMenuItem(menu_id, "Reset Window Position",
+  XPLMAppendMenuItem(menu_id, "ATC Commands",
                      reinterpret_cast<void *>(uintptr_t{1}), 0);
+  XPLMAppendMenuItem(menu_id, "Reset Window Position",
+                     reinterpret_cast<void *>(uintptr_t{2}), 0);
   // NOLINTEND(performance-no-int-to-ptr)
 
   return 1;
@@ -134,6 +146,7 @@ PLUGIN_API void XPluginStop() {
   audio_player::stop();
   audio_recorder::stop();
   atis_generator::stop();
+  flight_phase::stop();
   xplane_context::stop();
   atc_templates::stop();
   settings::stop();

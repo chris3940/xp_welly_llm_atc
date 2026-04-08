@@ -79,6 +79,7 @@ struct XPlaneContext {
   float indicated_airspeed_kts = 0.0f;
   float vertical_speed_fpm = 0.0f;
   float heading_true = 0.0f;
+  float height_agl_ft = 0.0f;
   bool on_ground = true;
   bool engines_running = false;
   float com1_freq_mhz = 0.0f;
