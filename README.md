@@ -15,6 +15,12 @@ Talk to ATC using your microphone via push-to-talk. The plugin transcribes your 
 - **Text-to-Speech** — natural ATC voice responses via OpenAI TTS (separate voices for Tower, Ground, and ATIS)
 - **ImGui UI** — in-sim transcript panel, status bar, and settings
 
+## Getting Started — Video Tutorial
+
+[![Watch the tutorial](https://img.youtube.com/vi/jh2lbBgA8Fw/maxresdefault.jpg)](https://youtu.be/jh2lbBgA8Fw)
+
+This walkthrough covers initial plugin configuration inside X-Plane — setting your callsign, entering your OpenAI API key, and binding push-to-talk — followed by a first live ATC interaction: tuning the ATIS frequency at Grenchen (LSZG) and receiving the automated weather broadcast.
+
 ## Platform
 
 **macOS only.** Windows and Linux are not supported. The plugin relies on macOS-specific frameworks (Core Audio, AudioToolbox, Security/Keychain, AVFoundation).
