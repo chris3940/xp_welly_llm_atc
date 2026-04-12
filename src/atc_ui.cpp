@@ -44,9 +44,11 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace atc_ui {
 
@@ -88,6 +90,130 @@ static size_t last_transcript_count_ = 0;
 static bool window_pos_reset_pending_ = false;
 static float geometry_save_timer_ = 0.0f;
 static constexpr float kGeometrySaveDelay = 0.5f; // save 0.5s after last change
+
+// ── Nearby airports panel ────────────────────────────────────────
+
+static constexpr double kNearbyAirportsRangeNm = 40.0;
+static constexpr size_t kNearbyAirportsMax = 10;
+
+static std::vector<xplane_context::NearbyAirport> nearby_cache_;
+static std::chrono::steady_clock::time_point nearby_last_refresh_{};
+
+static void draw_nearby_airports() {
+  const auto &ctx = xplane_context::get();
+  const std::string &locked = xplane_context::locked_airport();
+
+  // Throttle refresh to ~1 Hz.
+  auto now = std::chrono::steady_clock::now();
+  if (nearby_cache_.empty() ||
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          now - nearby_last_refresh_)
+              .count() >= 1000) {
+    nearby_cache_ = xplane_context::find_nearby_airports(
+        kNearbyAirportsRangeNm, kNearbyAirportsMax);
+    nearby_last_refresh_ = now;
+  }
+
+  ImGui::Text("Nearby Airports (within %.0f NM)", kNearbyAirportsRangeNm);
+  if (!locked.empty()) {
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Unlock")) {
+      xplane_context::unlock_airport();
+      nearby_cache_.clear();
+    }
+  }
+
+  // If locked airport is outside the nearby window, show it as a pinned row.
+  bool locked_in_list = false;
+  if (!locked.empty()) {
+    for (const auto &na : nearby_cache_) {
+      if (na.icao == locked) {
+        locked_in_list = true;
+        break;
+      }
+    }
+  }
+
+  auto render_row = [&](const std::string &icao, const std::string &name,
+                        double dist_nm, bool has_tower, bool has_atis,
+                        bool is_locked) {
+    char label[256];
+    std::snprintf(label, sizeof(label),
+                  "%s %-4s  %-24s  %5.1f NM  %s %s##nb_%s",
+                  is_locked ? "\xe2\x96\xb6" : " ", // ▶ marker
+                  icao.c_str(),
+                  name.empty() ? "" : name.substr(0, 24).c_str(), dist_nm,
+                  has_tower ? "T" : "-", has_atis ? "A" : "-", icao.c_str());
+    if (is_locked) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
+    }
+    bool clicked = ImGui::Selectable(label, is_locked);
+    if (is_locked)
+      ImGui::PopStyleColor();
+
+    if (clicked) {
+      xplane_context::lock_airport(icao);
+      // Tune standby to the most useful freq of the picked airport:
+      // ATIS if available, otherwise Tower, otherwise Unicom.
+      const auto &cur_ctx = xplane_context::get();
+      uint32_t target_khz = 0;
+      for (const auto &f : cur_ctx.airport_freqs.all) {
+        if (f.type == xplane_context::FrequencyType::ATIS) {
+          target_khz = f.freq_khz;
+          break;
+        }
+      }
+      if (target_khz == 0) {
+        for (const auto &f : cur_ctx.airport_freqs.all) {
+          if (f.type == xplane_context::FrequencyType::TOWER) {
+            target_khz = f.freq_khz;
+            break;
+          }
+        }
+      }
+      if (target_khz == 0) {
+        for (const auto &f : cur_ctx.airport_freqs.all) {
+          if (f.type == xplane_context::FrequencyType::UNICOM) {
+            target_khz = f.freq_khz;
+            break;
+          }
+        }
+      }
+      if (target_khz != 0)
+        xplane_context::set_standby_freq(target_khz);
+      nearby_cache_.clear();
+    }
+  };
+
+  if (!locked.empty() && !locked_in_list) {
+    // Compute distance for pinned locked row.
+    double dist_nm = 0.0;
+    if (ctx.airport_lat != 0.0 || ctx.airport_lon != 0.0) {
+      // Reuse ctx.airport_lat/lon which was populated from the lock.
+      const double kDeg2Rad = 3.14159265358979323846 / 180.0;
+      double dlat = (ctx.airport_lat - ctx.latitude) * kDeg2Rad;
+      double dlon = (ctx.airport_lon - ctx.longitude) * kDeg2Rad;
+      double a = std::sin(dlat / 2) * std::sin(dlat / 2) +
+                 std::cos(ctx.latitude * kDeg2Rad) *
+                     std::cos(ctx.airport_lat * kDeg2Rad) *
+                     std::sin(dlon / 2) * std::sin(dlon / 2);
+      double dm = 6371000.0 * 2.0 * std::atan2(std::sqrt(a),
+                                               std::sqrt(1.0 - a));
+      dist_nm = dm / 1852.0;
+    }
+    render_row(locked, ctx.nearest_airport_name, dist_nm,
+               ctx.is_towered_airport, ctx.atis_freq_mhz > 100.0f, true);
+  }
+
+  if (nearby_cache_.empty()) {
+    ImGui::TextDisabled("  (no airports in range)");
+  } else {
+    for (const auto &na : nearby_cache_) {
+      render_row(na.icao, na.name, na.distance_nm, na.has_tower, na.has_atis,
+                 na.icao == locked);
+    }
+  }
+}
 
 // ── Tab drawing ──────────────────────────────────────────────────
 
@@ -151,8 +277,11 @@ static void draw_status_tab() {
                                               : "(Uncontrolled)"));
     if (!ctx.geometric_nearest_id.empty() &&
         ctx.geometric_nearest_id != ctx.nearest_airport_id) {
+      const char *reason = xplane_context::locked_airport().empty()
+                               ? "active via tuned freq"
+                               : "LOCKED by picker";
       ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
-                         "  active via tuned freq | geometric nearest: %s",
+                         "  %s | geometric nearest: %s", reason,
                          ctx.geometric_nearest_id.c_str());
     }
   }
@@ -593,8 +722,8 @@ static void draw_atc_panel() {
   if (!atc_panel_visible_)
     return;
 
-  ImGui::SetNextWindowSize(ImVec2(310, 380), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSizeConstraints(ImVec2(250, 200), ImVec2(600, 800));
+  ImGui::SetNextWindowSize(ImVec2(420, 620), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(280, 300), ImVec2(700, 1000));
 
   bool open = atc_panel_visible_;
   if (ImGui::Begin("ATC Commands##atc_panel", &open,
@@ -647,6 +776,12 @@ static void draw_atc_panel() {
         ImGui::Text("Wind: %03.0f%s / %.0f kt", ctx.wind_direction_deg,
                     "\xC2\xB0", ctx.wind_speed_kt);
       }
+    }
+
+    // Nearby airports picker — click to lock target airport
+    if (ImGui::CollapsingHeader("Nearby Airports",
+                                ImGuiTreeNodeFlags_DefaultOpen)) {
+      draw_nearby_airports();
     }
 
     // VRP list (if airport has published visual reporting points)

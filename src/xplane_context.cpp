@@ -23,6 +23,7 @@
 #include <XPLMNavigation.h>
 #include <XPLMUtilities.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -74,6 +75,9 @@ static std::unordered_map<std::string, std::string> name_cache_;
 // checks during frequency-driven active-airport switching.
 static std::unordered_map<std::string, std::pair<double, double>> pos_cache_;
 static std::atomic<bool> towered_cache_ready_{false};
+
+// Airport picker: when set, overrides nearest-airport selection logic.
+static std::string locked_airport_id_;
 
 static constexpr double kDeg2Rad = M_PI / 180.0;
 static constexpr double kEarthRadiusM = 6371000.0;
@@ -139,6 +143,54 @@ FrequencyType AirportFrequencies::lookup(float freq_mhz) const {
 }
 
 bool AirportFrequencies::has_ground() const { return has(FrequencyType::GROUND); }
+
+// Forward decl (defined further down).
+static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
+                                        float wind_dir, float wind_speed);
+
+// Populate ctx airport fields from caches for a given ICAO.
+// Used for both the locked-airport path and as the tail of update().
+static void populate_ctx_from_cache(const std::string &icao,
+                                    double fallback_lat, double fallback_lon) {
+  ctx.nearest_airport_id = icao;
+
+  auto pos_it = pos_cache_.find(icao);
+  if (pos_it != pos_cache_.end()) {
+    ctx.airport_lat = pos_it->second.first;
+    ctx.airport_lon = pos_it->second.second;
+  } else {
+    ctx.airport_lat = fallback_lat;
+    ctx.airport_lon = fallback_lon;
+  }
+
+  auto name_it = name_cache_.find(icao);
+  ctx.nearest_airport_name =
+      (name_it != name_cache_.end()) ? name_it->second : "";
+
+  auto freq_it = freq_cache_.find(icao);
+  if (freq_it != freq_cache_.end()) {
+    ctx.airport_freqs = freq_it->second;
+    ctx.is_towered_airport = ctx.airport_freqs.has(FrequencyType::TOWER);
+    ctx.tower_only =
+        ctx.is_towered_airport && !ctx.airport_freqs.has_ground();
+    ctx.atis_freq_mhz = ctx.airport_freqs.first_mhz(FrequencyType::ATIS);
+  } else {
+    ctx.airport_freqs = {};
+    ctx.is_towered_airport = false;
+    ctx.tower_only = false;
+    ctx.atis_freq_mhz = 0.0f;
+  }
+
+  auto rwy_it = runway_cache_.find(icao);
+  if (rwy_it != runway_cache_.end()) {
+    ctx.runways = rwy_it->second;
+    ctx.active_runway = select_active_runway(
+        ctx.runways, ctx.wind_direction_deg, ctx.wind_speed_kt);
+  } else {
+    ctx.runways.clear();
+    ctx.active_runway.clear();
+  }
+}
 
 // Find an airport whose frequency table contains `freq_khz` within realistic
 // VHF range. Skips `skip_id` (the geometric nearest, already handled).
@@ -530,6 +582,7 @@ void init() {
 void stop() {
   ctx = XPlaneContext{};
   frame_counter = 0;
+  locked_airport_id_.clear();
 }
 
 void update() {
@@ -649,6 +702,24 @@ void update() {
 
   // Nearest airport lookup — throttled to every 60 frames (~1s)
   if (++frame_counter % 60 == 0) {
+    // Airport lock: overrides both geometric and freq-match selection.
+    if (!locked_airport_id_.empty() && towered_cache_ready_ &&
+        pos_cache_.find(locked_airport_id_) != pos_cache_.end()) {
+      // Still refresh geometric_nearest_id for info / debug.
+      float lat_f = static_cast<float>(ctx.latitude);
+      float lon_f = static_cast<float>(ctx.longitude);
+      XPLMNavRef airport_ref = XPLMFindNavAid(nullptr, nullptr, &lat_f, &lon_f,
+                                              nullptr, xplm_Nav_Airport);
+      if (airport_ref != XPLM_NAV_NOT_FOUND) {
+        char icao[32] = {};
+        XPLMGetNavAidInfo(airport_ref, nullptr, nullptr, nullptr, nullptr,
+                          nullptr, nullptr, icao, nullptr, nullptr);
+        ctx.geometric_nearest_id = icao;
+      }
+      populate_ctx_from_cache(locked_airport_id_, ctx.latitude, ctx.longitude);
+      return;
+    }
+
     float lat = static_cast<float>(ctx.latitude);
     float lon = static_cast<float>(ctx.longitude);
     XPLMNavRef airport_ref =
@@ -803,6 +874,88 @@ void update() {
 }
 
 const XPlaneContext &get() { return ctx; }
+
+void lock_airport(const std::string &icao) {
+  if (icao.empty())
+    return;
+  if (!towered_cache_ready_)
+    return;
+  if (pos_cache_.find(icao) == pos_cache_.end())
+    return;
+  locked_airport_id_ = icao;
+  // Apply immediately so ATC logic doesn't lag up to 1 s behind the click.
+  populate_ctx_from_cache(icao, ctx.latitude, ctx.longitude);
+  char log[128];
+  std::snprintf(log, sizeof(log),
+                "[xp_wellys_atc] Airport lock: %s\n", icao.c_str());
+  XPLMDebugString(log);
+}
+
+void unlock_airport() {
+  if (locked_airport_id_.empty())
+    return;
+  char log[128];
+  std::snprintf(log, sizeof(log),
+                "[xp_wellys_atc] Airport unlock (was %s)\n",
+                locked_airport_id_.c_str());
+  XPLMDebugString(log);
+  locked_airport_id_.clear();
+  // Force the next throttle tick to re-resolve geometric nearest.
+  frame_counter = 59;
+}
+
+const std::string &locked_airport() noexcept { return locked_airport_id_; }
+
+std::vector<NearbyAirport> find_nearby_airports(double max_nm,
+                                                size_t max_count) {
+  std::vector<NearbyAirport> out;
+  if (!towered_cache_ready_ || max_count == 0)
+    return out;
+
+  const double ac_lat = ctx.latitude;
+  const double ac_lon = ctx.longitude;
+  const double max_m = max_nm * kMetersPerNm;
+
+  // Prefilter bbox: max_nm converted to degrees of lat, and lon with cos().
+  const double lat_window_deg = max_nm / 60.0; // 1 NM ≈ 1/60°
+  const double cos_lat = std::cos(ac_lat * kDeg2Rad);
+  const double lon_window_deg =
+      (cos_lat > 0.01) ? (max_nm / 60.0) / cos_lat : 180.0;
+
+  out.reserve(32);
+  for (const auto &kv : pos_cache_) {
+    double apt_lat = kv.second.first;
+    double apt_lon = kv.second.second;
+    if (std::fabs(apt_lat - ac_lat) > lat_window_deg)
+      continue;
+    if (std::fabs(apt_lon - ac_lon) > lon_window_deg)
+      continue;
+    double dist_m = haversine_distance(ac_lat, ac_lon, apt_lat, apt_lon);
+    if (dist_m > max_m)
+      continue;
+
+    NearbyAirport na;
+    na.icao = kv.first;
+    na.distance_nm = dist_m / kMetersPerNm;
+    auto name_it = name_cache_.find(kv.first);
+    if (name_it != name_cache_.end())
+      na.name = name_it->second;
+    auto freq_it = freq_cache_.find(kv.first);
+    if (freq_it != freq_cache_.end()) {
+      na.has_tower = freq_it->second.has(FrequencyType::TOWER);
+      na.has_atis = freq_it->second.has(FrequencyType::ATIS);
+    }
+    out.push_back(std::move(na));
+  }
+
+  std::sort(out.begin(), out.end(),
+            [](const NearbyAirport &a, const NearbyAirport &b) {
+              return a.distance_nm < b.distance_nm;
+            });
+  if (out.size() > max_count)
+    out.resize(max_count);
+  return out;
+}
 
 void set_standby_freq(uint32_t freq_khz) {
   XPLMDataRef dr =

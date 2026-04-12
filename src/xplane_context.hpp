@@ -118,6 +118,27 @@ const XPlaneContext &get();
 // Write a frequency (in kHz, e.g. 121900) to the active COM's standby slot
 void set_standby_freq(uint32_t freq_khz);
 
+// ── Airport picker / lock ────────────────────────────────────────
+// Force `nearest_airport_id` (and all derived fields) to a specific ICAO.
+// Overrides both geometric-nearest and frequency-match logic.
+// No-op if ICAO is not in the airport cache.
+void lock_airport(const std::string &icao);
+void unlock_airport();
+const std::string &locked_airport() noexcept;
+
+struct NearbyAirport {
+  std::string icao;
+  std::string name;
+  double distance_nm = 0.0;
+  bool has_tower = false;
+  bool has_atis = false;
+};
+
+// Return up to `max_count` airports within `max_nm` of the aircraft,
+// sorted ascending by distance. Empty until the airport cache is ready.
+std::vector<NearbyAirport> find_nearby_airports(double max_nm,
+                                                size_t max_count);
+
 } // namespace xplane_context
 
 #endif // XPLANE_CONTEXT_HPP
