@@ -71,7 +71,7 @@ Settings are stored in `data/settings.json`:
 | `pattern_direction` | `left` | Traffic pattern direction (left/right) |
 | `debug_logging` | `false` | Enable verbose debug output |
 
-ATC response templates are defined in `data/atc_templates.json` (towered and uncontrolled airports). Flight phase detection thresholds, ATC precondition guards, and auto-correction rules are configured in `data/flight_rules.json`. Both files can be edited without rebuilding the plugin.
+ATC response templates are defined in `data/atc_templates.json` (towered and uncontrolled airports). Flight phase detection thresholds, ATC precondition guards, and auto-correction rules are configured in `data/flight_rules.json`. Visual Reporting Points (VRPs) for inbound routing are defined per airport in `data/airport_vrps.json` — the plugin uses these to recognize VRP names in pilot transmissions and issue realistic arrival instructions (e.g., *"cleared to enter control zone via November"*). All three files can be edited without rebuilding the plugin.
 
 **Push-to-Talk** is configured via X-Plane's keyboard or joystick settings. The plugin registers the command `xp_wellys_atc/ptt` which can be bound to any key or joystick button in X-Plane.
 
