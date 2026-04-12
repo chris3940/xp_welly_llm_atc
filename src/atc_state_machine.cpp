@@ -511,7 +511,11 @@ void check_auto_correction(flight_phase::FlightPhase phase, float dt) {
         return;
       }
 
-      std::string key = current_state + ":" + cond_name;
+      std::string key;
+      key.reserve(current_state.size() + 1 + cond_name.size());
+      key += current_state;
+      key += ':';
+      key += cond_name;
       if (key != active_correction_key_) {
         active_correction_key_ = key;
         correction_timer_ = 0.0f;

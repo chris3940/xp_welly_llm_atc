@@ -280,6 +280,11 @@
         "next_state": "IDLE",
         "requires_readback": false
       },
+      "REQUEST_TAXI_PARKING": {
+        "response": "{callsign}, runway vacated, taxi to general aviation parking via Alpha, good day.",
+        "next_state": "IDLE",
+        "requires_readback": false
+      },
       "GO_AROUND": {
         "response": "{callsign}, roger, fly runway heading, climb and maintain pattern altitude, re-enter {pattern_direction} downwind runway {runway}.",
         "next_state": "PATTERN_ENTRY",

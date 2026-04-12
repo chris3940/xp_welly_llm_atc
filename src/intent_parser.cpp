@@ -349,6 +349,10 @@ static bool match_runway_vacated(const std::string &t) {
       !contains(t, "takeoff") && !contains(t, "take off") &&
       !contains(t, "landing") && !contains(t, "land"))
     return true;
+  // "left runway 14" / "left the runway" but NOT "left downwind" / "left base"
+  if (contains(t, "left") && contains(t, "runway") &&
+      !contains(t, "downwind") && !contains(t, "base"))
+    return true;
   return false;
 }
 

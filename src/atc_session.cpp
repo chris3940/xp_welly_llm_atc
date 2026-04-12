@@ -314,7 +314,7 @@ void on_ptt_released() {
           gpt_client::classify_intent_async(
               transcript, prompt,
               // NOLINTNEXTLINE(bugprone-exception-escape)
-              [msg_copy, run_state_machine](std::string result,
+              [msg_copy, run_state_machine](const std::string& result,
                                             bool success) {
                 auto msg = msg_copy;
                 if (success) {
