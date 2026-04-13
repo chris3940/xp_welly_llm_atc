@@ -82,10 +82,39 @@ Settings are stored in `data/settings.json`:
 | `active_com` | `1` | Active COM radio (1 or 2) |
 | `volume` | `1.0` | Playback volume (0.0–1.0) |
 | `gpt_fallback_enabled` | `true` | Use GPT when intent confidence is low |
-| `pattern_direction` | `left` | Traffic pattern direction (left/right) |
+| `pattern_direction` | `left` | Default traffic pattern direction (left/right) — overridden per airport/runway by `airport_vrps.json` |
 | `debug_logging` | `false` | Enable verbose debug output |
 
-ATC response templates are defined in `data/atc_templates.json` (towered and uncontrolled airports). Flight phase detection thresholds, ATC precondition guards, and auto-correction rules are configured in `data/flight_rules.json`. Visual Reporting Points (VRPs) for inbound routing are defined per airport in `data/airport_vrps.json` — the plugin uses these to recognize VRP names in pilot transmissions and issue realistic arrival instructions (e.g., *"cleared to enter control zone via November"*). All three files can be edited without rebuilding the plugin.
+ATC response templates are defined in `data/atc_templates.json` (towered and uncontrolled airports). Flight phase detection thresholds, ATC precondition guards, and auto-correction rules are configured in `data/flight_rules.json`. All data files can be edited without rebuilding the plugin.
+
+### Airport Database (`data/airport_vrps.json`)
+
+Per-airport configuration for Visual Reporting Points (VRPs) and traffic pattern directions. The plugin ships with pre-configured data for common Swiss and German VFR airports.
+
+**VRPs** are used to recognize VRP names in pilot transmissions and issue realistic arrival instructions (e.g., *"cleared to enter control zone via November"*).
+
+**Pattern direction** can be configured globally in `settings.json` (`pattern_direction`) or per airport/runway in `airport_vrps.json`. The airport-specific value takes precedence over the global setting. This supports airports where the pattern direction differs by runway (e.g., Grenchen LSZG: right traffic for runway 07, left traffic for runway 25).
+
+```json
+{
+  "LSZG": {
+    "name": "Grenchen",
+    "pattern_direction": {
+      "07": "right",
+      "25": "left"
+    },
+    "vrps": [
+      { "name": "Tango", "lat": 47.175, "lon": 7.410, "alt_ft": 3000 }
+    ],
+    "arrival_routes": {
+      "07": ["Golf", "Tango"],
+      "25": ["Mike", "Tango"]
+    }
+  }
+}
+```
+
+`pattern_direction` can be a simple string (`"left"`) to apply to all runways, or an object with per-runway entries. Lookup order: exact runway match → base runway (strip L/R/C suffix) → airport default → global `settings.json` fallback.
 
 **Push-to-Talk** is configured via X-Plane's keyboard or joystick settings. The plugin registers the command `xp_wellys_atc/ptt` which can be bound to any key or joystick button in X-Plane.
 
