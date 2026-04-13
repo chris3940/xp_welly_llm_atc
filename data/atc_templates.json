@@ -1,4 +1,5 @@
 {
+  "_comment": "ATC response templates organized by airport type (towered/uncontrolled), ATC state, and pilot intent. Each entry defines: response (template text with {variable} placeholders), next_state (state machine transition), and requires_readback (whether the pilot must read back the clearance). The _INVALID key is the fallback when no matching intent is found for the current state. Variables are filled at runtime by atc_state_machine::build_vars() from XPlaneContext data.",
   "towered": {
     "IDLE": {
       "INITIAL_CALL_GROUND": {

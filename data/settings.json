@@ -1,4 +1,5 @@
 {
+  "_comment": "Runtime settings for the plugin. API key is stored in macOS Keychain (api_key_saved is a flag only). PTT is bound via X-Plane command binding. Models and voice can be changed to any supported OpenAI variant. Volume range is 0.0–1.0. active_com selects which COM radio (1 or 2) the plugin monitors.",
   "api_key_saved": false,
   "ptt_key_vk": 49,
   "ptt_joystick_button": -1,
