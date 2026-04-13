@@ -107,6 +107,18 @@ static void load_from_file() {
       }
     }
 
+    if (node.contains("pattern_direction")) {
+      const auto &pd = node["pattern_direction"];
+      if (pd.is_string()) {
+        ad.pattern_direction["_default"] = pd.get<std::string>();
+      } else if (pd.is_object()) {
+        for (auto pit = pd.begin(); pit != pd.end(); ++pit) {
+          if (pit.value().is_string())
+            ad.pattern_direction[pit.key()] = pit.value().get<std::string>();
+        }
+      }
+    }
+
     airports_[icao] = std::move(ad);
   }
 
@@ -174,6 +186,36 @@ std::string find_in_transcript(const std::string &icao,
       pos = after;
     }
   }
+  return {};
+}
+
+std::string get_pattern_direction(const std::string &icao,
+                                  const std::string &runway) {
+  const AirportData *ad = get(icao);
+  if (!ad || ad->pattern_direction.empty())
+    return {};
+
+  // Exact runway match (e.g. "25L")
+  auto it = ad->pattern_direction.find(runway);
+  if (it != ad->pattern_direction.end())
+    return it->second;
+
+  // Base runway — strip L/R/C suffix (e.g. "25L" → "25")
+  if (!runway.empty()) {
+    char last = runway.back();
+    if (last == 'L' || last == 'R' || last == 'C') {
+      std::string base = runway.substr(0, runway.size() - 1);
+      it = ad->pattern_direction.find(base);
+      if (it != ad->pattern_direction.end())
+        return it->second;
+    }
+  }
+
+  // Default for all runways
+  it = ad->pattern_direction.find("_default");
+  if (it != ad->pattern_direction.end())
+    return it->second;
+
   return {};
 }
 

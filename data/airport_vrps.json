@@ -1,7 +1,8 @@
 {
-  "_comment": "Visual Reporting Points per airport. Coordinates are approximate and should be validated against Skyguide AIP VFR Manual before production use. The plugin matches VRPs by name in the pilot's transcript; coordinates are stored for future use (UI display, nearest-VRP hints).",
+  "_comment": "Visual Reporting Points and pattern directions per airport. Coordinates are approximate and should be validated against Skyguide/DFS AIP VFR Manual before production use. The plugin matches VRPs by name in the pilot's transcript; coordinates are stored for future use (UI display, nearest-VRP hints). pattern_direction overrides the global settings value when present.",
   "LSZB": {
     "name": "Bern-Belp",
+    "pattern_direction": "left",
     "vrps": [
       { "name": "November", "lat": 47.017, "lon": 7.500, "alt_ft": 3500 },
       { "name": "Sierra",   "lat": 46.867, "lon": 7.467, "alt_ft": 3500 },
@@ -11,6 +12,160 @@
     "arrival_routes": {
       "14": ["Whiskey", "Sierra"],
       "32": ["November", "Echo"]
+    }
+  },
+  "LSZG": {
+    "name": "Grenchen",
+    "pattern_direction": {
+      "07": "right",
+      "25": "left"
+    },
+    "vrps": [
+      { "name": "Tango",  "lat": 47.175, "lon": 7.410, "alt_ft": 3000 },
+      { "name": "Mike",   "lat": 47.210, "lon": 7.425, "alt_ft": 3000 },
+      { "name": "Golf",   "lat": 47.185, "lon": 7.360, "alt_ft": 3000 }
+    ],
+    "arrival_routes": {
+      "07": ["Golf", "Tango"],
+      "25": ["Mike", "Tango"]
+    }
+  },
+  "LSZO": {
+    "name": "Birrfeld",
+    "pattern_direction": {
+      "08": "right",
+      "26": "left"
+    },
+    "vrps": [
+      { "name": "Alpha",   "lat": 47.480, "lon": 8.210, "alt_ft": 2500 },
+      { "name": "Bravo",   "lat": 47.440, "lon": 8.230, "alt_ft": 2500 },
+      { "name": "Charlie", "lat": 47.450, "lon": 8.170, "alt_ft": 2500 }
+    ],
+    "arrival_routes": {
+      "08": ["Alpha", "Charlie"],
+      "26": ["Bravo", "Alpha"]
+    }
+  },
+  "LSZR": {
+    "name": "St. Gallen-Altenrhein",
+    "pattern_direction": {
+      "10": "left",
+      "28": "right"
+    },
+    "vrps": [
+      { "name": "Sierra",   "lat": 47.490, "lon": 9.555, "alt_ft": 2000 },
+      { "name": "November", "lat": 47.475, "lon": 9.610, "alt_ft": 2000 },
+      { "name": "Whiskey",  "lat": 47.480, "lon": 9.500, "alt_ft": 2000 }
+    ],
+    "arrival_routes": {
+      "10": ["November", "Sierra"],
+      "28": ["Whiskey", "Sierra"]
+    }
+  },
+  "LSZC": {
+    "name": "Buochs",
+    "pattern_direction": {
+      "07": "right",
+      "25": "left"
+    },
+    "vrps": [
+      { "name": "November", "lat": 46.960, "lon": 8.395, "alt_ft": 2800 },
+      { "name": "Sierra",   "lat": 46.975, "lon": 8.330, "alt_ft": 2800 },
+      { "name": "Echo",     "lat": 46.985, "lon": 8.420, "alt_ft": 2800 }
+    ],
+    "arrival_routes": {
+      "07": ["Sierra", "November"],
+      "25": ["Echo", "November"]
+    }
+  },
+  "LSGS": {
+    "name": "Sion",
+    "pattern_direction": {
+      "07": "right",
+      "25": "left"
+    },
+    "vrps": [
+      { "name": "November", "lat": 46.210, "lon": 7.310, "alt_ft": 3000 },
+      { "name": "Sierra",   "lat": 46.255, "lon": 7.400, "alt_ft": 3000 },
+      { "name": "Whiskey",  "lat": 46.230, "lon": 7.260, "alt_ft": 3000 }
+    ],
+    "arrival_routes": {
+      "07": ["Whiskey", "November"],
+      "25": ["Sierra", "November"]
+    }
+  },
+  "EDFE": {
+    "name": "Egelsbach",
+    "pattern_direction": {
+      "08": "left",
+      "26": "right"
+    },
+    "vrps": [
+      { "name": "November", "lat": 49.970, "lon": 8.630, "alt_ft": 1300 },
+      { "name": "Sierra",   "lat": 49.955, "lon": 8.620, "alt_ft": 1300 },
+      { "name": "Echo",     "lat": 49.965, "lon": 8.660, "alt_ft": 1300 }
+    ],
+    "arrival_routes": {
+      "08": ["November", "Echo"],
+      "26": ["Sierra", "Echo"]
+    }
+  },
+  "EDKB": {
+    "name": "Bonn-Hangelar",
+    "pattern_direction": {
+      "11": "left",
+      "29": "right"
+    },
+    "vrps": [
+      { "name": "November", "lat": 50.780, "lon": 7.170, "alt_ft": 1500 },
+      { "name": "Sierra",   "lat": 50.760, "lon": 7.155, "alt_ft": 1500 },
+      { "name": "Mike",     "lat": 50.755, "lon": 7.200, "alt_ft": 1500 }
+    ],
+    "arrival_routes": {
+      "11": ["November", "Mike"],
+      "29": ["Sierra", "Mike"]
+    }
+  },
+  "EDMA": {
+    "name": "Augsburg",
+    "pattern_direction": "left",
+    "vrps": [
+      { "name": "Alpha",   "lat": 48.435, "lon": 10.945, "alt_ft": 2500 },
+      { "name": "Bravo",   "lat": 48.415, "lon": 10.865, "alt_ft": 2500 },
+      { "name": "Charlie", "lat": 48.445, "lon": 10.900, "alt_ft": 2500 }
+    ],
+    "arrival_routes": {
+      "07": ["Bravo", "Alpha"],
+      "25": ["Charlie", "Alpha"]
+    }
+  },
+  "EDTF": {
+    "name": "Freiburg",
+    "pattern_direction": "left",
+    "vrps": [
+      { "name": "November", "lat": 48.030, "lon": 7.820, "alt_ft": 1500 },
+      { "name": "Sierra",   "lat": 48.000, "lon": 7.830, "alt_ft": 1500 },
+      { "name": "Echo",     "lat": 48.020, "lon": 7.870, "alt_ft": 1500 }
+    ],
+    "arrival_routes": {
+      "16": ["November", "Sierra"],
+      "34": ["Echo", "November"]
+    }
+  },
+  "EDNY": {
+    "name": "Friedrichshafen",
+    "pattern_direction": {
+      "06": "left",
+      "24": "right"
+    },
+    "vrps": [
+      { "name": "November", "lat": 47.680, "lon": 9.500, "alt_ft": 2000 },
+      { "name": "Sierra",   "lat": 47.665, "lon": 9.530, "alt_ft": 2000 },
+      { "name": "Echo",     "lat": 47.660, "lon": 9.480, "alt_ft": 2000 }
+    ],
+    "arrival_routes": {
+      "06": ["Echo", "November"],
+      "24": ["Sierra", "November"]
     }
   }
 }

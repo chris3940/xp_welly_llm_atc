@@ -38,6 +38,9 @@ struct AirportData {
   // arrival_routes: runway designator (e.g. "14") → list of preferred VRP
   // names for that runway. Empty if not published.
   std::map<std::string, std::vector<std::string>> arrival_routes;
+  // pattern_direction: runway designator → "left"/"right".
+  // Key "_default" applies when no runway-specific entry matches.
+  std::map<std::string, std::string> pattern_direction;
 };
 
 void init();
@@ -54,6 +57,12 @@ const AirportData *get(const std::string &icao);
 // with phonetic callsign letters.
 std::string find_in_transcript(const std::string &icao,
                                const std::string &transcript_lower);
+
+// Return pattern direction ("left"/"right") for an airport+runway from the
+// airport database. Lookup chain: exact runway → base runway (strip L/R/C)
+// → _default → empty string (caller should fall back to global settings).
+std::string get_pattern_direction(const std::string &icao,
+                                  const std::string &runway);
 
 } // namespace airport_vrps
 

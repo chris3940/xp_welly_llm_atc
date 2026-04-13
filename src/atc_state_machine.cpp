@@ -17,6 +17,7 @@
  */
 
 #include "atc_state_machine.hpp"
+#include "airport_vrps.hpp"
 #include "atis_generator.hpp"
 #include "atc_templates.hpp"
 #include "flight_phase.hpp"
@@ -282,7 +283,12 @@ build_vars(const intent_parser::PilotMessage &msg,
       {"tower_frequency", format_freq(tower_freq)},
       {"ground_frequency", format_freq(ground_freq)},
       {"position", extract_position(msg, ctx)},
-      {"pattern_direction", settings::pattern_direction()},
+      {"pattern_direction",
+       [&]() {
+         std::string dir = airport_vrps::get_pattern_direction(
+             ctx.nearest_airport_id, ctx.active_runway);
+         return dir.empty() ? settings::pattern_direction() : dir;
+       }()},
       {"entry_vrp", msg.vrp_name},
       {"position_remark", position_remark},
   };
