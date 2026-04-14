@@ -245,6 +245,8 @@ Ausgangszustand — kein aktives ATC-Gespräch.
 | `READY_FOR_DEPARTURE_VFR` | *"Springfield Tower, N123AB, ready for departure, on course."* | *"N123AB, Springfield Tower, runway 26, cleared for takeoff, wind 240 at 8, on course approved, frequency change approved when airborne."* |
 | `RADIO_CHECK` | *"Springfield Tower, N123AB, radio check."* | *"N123AB, Springfield Tower, reading you five by five."* |
 
+**Tipp — Position beim Erstkontakt angeben:** Bei `INITIAL_CALL_GROUND` und `REQUEST_TAXI` aus `IDLE` prüft das Plugin, ob du deinen Standort genannt hast (z.B. *"on parking"*, *"on the apron"*, *"at stand 5"*, *"on taxiway Alpha"*). Fehlt die Position, fügt der Controller einen kurzen "say position"-Hinweis in die Clearance ein. Funke wie in der echten Fliegerei — *"wen du rufst, wer du bist, wo du bist, was du willst"* — und du bekommst eine saubere Antwort.
+
 #### Zustand: `GROUND_CONTACT`
 
 Nach Erstkontakt mit Ground.
@@ -324,11 +326,23 @@ Landefreigabe erteilt — warten auf Aufsetzen und Verlassen der Piste.
 | Pilot-Intent | Beispiel Funkspruch | ATC-Antwort |
 |---|---|---|
 | `RUNWAY_VACATED` | *"N123AB, clear of runway 26."* | *"N123AB, contact ground on 121.9, good day."* |
+| `REQUEST_TAXI_PARKING` | *"Ground, N123AB, request taxi to parking."* | *"N123AB, Ground, taxi to general aviation parking via Alpha."* |
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
+
+**Hinweis — `REQUEST_TAXI_PARKING` ist nur nach der Landung gültig** (Flugphasen `TAXI` oder `LANDING_ROLL`). Ein Taxi-to-Parking Request während du noch am Parkplatz stehst (Flugphase `GROUND_READY`) wird abgewiesen — man kann nicht dahin rollen wo man schon steht.
 
 #### Zustand: `EN_ROUTE`
 
 Überlandflug — kein ATC-Kontakt. Der Zustand wird automatisch auf `IDLE` zurückgesetzt, wenn sich der nächstgelegene Flugplatz ändert.
+
+### 4.3 Funkdisziplin
+
+ATC achtet auf unangemessene Sprache auf der Frequenz. Echte Controller reagieren auf unprofessionellen Funkverkehr — der virtuelle tut das ebenfalls:
+
+1. **Erster Verstoss** — ein höflicher Hinweis zur Funkdisziplin; die eigentliche Anfrage des Piloten wird trotzdem normal bearbeitet
+2. **Wiederholter Verstoss** — eine deutliche *"last warning"* des Controllers; weitere Transmissions bleiben möglich, aber die Geduld des Controllers geht sichtlich zu Ende
+
+Das Feature soll realistische, professionelle Funkkommunikation fördern — nicht jeden Ausrutscher bestrafen. Wer am Funk ruhig bleibt, dem bleibt auch der Controller gewogen.
 
 ---
 

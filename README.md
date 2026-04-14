@@ -15,6 +15,7 @@ Talk to ATC using your microphone via push-to-talk. The plugin transcribes your 
 - **ATIS Generation** — automatic ATIS broadcasts from live sim weather data
 - **GPT Fallback** — GPT-4o-mini handles ambiguous or unrecognized intents
 - **Text-to-Speech** — natural ATC voice responses via OpenAI TTS (separate voices for Tower, Ground, and ATIS)
+- **Radio discipline coaching** — ATC issues a polite reminder when the pilot uses inappropriate language, followed by a firm "last warning" on repeated offenses
 - **ImGui UI** — in-sim transcript panel, status bar, and settings
 
 ## Getting Started — Video Tutorial

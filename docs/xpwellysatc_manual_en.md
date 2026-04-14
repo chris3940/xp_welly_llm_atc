@@ -245,6 +245,8 @@ Initial state — no active ATC conversation.
 | `READY_FOR_DEPARTURE_VFR` | *"Springfield Tower, N123AB, ready for departure, on course."* | *"N123AB, Springfield Tower, runway 26, cleared for takeoff, wind 240 at 8, on course approved, frequency change approved when airborne."* |
 | `RADIO_CHECK` | *"Springfield Tower, N123AB, radio check."* | *"N123AB, Springfield Tower, reading you five by five."* |
 
+**Tip — report your position on first contact:** On `INITIAL_CALL_GROUND` and `REQUEST_TAXI` from `IDLE`, the plugin checks whether you mentioned your location (e.g. *"on parking"*, *"on the apron"*, *"at stand 5"*, *"on taxiway Alpha"*). If you didn't, the controller adds a short "say position" remark to the clearance. Phrase your call the real-world way — *"who you call, who you are, where you are, what you want"* — and you'll get a clean response.
+
 #### State: `GROUND_CONTACT`
 
 After initial contact with Ground.
@@ -324,11 +326,23 @@ Cleared to land — waiting for touchdown and runway exit.
 | Pilot Intent | Example Pilot Call | ATC Response |
 |---|---|---|
 | `RUNWAY_VACATED` | *"N123AB, clear of runway 26."* | *"N123AB, contact ground on 121.9, good day."* |
+| `REQUEST_TAXI_PARKING` | *"Ground, N123AB, request taxi to parking."* | *"N123AB, Ground, taxi to general aviation parking via Alpha."* |
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
+
+**Note — `REQUEST_TAXI_PARKING` is only valid after landing** (flight phases `TAXI` or `LANDING_ROLL`). Trying to request taxi to parking while still at the parking position (flight phase `GROUND_READY`) is rejected — you can't taxi somewhere you already are.
 
 #### State: `EN_ROUTE`
 
 Cross-country cruise — no ATC contact. The state automatically resets to `IDLE` when the nearest airport changes.
+
+### 4.3 Radio Discipline
+
+ATC monitors the frequency for inappropriate language. Real-world controllers react to unprofessional R/T, and so does the virtual one:
+
+1. **First offense** — a polite reminder about radio discipline; the pilot's actual request is still processed as normal
+2. **Repeated offense** — a firm *"last warning"* from the controller; further transmissions on the frequency remain possible but the controller's patience is clearly running out
+
+The feature is intended to encourage realistic, professional radio communication — not to punish slips of the tongue. Stay calm on the radio, and the controller stays calm too.
 
 ---
 
