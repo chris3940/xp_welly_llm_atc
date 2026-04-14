@@ -318,6 +318,54 @@ struct IntentRule {
   bool (*match)(const std::string &text);
 };
 
+static bool match_inappropriate_language(const std::string &t) {
+  // English profanity
+  if (contains(t, "fuck") || contains(t, "shit") || contains(t, "bullshit") ||
+      contains(t, "asshole") || contains(t, "bitch") || contains(t, "bastard") ||
+      contains(t, "damn it") || contains(t, "dammit") ||
+      contains(t, "piss off") || contains(t, "piss on") ||
+      contains(t, "dick head") || contains(t, "dickhead") ||
+      contains(t, "mother") || contains(t, "wanker") ||
+      contains(t, "cunt"))
+    return true;
+  // German profanity (Whisper may pass through or transliterate)
+  if (contains(t, "scheiss") || contains(t, "scheiße") ||
+      contains(t, "arschloch") || contains(t, "hurensohn") ||
+      contains(t, "wichser") || contains(t, "fick") ||
+      contains(t, "verdammte") || contains(t, "drecks") ||
+      contains(t, "vollidiot") || contains(t, "depp"))
+    return true;
+  // Insults directed at ATC
+  if ((contains(t, "idiot") || contains(t, "stupid") || contains(t, "moron") ||
+       contains(t, "incompetent") || contains(t, "useless")) &&
+      (contains(t, "you") || contains(t, "tower") || contains(t, "ground") ||
+       contains(t, "controller") || contains(t, "atc")))
+    return true;
+  return false;
+}
+
+static bool match_negative_correction(const std::string &t) {
+  // Explicit correction phrases. Intentionally narrow to avoid false positives
+  // with "negative contact", "disregard previous" mid-readback etc.
+  if (starts_with(t, "negative") || contains(t, ", negative"))
+    return true;
+  if (starts_with(t, "correction") || contains(t, ", correction"))
+    return true;
+  if (contains(t, "disregard"))
+    return true;
+  if (contains(t, "that's wrong") || contains(t, "that is wrong"))
+    return true;
+  if (contains(t, "that's incorrect") || contains(t, "that is incorrect"))
+    return true;
+  if (contains(t, "i meant") || contains(t, "i said"))
+    return true;
+  if (contains(t, "cancel that") || contains(t, "cancel my last"))
+    return true;
+  if (contains(t, "negative on") || contains(t, "negative that"))
+    return true;
+  return false;
+}
+
 static bool match_unable(const std::string &t) { return contains(t, "unable"); }
 
 static bool match_self_announce(const std::string &t) {
@@ -512,6 +560,8 @@ static bool match_readback(const std::string &t) {
 
 // Rules in priority order
 static const std::vector<IntentRule> kRules = {
+    {PilotIntent::INAPPROPRIATE_LANGUAGE, 0.99f, match_inappropriate_language},
+    {PilotIntent::NEGATIVE_CORRECTION, 0.95f, match_negative_correction},
     {PilotIntent::UNABLE, 0.95f, match_unable},
     {PilotIntent::RADIO_CHECK, 0.95f, match_radio_check},
     {PilotIntent::GO_AROUND, 0.95f, match_go_around},
@@ -592,6 +642,10 @@ const char *intent_name(PilotIntent intent) {
     return "UNABLE";
   case PilotIntent::SELF_ANNOUNCE:
     return "SELF_ANNOUNCE";
+  case PilotIntent::INAPPROPRIATE_LANGUAGE:
+    return "INAPPROPRIATE_LANGUAGE";
+  case PilotIntent::NEGATIVE_CORRECTION:
+    return "NEGATIVE_CORRECTION";
   }
   return "UNKNOWN";
 }
@@ -633,6 +687,8 @@ PilotIntent intent_from_key(const std::string &key) {
       {"LEAVING_FREQUENCY", PilotIntent::LEAVING_FREQUENCY},
       {"UNABLE", PilotIntent::UNABLE},
       {"SELF_ANNOUNCE", PilotIntent::SELF_ANNOUNCE},
+      {"INAPPROPRIATE_LANGUAGE", PilotIntent::INAPPROPRIATE_LANGUAGE},
+      {"NEGATIVE_CORRECTION", PilotIntent::NEGATIVE_CORRECTION},
   };
   auto it = kMap.find(key);
   return it != kMap.end() ? it->second : PilotIntent::UNKNOWN;

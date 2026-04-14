@@ -29,8 +29,13 @@
       },
       "REQUEST_TAXI_PARKING": {
         "response": "{callsign}, {airport} Ground, taxi to general aviation parking via Alpha.",
-        "next_state": "TAXI_CLEARED",
+        "next_state": "IDLE",
         "requires_readback": true
+      },
+      "READBACK": {
+        "response": "",
+        "next_state": "IDLE",
+        "requires_readback": false
       },
       "READY_FOR_DEPARTURE": {
         "response": "{callsign}, {airport} Tower, runway {runway}, cleared for takeoff, wind {wind}, report {pattern_direction} downwind.",
@@ -44,6 +49,11 @@
       },
       "RADIO_CHECK": {
         "response": "{callsign}, {airport} Tower, reading you five by five.",
+        "next_state": "IDLE",
+        "requires_readback": false
+      },
+      "RUNWAY_VACATED": {
+        "response": "{callsign}, roger, contact ground on {ground_frequency}, good day.",
         "next_state": "IDLE",
         "requires_readback": false
       },

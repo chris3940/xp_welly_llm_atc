@@ -50,6 +50,8 @@ enum class PilotIntent {
   LEAVING_FREQUENCY,
   UNABLE,
   SELF_ANNOUNCE,
+  INAPPROPRIATE_LANGUAGE,
+  NEGATIVE_CORRECTION,
 };
 
 struct PilotMessage {

@@ -54,6 +54,9 @@ static constexpr float kMinRecordingDuration = 0.5f;
 static bool pending_inject_ = false;
 static intent_parser::PilotIntent pending_intent_ = intent_parser::PilotIntent::UNKNOWN;
 
+// Radio discipline escalation counter
+static int profanity_warnings_ = 0;
+
 // ATIS playback state
 static bool atis_playing_ = false;
 static float atis_cooldown_ = 0.0f;
@@ -106,6 +109,7 @@ void init() {
   last_pilot_message_ = {};
   total_transcriptions_ = 0;
   total_api_calls_ = 0;
+  profanity_warnings_ = 0;
   atis_playing_ = false;
   atis_cooldown_ = 0.0f;
   atis_tuned_timer_ = 0.0f;
@@ -267,6 +271,47 @@ void on_ptt_released() {
           XPLMDebugString(log);
         }
 
+        // Inappropriate language — intercept before state machine.
+        // Does NOT change ATC state, pilot can continue normally after.
+        if (last_pilot_message_.intent ==
+            intent_parser::PilotIntent::INAPPROPRIATE_LANGUAGE) {
+          ++profanity_warnings_;
+          std::string cs = last_pilot_message_.callsign.empty()
+                               ? settings::pilot_callsign()
+                               : last_pilot_message_.callsign;
+          std::string response;
+          if (profanity_warnings_ == 1) {
+            response = cs +
+                       ", maintain proper radio discipline. Use standard "
+                       "phraseology on this frequency.";
+          } else if (profanity_warnings_ == 2) {
+            response = cs +
+                       ", this is your final warning. Continued "
+                       "inappropriate language on this frequency will be "
+                       "reported to the civil aviation authority. Use "
+                       "standard phraseology.";
+          } else {
+            response = cs +
+                       ", your conduct has been noted and will be reported "
+                       "to the aviation authority. Maintain radio "
+                       "discipline immediately.";
+          }
+          char wlog[128];
+          std::snprintf(wlog, sizeof(wlog),
+                        "[xp_wellys_atc] Radio discipline warning #%d\n",
+                        profanity_warnings_);
+          XPLMDebugString(wlog);
+          transcript_.push_back(TranscriptEntry{
+              static_cast<double>(XPLMGetElapsedTime()),
+              false,
+              response,
+              freq_str,
+          });
+          speak_response(response, 1.0f,
+                         voice_for_freq(ctx.frequency_type));
+          return;
+        }
+
         // Helper: process a finalized PilotMessage through the state machine
         // and speak the response. Used both on the sync path and from the
         // disambiguation callback.
@@ -311,11 +356,19 @@ void on_ptt_released() {
               "You are an ATC intent classifier. A VFR pilot at a towered "
               "airport just said they are ready for departure. Classify "
               "the pilot's intent as EXACTLY ONE of:\n"
-              "- READY_FOR_DEPARTURE: pattern flight (local, staying in "
-              "the traffic pattern, touch and go, flight training)\n"
-              "- READY_FOR_DEPARTURE_VFR: cross-country departure "
-              "(leaving the airport area to another destination, on "
-              "course, en route, directional departure like northbound)\n"
+              "- READY_FOR_DEPARTURE: pattern/local flight. Pilot stays "
+              "in the traffic pattern, does touch-and-go, or will come "
+              "BACK INBOUND for landing. Keywords: \"inbound\", "
+              "\"pattern\", \"local\", \"touch and go\", \"training\", "
+              "\"closed traffic\", \"remain in the pattern\".\n"
+              "- READY_FOR_DEPARTURE_VFR: cross-country departure. Pilot "
+              "leaves the airport area to another destination and will "
+              "NOT come back. Keywords: \"on course\", \"en route\", "
+              "\"northbound\", \"southbound\", \"eastbound\", "
+              "\"westbound\", \"VFR to <destination>\", "
+              "\"cross-country\", \"departure to <place>\".\n"
+              "IMPORTANT: \"inbound\" always means PATTERN (pilot will "
+              "return to land), never cross-country.\n"
               "Respond with ONLY the intent name. Nothing else.";
           auto msg_copy = last_pilot_message_;
           gpt_client::classify_intent_async(

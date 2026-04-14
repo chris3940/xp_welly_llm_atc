@@ -294,11 +294,76 @@ build_vars(const intent_parser::PilotMessage &msg,
   };
 }
 
+// Map cleared/active state back to the state where the pilot can re-issue
+// the corresponding request. Used for NEGATIVE_CORRECTION.
+static ATCState revert_target(ATCState s) {
+  switch (s) {
+  case ATCState::DEPARTURE_CLEARED:
+    return ATCState::TOWER_CONTACT;
+  case ATCState::TAXI_CLEARED:
+    return ATCState::GROUND_CONTACT;
+  case ATCState::LANDING_CLEARED:
+  case ATCState::TOUCH_AND_GO_CLEARED:
+    return ATCState::PATTERN_ENTRY;
+  case ATCState::PATTERN_ENTRY:
+    return ATCState::TOWER_CONTACT;
+  case ATCState::GROUND_CONTACT:
+  case ATCState::TOWER_CONTACT:
+    return ATCState::IDLE;
+  default:
+    return s;
+  }
+}
+
 ATCResponse process(const intent_parser::PilotMessage &msg,
                     const xplane_context::XPlaneContext &ctx) {
   ATCResponse resp;
 
   using FT = xplane_context::FrequencyType;
+
+  // Pilot correction — revert state one step back so the pilot can
+  // re-issue the request. Does not require frequency validation.
+  if (msg.intent == intent_parser::PilotIntent::NEGATIVE_CORRECTION) {
+    auto vars = build_vars(msg, ctx);
+    ATCState prev = state_;
+    ATCState target = revert_target(state_);
+    if (target != state_) {
+      state_ = target;
+      // Reset departure type when reverting from DEPARTURE_CLEARED so the
+      // pilot can re-classify as pattern vs cross-country.
+      if (prev == ATCState::DEPARTURE_CLEARED)
+        departure_type_ = DepartureType::PATTERN;
+      char log[256];
+      std::snprintf(log, sizeof(log),
+                    "[xp_wellys_atc] Correction: state %s -> %s\n",
+                    state_name(prev), state_name(state_));
+      XPLMDebugString(log);
+      resp.text = atc_templates::fill(
+          "{callsign}, roger, correction noted, say intentions.", vars);
+    } else {
+      // Already in a "neutral" state — just acknowledge
+      resp.text = atc_templates::fill(
+          "{callsign}, roger, say intentions.", vars);
+      XPLMDebugString(
+          "[xp_wellys_atc] Correction in neutral state, ack only\n");
+    }
+    resp.next_state = state_;
+    return resp;
+  }
+
+  // Re-clearance: pilot repeats READY_FOR_DEPARTURE while already cleared.
+  // Treat as an attempt to correct the departure type — auto-revert and
+  // let the state machine re-process the request normally.
+  using PI2 = intent_parser::PilotIntent;
+  if (state_ == ATCState::DEPARTURE_CLEARED &&
+      (msg.intent == PI2::READY_FOR_DEPARTURE ||
+       msg.intent == PI2::READY_FOR_DEPARTURE_VFR)) {
+    XPLMDebugString(
+        "[xp_wellys_atc] Re-clearance: reverting DEPARTURE_CLEARED -> "
+        "TOWER_CONTACT for re-evaluation\n");
+    state_ = ATCState::TOWER_CONTACT;
+    departure_type_ = DepartureType::PATTERN;
+  }
 
   // Non-towered airport OR Unicom/CTAF frequency: force UNICOM flow
   bool unicom_flow = !ctx.is_towered_airport ||
