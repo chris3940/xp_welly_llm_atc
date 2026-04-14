@@ -140,7 +140,7 @@ static void draw_nearby_airports() {
     char label[256];
     std::snprintf(label, sizeof(label),
                   "%s %-4s  %-24s  %5.1f NM  %s %s##nb_%s",
-                  is_locked ? "\xe2\x96\xb6" : " ", // ▶ marker
+                  is_locked ? ">" : " ", // lock marker
                   icao.c_str(),
                   name.empty() ? "" : name.substr(0, 24).c_str(), dist_nm,
                   has_tower ? "T" : "-", has_atis ? "A" : "-", icao.c_str());
@@ -312,8 +312,8 @@ static void draw_status_tab() {
   if (ctx.wind_speed_kt < 3.0f) {
     ImGui::Text("Wind: Calm");
   } else {
-    ImGui::Text("Wind: %03.0f%s @ %.0f kt", ctx.wind_direction_deg,
-                "\xC2\xB0", ctx.wind_speed_kt);
+    ImGui::Text("Wind: %03.0f deg @ %.0f kt", ctx.wind_direction_deg,
+                ctx.wind_speed_kt);
   }
 
   // ATIS info
@@ -386,7 +386,7 @@ static void draw_status_tab() {
   // Warning indicators
   if (!settings::api_key_saved()) {
     ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.0f, 1.0f),
-                       "\xe2\x9a\xa0 API key not set");
+                       "[!] API key not set");
   }
 }
 
@@ -601,7 +601,7 @@ static void draw_settings_tab() {
   }
   if (key_just_saved && save_feedback_timer > 0.0f) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0, 1, 0, 1), "Saved \xe2\x9c\x93");
+    ImGui::TextColored(ImVec4(0, 1, 0, 1), "Saved (OK)");
     save_feedback_timer -= ImGui::GetIO().DeltaTime;
     if (save_feedback_timer <= 0.0f)
       key_just_saved = false;
@@ -773,8 +773,8 @@ static void draw_atc_panel() {
       if (ctx.wind_speed_kt < 3.0f) {
         ImGui::Text("Wind: calm");
       } else {
-        ImGui::Text("Wind: %03.0f%s / %.0f kt", ctx.wind_direction_deg,
-                    "\xC2\xB0", ctx.wind_speed_kt);
+        ImGui::Text("Wind: %03.0f deg / %.0f kt", ctx.wind_direction_deg,
+                    ctx.wind_speed_kt);
       }
     }
 
