@@ -190,6 +190,13 @@ make clean      # Remove build artifacts
 | **No traffic** — always "number one", no sequencing | Unrealistic at busy airports | Very high — would require traffic awareness |
 | **No callsign validation** — ATC accepts any callsign without checking against configured one | In real ATC, unknown callsigns get "station calling, say again" | Low — but low priority for single-player |
 
+## Roadmap
+
+- Multi-leg cross-country flights with handoffs between ATC facilities
+- Improved ATIS with real-world NOTAMs and airport-specific information
+- Additional airports with VRPs and pattern directions
+- **IFR Support** — IFR introduces significantly more complexity (clearances, holds, approach procedures, etc.) and will be tackled in a later phase. Stay tuned!
+
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.html).
