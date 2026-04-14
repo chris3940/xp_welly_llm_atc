@@ -52,6 +52,11 @@
         "next_state": "IDLE",
         "requires_readback": false
       },
+      "INITIAL_CALL_APPROACH": {
+        "response": "{callsign}, {airport} Approach, pass your message.",
+        "next_state": "APPROACH_CONTACT",
+        "requires_readback": false
+      },
       "RUNWAY_VACATED": {
         "response": "{callsign}, roger, contact ground on {ground_frequency}, good day.",
         "next_state": "IDLE",
@@ -313,9 +318,76 @@
       }
     },
     "EN_ROUTE": {
+      "INITIAL_CALL_APPROACH": {
+        "response": "{callsign}, {airport} Approach, pass your message.",
+        "next_state": "APPROACH_CONTACT",
+        "requires_readback": false
+      },
       "_INVALID": {
         "response": "",
         "next_state": "EN_ROUTE",
+        "requires_readback": false
+      }
+    },
+    "APPROACH_CONTACT": {
+      "INITIAL_CALL_APPROACH": {
+        "response": "{callsign}, {airport} Approach, radar contact, report field in sight.",
+        "next_state": "APPROACH_CONTACT",
+        "requires_readback": false
+      },
+      "INITIAL_CALL_INBOUND": {
+        "response": "{callsign}, cleared into {airport} control zone, runway {runway}, QNH {qnh}, contact Tower on {tower_frequency}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
+      },
+      "INITIAL_CALL_INBOUND_VRP": {
+        "response": "{callsign}, cleared to enter control zone via {entry_vrp}, runway {runway}, QNH {qnh}, contact Tower on {tower_frequency}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
+      },
+      "INITIAL_CALL_TOWER": {
+        "response": "{callsign}, cleared into {airport} control zone, runway {runway}, QNH {qnh}, contact Tower on {tower_frequency}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
+      },
+      "REQUEST_LANDING": {
+        "response": "{callsign}, cleared into {airport} control zone, runway {runway}, QNH {qnh}, contact Tower on {tower_frequency}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
+      },
+      "REPORT_POSITION": {
+        "response": "{callsign}, roger, expect pattern entry runway {runway}, contact Tower on {tower_frequency}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
+      },
+      "REPORT_POSITION_DOWNWIND": {
+        "response": "{callsign}, roger, contact Tower on {tower_frequency}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
+      },
+      "REPORT_POSITION_BASE": {
+        "response": "{callsign}, roger, contact Tower on {tower_frequency}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
+      },
+      "REPORT_POSITION_FINAL": {
+        "response": "{callsign}, contact Tower on {tower_frequency}.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": true
+      },
+      "READBACK": {
+        "response": "",
+        "next_state": "APPROACH_CONTACT",
+        "requires_readback": false
+      },
+      "LEAVING_FREQUENCY": {
+        "response": "{callsign}, good day.",
+        "next_state": "PATTERN_ENTRY",
+        "requires_readback": false
+      },
+      "_INVALID": {
+        "response": "{callsign}, say intentions.",
+        "next_state": "APPROACH_CONTACT",
         "requires_readback": false
       }
     }

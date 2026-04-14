@@ -17,6 +17,7 @@
  */
 
 #include "xplane_context.hpp"
+#include "airspace_db.hpp"
 #include "settings.hpp"
 
 #include <XPLMDataAccess.h>
@@ -691,17 +692,36 @@ void update() {
     ctx.dewpoint_c = dp[0];
   }
 
-  // Derive frequency type from active COM via airport frequency database
+  // Derive frequency type from active COM via airport frequency database.
+  // Fallback to airspace_db (atc.dat) TRACON lookup for Approach freqs that
+  // aren't listed in the nearest airport's apt.dat entry (common on the way
+  // into a TMA from a neighbouring field).
   {
     float active_freq =
         (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
     ctx.frequency_type = towered_cache_ready_
                              ? ctx.airport_freqs.lookup(active_freq)
                              : FrequencyType::UNKNOWN;
+    if (ctx.frequency_type == FrequencyType::UNKNOWN && active_freq > 1.0f &&
+        airspace_db::enabled()) {
+      auto khz = static_cast<std::uint32_t>(std::round(active_freq * 1000.0f));
+      const auto *ctrl = airspace_db::lookup_by_freq(
+          khz, ctx.latitude, ctx.longitude, ctx.altitude_ft_msl);
+      if (ctrl && ctrl->role == airspace_db::ControllerRole::TRACON)
+        ctx.frequency_type = FrequencyType::APPROACH;
+    }
   }
 
   // Nearest airport lookup — throttled to every 60 frames (~1s)
   if (++frame_counter % 60 == 0) {
+    // Refresh enclosing airspaces (atc.dat-based) — cheap when disabled.
+    if (airspace_db::enabled()) {
+      ctx.enclosing_airspaces = airspace_db::find_enclosing(
+          ctx.latitude, ctx.longitude, ctx.altitude_ft_msl);
+    } else {
+      ctx.enclosing_airspaces.clear();
+    }
+
     // Airport lock: overrides both geometric and freq-match selection.
     if (!locked_airport_id_.empty() && towered_cache_ready_ &&
         pos_cache_.find(locked_airport_id_) != pos_cache_.end()) {

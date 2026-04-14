@@ -21,6 +21,7 @@
 #include "atc_session.hpp"
 #include "atc_state_machine.hpp"
 #include "airport_vrps.hpp"
+#include "airspace_db.hpp"
 #include "atc_templates.hpp"
 #include "flight_phase.hpp"
 #include "audio_player.hpp"
@@ -797,6 +798,38 @@ static void draw_atc_panel() {
         }
         ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "%s",
                            vrp_line.c_str());
+      }
+    }
+
+    // Enclosing airspaces (atc.dat — M2.1 diagnostic)
+    if (ImGui::CollapsingHeader("Enclosing Airspaces (atc.dat)")) {
+      if (!airspace_db::ready()) {
+        ImGui::TextDisabled("atc.dat index still loading...");
+      } else if (!airspace_db::enabled()) {
+        ImGui::TextDisabled(
+            "atc.dat missing — check XP12 Custom Data install");
+      } else if (ctx.enclosing_airspaces.empty()) {
+        ImGui::TextDisabled("(outside any controlled airspace — %zu "
+                            "controllers indexed)",
+                            airspace_db::controller_count());
+      } else {
+        for (const auto *c : ctx.enclosing_airspaces) {
+          std::string freq_str;
+          for (size_t i = 0; i < c->freqs_khz.size() && i < 4; ++i) {
+            if (!freq_str.empty())
+              freq_str += " ";
+            char fb[16];
+            std::snprintf(fb, sizeof(fb), "%.3f",
+                          static_cast<float>(c->freqs_khz[i]) / 1000.0f);
+            freq_str += fb;
+          }
+          if (c->freqs_khz.size() > 4)
+            freq_str += " ...";
+          ImGui::Text("%s %s [%s] %d–%d ft  %s",
+                      airspace_db::role_name(c->role), c->name.c_str(),
+                      c->facility_id.c_str(), c->floor_ft, c->ceiling_ft,
+                      freq_str.c_str());
+        }
       }
     }
 

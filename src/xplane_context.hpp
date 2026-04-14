@@ -23,6 +23,10 @@
 #include <string>
 #include <vector>
 
+namespace airspace_db {
+struct Controller;
+}
+
 namespace xplane_context {
 
 struct RunwayEnd {
@@ -107,6 +111,10 @@ struct XPlaneContext {
   double airport_lon = 0.0;
   std::vector<RunwayInfo> runways;
   std::string active_runway; // wind-determined, e.g. "28", "09L"
+  // Controllers (TWR/TRACON/CTR from atc.dat) whose polygon + altitude band
+  // enclose the current aircraft position. Refreshed once per second.
+  // Empty if airspace_db is disabled (atc.dat missing).
+  std::vector<const airspace_db::Controller *> enclosing_airspaces;
 };
 
 void init();
