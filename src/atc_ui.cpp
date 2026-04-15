@@ -651,9 +651,32 @@ static void draw_settings_tab() {
     settings::set_debug_logging(debug);
   }
 
+  // Disable Default X-Plane ATC
+  bool disable_xp_atc = settings::disable_default_atc();
+  if (ImGui::Checkbox("Disable Default X-Plane ATC", &disable_xp_atc)) {
+    settings::set_disable_default_atc(disable_xp_atc);
+  }
+
   ImGui::Separator();
   if (ImGui::Button("Save Settings")) {
     settings::save();
+  }
+
+  if (settings::disable_default_atc()) {
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                       "Known conflicts with Default ATC");
+    ImGui::TextWrapped(
+        "Verbal ATC messages and ATC history popup are suppressed. The "
+        "following X-Plane commands may still trigger default ATC behavior "
+        "if bound to a key or joystick button. Unbind them in X-Plane's "
+        "keyboard settings to avoid conflicts:");
+    ImGui::BulletText("sim/operation/contact_atc_ptt");
+    ImGui::BulletText("sim/operation/contact_atc");
+    ImGui::BulletText("sim/operation/atc_readback");
+    ImGui::BulletText("sim/operation/toggle_auto_checkin");
+    ImGui::BulletText("sim/operation/toggle_auto_readback");
+    ImGui::BulletText("sim/operation/toggle_taxi_arrows");
   }
 
   // About section

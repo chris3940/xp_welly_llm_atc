@@ -875,20 +875,34 @@ void update() {
       ctx.active_runway.clear();
     }
 
-    // Debug: log frequency status every ~5s
-    if (settings::debug_logging() && frame_counter % 300 == 0) {
+    // Debug: log frequency status only on change
+    if (settings::debug_logging()) {
+      static int last_com = -1;
+      static float last_freq_mhz = -1.0f;
+      static FrequencyType last_type = FrequencyType::UNKNOWN;
+      static std::string last_airport;
       float active_freq =
           (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
-      char dbg[256];
-      std::snprintf(
-          dbg, sizeof(dbg),
-          "[xp_wellys_atc][DEBUG] COM%d: %.3f MHz -> %s | Airport: %s "
-          "(%zu freqs, ATIS=%.3f, tower_only=%d)\n",
-          ctx.active_com, active_freq,
-          frequency_type_name(ctx.frequency_type),
-          ctx.nearest_airport_id.c_str(), ctx.airport_freqs.all.size(),
-          ctx.atis_freq_mhz, ctx.tower_only ? 1 : 0);
-      XPLMDebugString(dbg);
+      bool changed = (ctx.active_com != last_com) ||
+                     (std::fabs(active_freq - last_freq_mhz) > 0.0005f) ||
+                     (ctx.frequency_type != last_type) ||
+                     (ctx.nearest_airport_id != last_airport);
+      if (changed) {
+        last_com = ctx.active_com;
+        last_freq_mhz = active_freq;
+        last_type = ctx.frequency_type;
+        last_airport = ctx.nearest_airport_id;
+        char dbg[256];
+        std::snprintf(
+            dbg, sizeof(dbg),
+            "[xp_wellys_atc][DEBUG] COM%d: %.3f MHz -> %s | Airport: %s "
+            "(%zu freqs, ATIS=%.3f, tower_only=%d)\n",
+            ctx.active_com, active_freq,
+            frequency_type_name(ctx.frequency_type),
+            ctx.nearest_airport_id.c_str(), ctx.airport_freqs.all.size(),
+            ctx.atis_freq_mhz, ctx.tower_only ? 1 : 0);
+        XPLMDebugString(dbg);
+      }
     }
   }
 }
