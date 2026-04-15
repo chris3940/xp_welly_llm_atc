@@ -29,8 +29,8 @@ const char *role_name(ControllerRole r);
 // One controller record. Polygon points are lazily loaded on first
 // geometric query that needs them (see find_enclosing/lookup_by_freq).
 struct Controller {
-  std::string name;         // e.g. "ZURICH", "SWITZERLAND"
-  std::string facility_id;  // e.g. "LSZH", "LSAS" (may be empty)
+  std::string name;        // e.g. "ZURICH", "SWITZERLAND"
+  std::string facility_id; // e.g. "LSZH", "LSAS" (may be empty)
   ControllerRole role = ControllerRole::UNKNOWN;
   std::vector<uint32_t> freqs_khz;
   std::string airspace_class; // "A".."G" or empty
@@ -45,7 +45,8 @@ struct Controller {
   // Each inner vector is one ring of (lat, lon) pairs.
   mutable std::vector<std::vector<std::pair<double, double>>> polygons;
   mutable bool polygons_loaded = false;
-  // File offset (bytes) to the first AIRSPACE_POLYGON_BEGIN line, for lazy load.
+  // File offset (bytes) to the first AIRSPACE_POLYGON_BEGIN line, for lazy
+  // load.
   std::uint64_t file_offset = 0;
 };
 
@@ -74,13 +75,13 @@ std::vector<const Controller *> find_enclosing(double lat, double lon,
 // Controller with matching frequency whose polygon contains (lat, lon).
 // Falls back to role-based nearest-by-bbox if no geometric hit but a
 // frequency match exists within ~100 NM. Returns nullptr if nothing matches.
-const Controller *lookup_by_freq(std::uint32_t freq_khz, double lat,
-                                 double lon, float alt_ft);
+const Controller *lookup_by_freq(std::uint32_t freq_khz, double lat, double lon,
+                                 float alt_ft);
 
 // Nearest controller of given role whose bbox+altitude covers (lat,lon,alt).
 // Useful for "who will Tower hand me off to on departure?" queries.
-const Controller *find_by_role_near(ControllerRole role, double lat,
-                                    double lon, float alt_ft);
+const Controller *find_by_role_near(ControllerRole role, double lat, double lon,
+                                    float alt_ft);
 
 } // namespace airspace_db
 

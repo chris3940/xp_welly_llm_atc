@@ -76,13 +76,11 @@ static double haversine_distance_nm(double lat1, double lon1, double lat2,
   double a = std::sin(dlat / 2) * std::sin(dlat / 2) +
              std::cos(lat1 * kDeg2Rad) * std::cos(lat2 * kDeg2Rad) *
                  std::sin(dlon / 2) * std::sin(dlon / 2);
-  double m =
-      kEarthRadiusM * 2.0 * std::atan2(std::sqrt(a), std::sqrt(1.0 - a));
+  double m = kEarthRadiusM * 2.0 * std::atan2(std::sqrt(a), std::sqrt(1.0 - a));
   return m / kMetersPerNm;
 }
 
-static float active_runway_heading(
-    const xplane_context::XPlaneContext &ctx) {
+static float active_runway_heading(const xplane_context::XPlaneContext &ctx) {
   for (const auto &rwy : ctx.runways) {
     if (rwy.end1.number == ctx.active_runway)
       return rwy.end1.heading_deg;
@@ -100,8 +98,8 @@ static float angle_diff(float a, float b) {
 // ── Phase name mapping ───────────────────────────────────────────
 
 static const char *kPhaseNames[] = {
-    "PARKED",     "GROUND_READY",  "TAXI",       "TAKEOFF_ROLL", "CLIMB",
-    "PATTERN",    "FINAL_APPROACH", "LANDING_ROLL", "CRUISE",
+    "PARKED",  "GROUND_READY",   "TAXI",         "TAKEOFF_ROLL", "CLIMB",
+    "PATTERN", "FINAL_APPROACH", "LANDING_ROLL", "CRUISE",
 };
 
 const char *phase_name(FlightPhase phase) {
@@ -133,8 +131,7 @@ static void load_from_file() {
   std::string path = settings::get_data_dir() + "/flight_rules.json";
   std::ifstream in(path);
   if (!in.good()) {
-    XPLMDebugString(
-        "[xp_wellys_atc] Warning: flight_rules.json not found\n");
+    XPLMDebugString("[xp_wellys_atc] Warning: flight_rules.json not found\n");
     loaded_ = false;
     return;
   }

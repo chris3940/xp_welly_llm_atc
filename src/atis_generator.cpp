@@ -33,16 +33,15 @@ static char letter_ = 'A';
 static std::string last_runway_;
 static float last_wind_dir_ = 0.0f;
 static float last_qnh_inhg_ = 29.92f;
-static int last_vis_category_ = 0; // 0= >10km, 1= 5-10km, 2= <5km
+static int last_vis_category_ = 0;        // 0= >10km, 1= 5-10km, 2= <5km
 static float last_increment_time_ = 0.0f; // cooldown for letter changes
 static bool baseline_initialized_ = false;
 
 static const char *kLetterNames[] = {
-    "Alpha",   "Bravo",   "Charlie", "Delta",   "Echo",    "Foxtrot",
-    "Golf",    "Hotel",   "India",   "Juliet",  "Kilo",    "Lima",
-    "Mike",    "November","Oscar",   "Papa",    "Quebec",  "Romeo",
-    "Sierra",  "Tango",   "Uniform", "Victor",  "Whiskey", "X-ray",
-    "Yankee",  "Zulu"};
+    "Alpha",  "Bravo",   "Charlie", "Delta",  "Echo",   "Foxtrot", "Golf",
+    "Hotel",  "India",   "Juliet",  "Kilo",   "Lima",   "Mike",    "November",
+    "Oscar",  "Papa",    "Quebec",  "Romeo",  "Sierra", "Tango",   "Uniform",
+    "Victor", "Whiskey", "X-ray",   "Yankee", "Zulu"};
 
 static int visibility_category(float vis_m) {
   if (vis_m >= 10000.0f)
@@ -142,10 +141,9 @@ void check_for_update(const xplane_context::XPlaneContext &ctx) {
   // Wind direction changed > 30 degrees (only meaningful if wind is not calm).
   // Matches runway-selection calm threshold (3 kt).
   if (ctx.wind_speed_kt >= 3.0f) {
-    float wind_diff =
-        std::fabs(std::fmod(ctx.wind_direction_deg - last_wind_dir_ + 540.0f,
-                            360.0f) -
-                  180.0f);
+    float wind_diff = std::fabs(
+        std::fmod(ctx.wind_direction_deg - last_wind_dir_ + 540.0f, 360.0f) -
+        180.0f);
     if (wind_diff > 30.0f)
       changed = true;
   }
@@ -174,17 +172,17 @@ void check_for_update(const xplane_context::XPlaneContext &ctx) {
   letter_ = static_cast<char>('A' + (letter_ - 'A' + 1) % 26);
   char log[128];
   std::snprintf(log, sizeof(log),
-                "[xp_wellys_atc] ATIS letter incremented to %c (%s)\n",
-                letter_, kLetterNames[letter_ - 'A']);
+                "[xp_wellys_atc] ATIS letter incremented to %c (%s)\n", letter_,
+                kLetterNames[letter_ - 'A']);
   XPLMDebugString(log);
 }
 
 std::string generate_atis_text(const xplane_context::XPlaneContext &ctx) {
-  std::string airport = !ctx.nearest_airport_name.empty()
-                            ? ctx.nearest_airport_name
-                            : (!ctx.nearest_airport_id.empty()
-                                   ? ctx.nearest_airport_id
-                                   : "Airport");
+  std::string airport =
+      !ctx.nearest_airport_name.empty()
+          ? ctx.nearest_airport_name
+          : (!ctx.nearest_airport_id.empty() ? ctx.nearest_airport_id
+                                             : "Airport");
   const char *letter_name = kLetterNames[letter_ - 'A'];
   std::string runway =
       ctx.active_runway.empty() ? "unknown" : ctx.active_runway;
@@ -192,8 +190,8 @@ std::string generate_atis_text(const xplane_context::XPlaneContext &ctx) {
   std::string text;
   text += airport + " Information " + letter_name + ". ";
   text += "Runway in use " + runway + ". ";
-  text += "Wind " + format_wind(ctx.wind_direction_deg, ctx.wind_speed_kt) +
-          ". ";
+  text +=
+      "Wind " + format_wind(ctx.wind_direction_deg, ctx.wind_speed_kt) + ". ";
   text += "Visibility " + format_visibility(ctx.visibility_m) + ". ";
   text += format_clouds(ctx.cloud_type, ctx.cloud_base_ft_msl) + " ";
   text += "Temperature " + std::to_string(static_cast<int>(ctx.temperature_c)) +

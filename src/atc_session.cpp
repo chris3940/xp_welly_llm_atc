@@ -17,12 +17,12 @@
  */
 
 #include "atc_session.hpp"
-#include "atis_generator.hpp"
 #include "atc_state_machine.hpp"
-#include "flight_phase.hpp"
 #include "atc_templates.hpp"
+#include "atis_generator.hpp"
 #include "audio_player.hpp"
 #include "audio_recorder.hpp"
+#include "flight_phase.hpp"
 #include "gpt_client.hpp"
 #include "intent_parser.hpp"
 #include "settings.hpp"
@@ -52,7 +52,8 @@ static constexpr float kMinRecordingDuration = 0.5f;
 
 // Queued intent (e.g. readback button pressed during playback)
 static bool pending_inject_ = false;
-static intent_parser::PilotIntent pending_intent_ = intent_parser::PilotIntent::UNKNOWN;
+static intent_parser::PilotIntent pending_intent_ =
+    intent_parser::PilotIntent::UNKNOWN;
 
 // Radio discipline escalation counter
 static int profanity_warnings_ = 0;
@@ -61,7 +62,7 @@ static int profanity_warnings_ = 0;
 static bool atis_playing_ = false;
 static float atis_cooldown_ = 0.0f;
 static constexpr float kAtisCooldownSec = 30.0f;
-static float atis_tuned_timer_ = 0.0f;        // how long tuned to ATIS freq
+static float atis_tuned_timer_ = 0.0f;           // how long tuned to ATIS freq
 static constexpr float kAtisTuneDelaySec = 2.0f; // wait before playing
 
 // Determine TTS voice based on frequency type
@@ -84,9 +85,10 @@ static void speak_response(const std::string &text, float speed = 1.0f,
         if (success && !mp3_data.empty()) {
           if (settings::debug_logging()) {
             char dbg[128];
-            std::snprintf(dbg, sizeof(dbg),
-                          "[xp_wellys_atc][DEBUG] TTS response: %zu bytes MP3\n",
-                          mp3_data.size());
+            std::snprintf(
+                dbg, sizeof(dbg),
+                "[xp_wellys_atc][DEBUG] TTS response: %zu bytes MP3\n",
+                mp3_data.size());
             XPLMDebugString(dbg);
             XPLMDebugString("[xp_wellys_atc][DEBUG] Playback started\n");
           }
@@ -193,7 +195,8 @@ void on_ptt_released() {
     airport_ctx += " " + ctx_for_whisper.nearest_airport_name;
 
   whisper_client::transcribe_async(
-      std::move(wav), [](const whisper_client::TranscriptResult &wr) {
+      std::move(wav),
+      [](const whisper_client::TranscriptResult &wr) {
         if (!wr.success) {
           XPLMDebugString(
               ("[xp_wellys_atc][ERROR] Whisper error: " + wr.text + "\n")
@@ -216,10 +219,10 @@ void on_ptt_released() {
 
         if (settings::debug_logging()) {
           char qlog[256];
-          std::snprintf(
-              qlog, sizeof(qlog),
-              "[xp_wellys_atc][DEBUG] Whisper response (quality=%.2f): \"%s\"\n",
-              wr.quality, transcript.c_str());
+          std::snprintf(qlog, sizeof(qlog),
+                        "[xp_wellys_atc][DEBUG] Whisper response "
+                        "(quality=%.2f): \"%s\"\n",
+                        wr.quality, transcript.c_str());
           XPLMDebugString(qlog);
         }
 
@@ -281,15 +284,13 @@ void on_ptt_released() {
                                : last_pilot_message_.callsign;
           std::string response;
           if (profanity_warnings_ == 1) {
-            response = cs +
-                       ", maintain proper radio discipline. Use standard "
-                       "phraseology on this frequency.";
+            response = cs + ", maintain proper radio discipline. Use standard "
+                            "phraseology on this frequency.";
           } else if (profanity_warnings_ == 2) {
-            response = cs +
-                       ", this is your final warning. Continued "
-                       "inappropriate language on this frequency will be "
-                       "reported to the civil aviation authority. Use "
-                       "standard phraseology.";
+            response = cs + ", this is your final warning. Continued "
+                            "inappropriate language on this frequency will be "
+                            "reported to the civil aviation authority. Use "
+                            "standard phraseology.";
           } else {
             response = cs +
                        ", your conduct has been noted and will be reported "
@@ -307,8 +308,7 @@ void on_ptt_released() {
               response,
               freq_str,
           });
-          speak_response(response, 1.0f,
-                         voice_for_freq(ctx.frequency_type));
+          speak_response(response, 1.0f, voice_for_freq(ctx.frequency_type));
           return;
         }
 
@@ -317,29 +317,27 @@ void on_ptt_released() {
         // disambiguation callback.
         std::string freq_str_copy = freq_str;
         std::string voice_copy = voice_for_freq(ctx.frequency_type);
-        auto run_state_machine =
-            [freq_str_copy, voice_copy](
-                const intent_parser::PilotMessage &msg) {
-              const auto &ctx_now = xplane_context::get();
-              auto atc_resp = atc_state_machine::process(msg, ctx_now);
-              if (settings::debug_logging())
-                XPLMDebugString(
-                    ("[xp_wellys_atc][DEBUG] ATC response text: " +
-                     (atc_resp.text.empty() ? "(silent)" : atc_resp.text) +
-                     "\n")
-                        .c_str());
-              if (atc_resp.text.empty()) {
-                state_ = PTTState::IDLE;
-              } else {
-                transcript_.push_back(TranscriptEntry{
-                    static_cast<double>(XPLMGetElapsedTime()),
-                    false,
-                    atc_resp.text,
-                    freq_str_copy,
-                });
-                speak_response(atc_resp.text, 1.0f, voice_copy);
-              }
-            };
+        auto run_state_machine = [freq_str_copy, voice_copy](
+                                     const intent_parser::PilotMessage &msg) {
+          const auto &ctx_now = xplane_context::get();
+          auto atc_resp = atc_state_machine::process(msg, ctx_now);
+          if (settings::debug_logging())
+            XPLMDebugString(
+                ("[xp_wellys_atc][DEBUG] ATC response text: " +
+                 (atc_resp.text.empty() ? "(silent)" : atc_resp.text) + "\n")
+                    .c_str());
+          if (atc_resp.text.empty()) {
+            state_ = PTTState::IDLE;
+          } else {
+            transcript_.push_back(TranscriptEntry{
+                static_cast<double>(XPLMGetElapsedTime()),
+                false,
+                atc_resp.text,
+                freq_str_copy,
+            });
+            speak_response(atc_resp.text, 1.0f, voice_copy);
+          }
+        };
 
         // Sub-variant disambiguation: rule-based parser matches parent
         // intents via keywords, but semantic sub-variants (pattern vs
@@ -374,14 +372,13 @@ void on_ptt_released() {
           gpt_client::classify_intent_async(
               transcript, prompt,
               // NOLINTNEXTLINE(bugprone-exception-escape)
-              [msg_copy, run_state_machine](const std::string& result,
+              [msg_copy, run_state_machine](const std::string &result,
                                             bool success) {
                 auto msg = msg_copy;
                 if (success) {
                   auto new_intent = intent_parser::intent_from_key(result);
-                  bool valid =
-                      new_intent == PI::READY_FOR_DEPARTURE ||
-                      new_intent == PI::READY_FOR_DEPARTURE_VFR;
+                  bool valid = new_intent == PI::READY_FOR_DEPARTURE ||
+                               new_intent == PI::READY_FOR_DEPARTURE_VFR;
                   if (valid && new_intent != msg.intent) {
                     XPLMDebugString(
                         ("[xp_wellys_atc] Intent disambiguation: " +
@@ -418,8 +415,7 @@ void on_ptt_released() {
           run_state_machine(last_pilot_message_);
         } else if (!settings::gpt_fallback_enabled()) {
           // GPT disabled — use state machine with _INVALID fallback
-          auto atc_resp =
-              atc_state_machine::process(last_pilot_message_, ctx);
+          auto atc_resp = atc_state_machine::process(last_pilot_message_, ctx);
           std::string response = atc_resp.text;
           if (response.empty()) {
             std::string cs = last_pilot_message_.callsign.empty()
@@ -436,22 +432,19 @@ void on_ptt_released() {
               response,
               freq_str,
           });
-          speak_response(response, 1.0f,
-                         voice_for_freq(ctx.frequency_type));
+          speak_response(response, 1.0f, voice_for_freq(ctx.frequency_type));
         } else {
           // GPT intent classification
           ++total_api_calls_;
 
           using FT = xplane_context::FrequencyType;
-          bool is_towered =
-              ctx.is_towered_airport &&
-              ctx.frequency_type != FT::UNICOM &&
-              ctx.frequency_type != FT::CTAF;
+          bool is_towered = ctx.is_towered_airport &&
+                            ctx.frequency_type != FT::UNICOM &&
+                            ctx.frequency_type != FT::CTAF;
 
-          std::string state_str = atc_state_machine::state_name(
-              atc_state_machine::get_state());
-          auto valid =
-              atc_templates::valid_intents(is_towered, state_str);
+          std::string state_str =
+              atc_state_machine::state_name(atc_state_machine::get_state());
+          auto valid = atc_templates::valid_intents(is_towered, state_str);
 
           std::string valid_list;
           for (const auto &v : valid) {
@@ -463,12 +456,11 @@ void on_ptt_released() {
           std::string sys_prompt =
               atc_templates::get_prompt("gpt_classify_prompt");
           if (sys_prompt.empty()) {
-            sys_prompt =
-                "You are an ATC intent classifier. The pilot is in "
-                "state {state}. Valid intents: {valid_intents}. The "
-                "pilot said: \"{transcript}\"\nRespond with ONLY the "
-                "intent name, nothing else. If none match, respond "
-                "with \"_INVALID\".";
+            sys_prompt = "You are an ATC intent classifier. The pilot is in "
+                         "state {state}. Valid intents: {valid_intents}. The "
+                         "pilot said: \"{transcript}\"\nRespond with ONLY the "
+                         "intent name, nothing else. If none match, respond "
+                         "with \"_INVALID\".";
           }
           sys_prompt = atc_templates::fill(
               sys_prompt,
@@ -511,18 +503,15 @@ void on_ptt_released() {
                 // route through the state machine for full frequency
                 // validation and redirect logic.
                 auto gpt_msg = msg_copy;
-                gpt_msg.intent =
-                    intent_parser::intent_from_key(intent_key);
+                gpt_msg.intent = intent_parser::intent_from_key(intent_key);
                 gpt_msg.confidence = 0.85f;
 
-                auto atc_resp =
-                    atc_state_machine::process(gpt_msg, ctx_copy);
+                auto atc_resp = atc_state_machine::process(gpt_msg, ctx_copy);
 
                 if (settings::debug_logging())
                   XPLMDebugString(
                       ("[xp_wellys_atc][DEBUG] ATC response text: " +
-                       (atc_resp.text.empty() ? "(silent)"
-                                              : atc_resp.text) +
+                       (atc_resp.text.empty() ? "(silent)" : atc_resp.text) +
                        "\n")
                           .c_str());
 
@@ -587,8 +576,7 @@ void update() {
       std::snprintf(alog, sizeof(alog),
                     "[xp_wellys_atc] Airport changed: %s -> %s, resetting "
                     "ATC state\n",
-                    last_airport_id.c_str(),
-                    actx.nearest_airport_id.c_str());
+                    last_airport_id.c_str(), actx.nearest_airport_id.c_str());
       XPLMDebugString(alog);
       atc_state_machine::reset();
     }

@@ -126,9 +126,8 @@ static void log_default_input_device() {
 
 void init() {
   if (!mic_permission::check_and_request()) {
-    XPLMDebugString(
-        "[xp_wellys_atc] Audio recorder: no microphone permission, "
-        "recording will not work\n");
+    XPLMDebugString("[xp_wellys_atc] Audio recorder: no microphone permission, "
+                    "recording will not work\n");
   }
 
   log_default_input_device();
@@ -179,10 +178,9 @@ void init() {
   AudioObjectGetPropertyData(kAudioObjectSystemObject, &default_input_prop, 0,
                              nullptr, &dev_size, &input_device);
   if (input_device != kAudioDeviceUnknown) {
-    status = AudioUnitSetProperty(audio_unit_,
-                                  kAudioOutputUnitProperty_CurrentDevice,
-                                  kAudioUnitScope_Global, 0, &input_device,
-                                  sizeof(input_device));
+    status = AudioUnitSetProperty(
+        audio_unit_, kAudioOutputUnitProperty_CurrentDevice,
+        kAudioUnitScope_Global, 0, &input_device, sizeof(input_device));
     char log[128];
     std::snprintf(log, sizeof(log),
                   "[xp_wellys_atc] Set AudioUnit input device id=%u: %s\n",
@@ -194,8 +192,9 @@ void init() {
   // Log the device's native (hardware) format
   AudioStreamBasicDescription hw_fmt{};
   UInt32 hw_fmt_size = sizeof(hw_fmt);
-  status = AudioUnitGetProperty(audio_unit_, kAudioUnitProperty_StreamFormat,
-                                kAudioUnitScope_Input, 1, &hw_fmt, &hw_fmt_size);
+  status =
+      AudioUnitGetProperty(audio_unit_, kAudioUnitProperty_StreamFormat,
+                           kAudioUnitScope_Input, 1, &hw_fmt, &hw_fmt_size);
   if (status == noErr) {
     char log[256];
     std::snprintf(log, sizeof(log),
@@ -211,8 +210,8 @@ void init() {
   // Use the device's native sample rate to avoid AudioUnit conversion errors
   // (e.g. -10863 when converting 24kHz AirPods → 16kHz).
   // Only convert to int16 PCM; Whisper accepts any sample rate.
-  double device_rate = (hw_fmt.mSampleRate > 0) ? hw_fmt.mSampleRate
-                                                 : kDesiredSampleRate;
+  double device_rate =
+      (hw_fmt.mSampleRate > 0) ? hw_fmt.mSampleRate : kDesiredSampleRate;
 
   AudioStreamBasicDescription format{};
   format.mSampleRate = device_rate;
@@ -238,9 +237,9 @@ void init() {
   // Read back actual format — HALOutput may not do sample rate conversion
   AudioStreamBasicDescription actual_fmt{};
   UInt32 fmt_size = sizeof(actual_fmt);
-  status = AudioUnitGetProperty(audio_unit_, kAudioUnitProperty_StreamFormat,
-                                kAudioUnitScope_Output, 1, &actual_fmt,
-                                &fmt_size);
+  status =
+      AudioUnitGetProperty(audio_unit_, kAudioUnitProperty_StreamFormat,
+                           kAudioUnitScope_Output, 1, &actual_fmt, &fmt_size);
   if (status == noErr) {
     actual_sample_rate_ = static_cast<unsigned>(actual_fmt.mSampleRate);
     char log[192];
@@ -279,9 +278,10 @@ void init() {
   initialized_ = true;
   {
     char log[128];
-    std::snprintf(log, sizeof(log),
-                  "[xp_wellys_atc] Audio recorder initialized (%uHz mono 16-bit)\n",
-                  actual_sample_rate_);
+    std::snprintf(
+        log, sizeof(log),
+        "[xp_wellys_atc] Audio recorder initialized (%uHz mono 16-bit)\n",
+        actual_sample_rate_);
     XPLMDebugString(log);
   }
 }
@@ -400,10 +400,10 @@ std::vector<uint8_t> encode_wav() {
 
   // fmt subchunk
   write_str("fmt ");
-  write_u32(16);           // subchunk size
-  write_u16(1);            // PCM format
-  write_u16(kNumChannels); // channels
-  write_u32(actual_sample_rate_);  // sample rate
+  write_u32(16);                  // subchunk size
+  write_u16(1);                   // PCM format
+  write_u16(kNumChannels);        // channels
+  write_u32(actual_sample_rate_); // sample rate
   write_u32(size_t{actual_sample_rate_} * kNumChannels *
             sizeof(int16_t));                        // byte rate
   write_u16(size_t{kNumChannels} * sizeof(int16_t)); // block align

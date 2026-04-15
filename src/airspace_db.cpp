@@ -48,7 +48,7 @@ static std::vector<std::unique_ptr<Controller>> controllers_;
 static std::atomic<bool> ready_{false};
 static std::atomic<bool> enabled_{false};
 static std::string data_path_;
-static std::mutex poly_mutex_; // protects lazy-loaded polygons + LRU
+static std::mutex poly_mutex_;        // protects lazy-loaded polygons + LRU
 static std::deque<Controller *> lru_; // most-recent at back
 static constexpr std::size_t kLruMax = 50;
 
@@ -85,9 +85,8 @@ static ControllerRole parse_role(const std::string &s) {
 
 // Point-in-polygon via ray casting. points is a closed ring (or open; the
 // ray-cast wraps around regardless).
-static bool point_in_ring(
-    double lat, double lon,
-    const std::vector<std::pair<double, double>> &pts) {
+static bool point_in_ring(double lat, double lon,
+                          const std::vector<std::pair<double, double>> &pts) {
   bool inside = false;
   const std::size_t n = pts.size();
   if (n < 3)
@@ -97,8 +96,8 @@ static bool point_in_ring(
     double yj = pts[j].first, xj = pts[j].second;
     bool intersect =
         ((yi > lat) != (yj > lat)) &&
-        (lon < (xj - xi) * (lat - yi) / ((yj - yi) != 0.0 ? (yj - yi) : 1e-12) +
-                   xi);
+        (lon <
+         (xj - xi) * (lat - yi) / ((yj - yi) != 0.0 ? (yj - yi) : 1e-12) + xi);
     if (intersect)
       inside = !inside;
   }
@@ -111,16 +110,16 @@ static double haversine_nm(double lat1, double lon1, double lat2, double lon2) {
   double dlat = (lat2 - lat1) * D2R;
   double dlon = (lon2 - lon1) * D2R;
   double a = std::sin(dlat / 2) * std::sin(dlat / 2) +
-             std::cos(lat1 * D2R) * std::cos(lat2 * D2R) *
-                 std::sin(dlon / 2) * std::sin(dlon / 2);
+             std::cos(lat1 * D2R) * std::cos(lat2 * D2R) * std::sin(dlon / 2) *
+                 std::sin(dlon / 2);
   return 2 * R * std::asin(std::min(1.0, std::sqrt(a)));
 }
 
 // ── Loader: Pass 1 (eager) — parse headers + BBox, skip polygon detail ───
 
 static void load_headers() {
-  data_path_ = xplane_system_path() +
-               "Custom Data/1200 atc data/Earth nav data/atc.dat";
+  data_path_ =
+      xplane_system_path() + "Custom Data/1200 atc data/Earth nav data/atc.dat";
   std::ifstream file(data_path_, std::ios::binary);
   if (!file.is_open()) {
     char log[512];
@@ -373,8 +372,8 @@ std::vector<const Controller *> find_enclosing(double lat, double lon,
   return out;
 }
 
-const Controller *lookup_by_freq(std::uint32_t freq_khz, double lat,
-                                 double lon, float alt_ft) {
+const Controller *lookup_by_freq(std::uint32_t freq_khz, double lat, double lon,
+                                 float alt_ft) {
   if (!enabled_.load() || freq_khz == 0)
     return nullptr;
   const Controller *freq_fallback = nullptr;
@@ -412,8 +411,8 @@ const Controller *lookup_by_freq(std::uint32_t freq_khz, double lat,
   return freq_fallback;
 }
 
-const Controller *find_by_role_near(ControllerRole role, double lat,
-                                    double lon, float alt_ft) {
+const Controller *find_by_role_near(ControllerRole role, double lat, double lon,
+                                    float alt_ft) {
   if (!enabled_.load())
     return nullptr;
   const Controller *best = nullptr;

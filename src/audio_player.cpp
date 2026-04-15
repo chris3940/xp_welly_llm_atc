@@ -136,14 +136,14 @@ static SInt64 audio_file_get_size_proc(void *inClientData) {
 }
 
 static bool decode_mp3_to_pcm16(const std::vector<uint8_t> &mp3_data,
-                                 std::vector<int16_t> &out_pcm,
-                                 int &out_channels, int &out_sample_rate) {
+                                std::vector<int16_t> &out_pcm,
+                                int &out_channels, int &out_sample_rate) {
   AudioFileReadContext ctx{mp3_data.data(), mp3_data.size()};
 
   AudioFileID audio_file = nullptr;
-  OSStatus err = AudioFileOpenWithCallbacks(
-      &ctx, audio_file_read_proc, nullptr, audio_file_get_size_proc, nullptr,
-      kAudioFileMP3Type, &audio_file);
+  OSStatus err = AudioFileOpenWithCallbacks(&ctx, audio_file_read_proc, nullptr,
+                                            audio_file_get_size_proc, nullptr,
+                                            kAudioFileMP3Type, &audio_file);
   if (err != noErr) {
     char log[128];
     std::snprintf(log, sizeof(log),
@@ -201,8 +201,7 @@ static bool decode_mp3_to_pcm16(const std::vector<uint8_t> &mp3_data,
     return false;
   }
 
-  out_pcm.resize(static_cast<size_t>(total_frames) *
-                 src_fmt.mChannelsPerFrame);
+  out_pcm.resize(static_cast<size_t>(total_frames) * src_fmt.mChannelsPerFrame);
 
   UInt32 frames_to_read = static_cast<UInt32>(total_frames);
   AudioBufferList buf_list{};
@@ -231,10 +230,9 @@ static bool decode_mp3_to_pcm16(const std::vector<uint8_t> &mp3_data,
   out_sample_rate = static_cast<int>(src_fmt.mSampleRate);
 
   char log[128];
-  std::snprintf(
-      log, sizeof(log),
-      "[xp_wellys_atc] MP3 decoded: %u frames, %d ch, %d Hz\n",
-      frames_to_read, out_channels, out_sample_rate);
+  std::snprintf(log, sizeof(log),
+                "[xp_wellys_atc] MP3 decoded: %u frames, %d ch, %d Hz\n",
+                frames_to_read, out_channels, out_sample_rate);
   XPLMDebugString(log);
   return true;
 }
@@ -242,8 +240,8 @@ static bool decode_mp3_to_pcm16(const std::vector<uint8_t> &mp3_data,
 // ── WAV decode (PCM16 only) ───────────────────────────────────────
 
 static bool decode_wav_to_pcm16(const std::vector<uint8_t> &wav_data,
-                                 std::vector<int16_t> &out_pcm,
-                                 int &out_channels, int &out_sample_rate) {
+                                std::vector<int16_t> &out_pcm,
+                                int &out_channels, int &out_sample_rate) {
   if (wav_data.size() < 44)
     return false;
 
@@ -323,7 +321,8 @@ static bool decode_wav_to_pcm16(const std::vector<uint8_t> &wav_data,
 void init() {
   is_playing_ = false;
   active_channel_ = nullptr;
-  XPLMDebugString("[xp_wellys_atc] Audio player initialized (FMOD radio bus)\n");
+  XPLMDebugString(
+      "[xp_wellys_atc] Audio player initialized (FMOD radio bus)\n");
 }
 
 void stop() {
@@ -354,12 +353,13 @@ void play_ptt_click() {
     if (static_cast<float>(i) < fade_in)
       env = static_cast<float>(i) / fade_in;
     else if (static_cast<float>(i) > static_cast<float>(num_samples) - fade_out)
-      env = (static_cast<float>(num_samples) - static_cast<float>(i)) / fade_out;
+      env =
+          (static_cast<float>(num_samples) - static_cast<float>(i)) / fade_out;
     samples[i] = static_cast<int16_t>(sine * env * 32767.0f);
   }
 
-  XPLMAudioBus bus = (settings::active_com() == 2) ? xplm_AudioRadioCom2
-                                                    : xplm_AudioRadioCom1;
+  XPLMAudioBus bus =
+      (settings::active_com() == 2) ? xplm_AudioRadioCom2 : xplm_AudioRadioCom1;
   play_pcm16(std::move(samples), static_cast<int>(kClickSampleRate), 1, volume,
              bus);
 }
@@ -380,8 +380,8 @@ void play(const std::vector<uint8_t> &mp3_data, float volume) {
     return;
   }
 
-  XPLMAudioBus bus = (settings::active_com() == 2) ? xplm_AudioRadioCom2
-                                                    : xplm_AudioRadioCom1;
+  XPLMAudioBus bus =
+      (settings::active_com() == 2) ? xplm_AudioRadioCom2 : xplm_AudioRadioCom1;
   play_pcm16(std::move(pcm16), sample_rate, channels, volume, bus);
 }
 
@@ -401,8 +401,8 @@ void play_wav(const std::vector<uint8_t> &wav_data, float volume) {
     return;
   }
 
-  XPLMAudioBus bus = (settings::active_com() == 2) ? xplm_AudioRadioCom2
-                                                    : xplm_AudioRadioCom1;
+  XPLMAudioBus bus =
+      (settings::active_com() == 2) ? xplm_AudioRadioCom2 : xplm_AudioRadioCom1;
   play_pcm16(std::move(pcm16), sample_rate, channels, volume, bus);
 }
 

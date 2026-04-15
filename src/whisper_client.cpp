@@ -59,20 +59,17 @@ void stop() {
   curl_global_cleanup();
 }
 
-void transcribe_async(
-    std::vector<uint8_t> wav_data,
-    std::function<void(TranscriptResult result)> callback,
-    const std::string &airport_context) {
+void transcribe_async(std::vector<uint8_t> wav_data,
+                      std::function<void(TranscriptResult result)> callback,
+                      const std::string &airport_context) {
 
   // NOLINTNEXTLINE(bugprone-exception-escape)
-  std::thread([wav_data = std::move(wav_data),
-               callback = std::move(callback),
+  std::thread([wav_data = std::move(wav_data), callback = std::move(callback),
                airport_context]() {
     std::string api_key = settings::get_api_key();
     if (api_key.empty()) {
-      enqueue_callback([callback]() {
-        callback({"No API key configured", 0.0f, false});
-      });
+      enqueue_callback(
+          [callback]() { callback({"No API key configured", 0.0f, false}); });
       return;
     }
 
@@ -150,9 +147,7 @@ void transcribe_async(
       curl_mime_free(mime);
       curl_slist_free_all(headers);
       curl_easy_cleanup(curl);
-      enqueue_callback([callback, err]() {
-        callback({err, 0.0f, false});
-      });
+      enqueue_callback([callback, err]() { callback({err, 0.0f, false}); });
       return;
     }
 
@@ -168,9 +163,7 @@ void transcribe_async(
       XPLMDebugString(("[xp_wellys_atc][ERROR] Whisper HTTP " +
                        std::to_string(http_code) + ": " + response_body + "\n")
                           .c_str());
-      enqueue_callback([callback, err]() {
-        callback({err, 0.0f, false});
-      });
+      enqueue_callback([callback, err]() { callback({err, 0.0f, false}); });
       return;
     }
 
@@ -193,8 +186,7 @@ void transcribe_async(
           ++seg_count;
         }
         float avg_logprob =
-            seg_count > 0 ? sum_logprob / static_cast<float>(seg_count)
-                          : -1.0f;
+            seg_count > 0 ? sum_logprob / static_cast<float>(seg_count) : -1.0f;
 
         // no_speech_prob: 0=speech, 1=silence/noise
         // avg_logprob: 0=perfect, -1+=uncertain (typical range -0.2 to -1.0)
@@ -206,23 +198,19 @@ void transcribe_async(
 
         if (settings::debug_logging()) {
           char dbg[256];
-          std::snprintf(
-              dbg, sizeof(dbg),
-              "[xp_wellys_atc][DEBUG] Whisper quality: %.2f "
-              "(no_speech=%.2f, avg_logprob=%.2f, segments=%d)\n",
-              quality, worst_no_speech, avg_logprob, seg_count);
+          std::snprintf(dbg, sizeof(dbg),
+                        "[xp_wellys_atc][DEBUG] Whisper quality: %.2f "
+                        "(no_speech=%.2f, avg_logprob=%.2f, segments=%d)\n",
+                        quality, worst_no_speech, avg_logprob, seg_count);
           XPLMDebugString(dbg);
         }
       }
 
       TranscriptResult result{transcript, quality, true};
-      enqueue_callback(
-          [callback, result]() { callback(result); });
+      enqueue_callback([callback, result]() { callback(result); });
     } catch (const std::exception &e) {
       std::string err = std::string("JSON parse error: ") + e.what();
-      enqueue_callback([callback, err]() {
-        callback({err, 0.0f, false});
-      });
+      enqueue_callback([callback, err]() { callback({err, 0.0f, false}); });
     }
   }).detach();
 }

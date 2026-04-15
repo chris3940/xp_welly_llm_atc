@@ -216,9 +216,9 @@ static bool is_phonetic_word(const std::string &w) {
 }
 
 // Build capitalized callsign from consecutive phonetic/digit words
-static std::string collect_phonetic_sequence(
-    const std::vector<std::string> &words, size_t start, size_t &end,
-    int &phonetic_count) {
+static std::string
+collect_phonetic_sequence(const std::vector<std::string> &words, size_t start,
+                          size_t &end, int &phonetic_count) {
   std::string cs;
   phonetic_count = 0;
   end = start;
@@ -261,7 +261,8 @@ static bool matches_configured_callsign(const std::string &extracted) {
     if (ext_words[ext_off + i] == cfg_words[cfg_off + i])
       ++matches;
   }
-  return matches >= static_cast<int>(n) - 1; // allow 1 mismatch for Whisper errors
+  return matches >=
+         static_cast<int>(n) - 1; // allow 1 mismatch for Whisper errors
 }
 
 static std::string extract_callsign(const std::string &text) {
@@ -282,8 +283,7 @@ static std::string extract_callsign(const std::string &text) {
       continue;
     size_t end = 0;
     int phonetic_count = 0;
-    std::string cs =
-        collect_phonetic_sequence(words, i, end, phonetic_count);
+    std::string cs = collect_phonetic_sequence(words, i, end, phonetic_count);
     if (!cs.empty() && matches_configured_callsign(cs))
       return cs;
   }
@@ -295,8 +295,7 @@ static std::string extract_callsign(const std::string &text) {
 
     size_t end = 0;
     int phonetic_count = 0;
-    std::string cs =
-        collect_phonetic_sequence(words, i, end, phonetic_count);
+    std::string cs = collect_phonetic_sequence(words, i, end, phonetic_count);
 
     if (end - i >= 2 && phonetic_count >= 1) {
       if ((cs == "Hotel Bravo" || phonetic_count >= 2) &&
@@ -321,12 +320,12 @@ struct IntentRule {
 static bool match_inappropriate_language(const std::string &t) {
   // English profanity
   if (contains(t, "fuck") || contains(t, "shit") || contains(t, "bullshit") ||
-      contains(t, "asshole") || contains(t, "bitch") || contains(t, "bastard") ||
-      contains(t, "damn it") || contains(t, "dammit") ||
-      contains(t, "piss off") || contains(t, "piss on") ||
-      contains(t, "dick head") || contains(t, "dickhead") ||
-      contains(t, "mother") || contains(t, "wanker") ||
-      contains(t, "cunt"))
+      contains(t, "asshole") || contains(t, "bitch") ||
+      contains(t, "bastard") || contains(t, "damn it") ||
+      contains(t, "dammit") || contains(t, "piss off") ||
+      contains(t, "piss on") || contains(t, "dick head") ||
+      contains(t, "dickhead") || contains(t, "mother") ||
+      contains(t, "wanker") || contains(t, "cunt"))
     return true;
   // German profanity (Whisper may pass through or transliterate)
   if (contains(t, "scheiss") || contains(t, "scheiße") ||
@@ -494,7 +493,8 @@ static bool has_facility_keyword(const std::string &t,
 }
 
 static bool match_initial_call_approach(const std::string &t) {
-  return has_facility_keyword(t, "approach") || has_facility_keyword(t, "radar");
+  return has_facility_keyword(t, "approach") ||
+         has_facility_keyword(t, "radar");
 }
 
 static bool match_initial_call_ground(const std::string &t) {

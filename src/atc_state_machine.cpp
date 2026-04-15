@@ -18,8 +18,8 @@
 
 #include "atc_state_machine.hpp"
 #include "airport_vrps.hpp"
-#include "atis_generator.hpp"
 #include "atc_templates.hpp"
+#include "atis_generator.hpp"
 #include "flight_phase.hpp"
 #include "settings.hpp"
 
@@ -84,9 +84,8 @@ static std::string get_callsign(const intent_parser::PilotMessage &msg) {
 }
 
 // Helper: get runway — pilot speech > assigned > wind-determined > fallback
-static std::string
-get_runway(const intent_parser::PilotMessage &msg,
-           const xplane_context::XPlaneContext &ctx) {
+static std::string get_runway(const intent_parser::PilotMessage &msg,
+                              const xplane_context::XPlaneContext &ctx) {
   if (!msg.runway.empty())
     return msg.runway;
   if (!assigned_runway_.empty())
@@ -237,11 +236,10 @@ build_vars(const intent_parser::PilotMessage &msg,
            const xplane_context::XPlaneContext &ctx) {
   // ATIS letter name (e.g. "Alpha", "Bravo", ...)
   static const char *letter_names[] = {
-      "Alpha",   "Bravo",   "Charlie", "Delta",   "Echo",    "Foxtrot",
-      "Golf",    "Hotel",   "India",   "Juliet",  "Kilo",    "Lima",
-      "Mike",    "November","Oscar",   "Papa",    "Quebec",  "Romeo",
-      "Sierra",  "Tango",   "Uniform", "Victor",  "Whiskey", "X-ray",
-      "Yankee",  "Zulu"};
+      "Alpha",  "Bravo",   "Charlie", "Delta",  "Echo",   "Foxtrot", "Golf",
+      "Hotel",  "India",   "Juliet",  "Kilo",   "Lima",   "Mike",    "November",
+      "Oscar",  "Papa",    "Quebec",  "Romeo",  "Sierra", "Tango",   "Uniform",
+      "Victor", "Whiskey", "X-ray",   "Yankee", "Zulu"};
   char letter = atis_generator::current_letter();
   std::string atis_letter_name = letter_names[letter - 'A'];
 
@@ -347,8 +345,8 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
           "{callsign}, roger, correction noted, say intentions.", vars);
     } else {
       // Already in a "neutral" state — just acknowledge
-      resp.text = atc_templates::fill(
-          "{callsign}, roger, say intentions.", vars);
+      resp.text =
+          atc_templates::fill("{callsign}, roger, say intentions.", vars);
       XPLMDebugString(
           "[xp_wellys_atc] Correction in neutral state, ack only\n");
     }
@@ -407,8 +405,7 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
       }
       resp.text = atc_templates::fill(freq_hint, vars);
       resp.next_state = state_;
-      XPLMDebugString(
-          "[xp_wellys_atc] ATC: wrong frequency, hint given\n");
+      XPLMDebugString("[xp_wellys_atc] ATC: wrong frequency, hint given\n");
       return resp;
     }
   }
@@ -456,8 +453,8 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
     if ((msg.intent == PI::REQUEST_TAXI ||
          msg.intent == PI::REQUEST_TAXI_PARKING) &&
         ctx.frequency_type == FT::TOWER && !ctx.tower_only) {
-      resp.text = atc_templates::fill("{callsign}, contact ground for taxi.",
-                                      vars);
+      resp.text =
+          atc_templates::fill("{callsign}, contact ground for taxi.", vars);
       resp.next_state = ATCState::IDLE;
       state_ = ATCState::IDLE;
       XPLMDebugString("[xp_wellys_atc] ATC: REQUEST_TAXI on Tower freq -> "
@@ -519,8 +516,8 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
     if (!rwy.empty()) {
       assigned_runway_ = rwy;
       char rlog[128];
-      std::snprintf(rlog, sizeof(rlog),
-                    "[xp_wellys_atc] Runway locked: %s\n", rwy.c_str());
+      std::snprintf(rlog, sizeof(rlog), "[xp_wellys_atc] Runway locked: %s\n",
+                    rwy.c_str());
       XPLMDebugString(rlog);
     }
   }
@@ -543,8 +540,7 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
               ? DepartureType::CROSS_COUNTRY
               : DepartureType::PATTERN;
       char dlog[128];
-      std::snprintf(dlog, sizeof(dlog),
-                    "[xp_wellys_atc] Departure type: %s\n",
+      std::snprintf(dlog, sizeof(dlog), "[xp_wellys_atc] Departure type: %s\n",
                     departure_type_name(departure_type_));
       XPLMDebugString(dlog);
     } else if (prev_state == ATCState::DEPARTURE_CLEARED &&
@@ -602,9 +598,8 @@ void check_auto_correction(flight_phase::FlightPhase phase, float dt) {
           departure_type_ == DepartureType::CROSS_COUNTRY &&
           state_from_name(ac.next_state) == ATCState::PATTERN_ENTRY) {
         if (active_correction_key_ != "skipped:cross_country") {
-          XPLMDebugString(
-              "[xp_wellys_atc] Skipping pattern auto-correction: "
-              "cross-country departure\n");
+          XPLMDebugString("[xp_wellys_atc] Skipping pattern auto-correction: "
+                          "cross-country departure\n");
           active_correction_key_ = "skipped:cross_country";
         }
         return;
@@ -624,18 +619,18 @@ void check_auto_correction(flight_phase::FlightPhase phase, float dt) {
       if (correction_timer_ >= ac.delay_sec) {
         ATCState new_state = state_from_name(ac.next_state);
         char log[256];
-        std::snprintf(
-            log, sizeof(log),
-            "[xp_wellys_atc] Auto-correction: %s -> %s (phase=%s, "
-            "condition=%s, after %.1fs)\n",
-            state_name(state_), state_name(new_state),
-            flight_phase::phase_name(phase), cond_name.c_str(),
-            correction_timer_);
+        std::snprintf(log, sizeof(log),
+                      "[xp_wellys_atc] Auto-correction: %s -> %s (phase=%s, "
+                      "condition=%s, after %.1fs)\n",
+                      state_name(state_), state_name(new_state),
+                      flight_phase::phase_name(phase), cond_name.c_str(),
+                      correction_timer_);
         XPLMDebugString(log);
         state_ = new_state;
         readback_pending_ = false;
         if (new_state == ATCState::IDLE && !assigned_runway_.empty()) {
-          XPLMDebugString("[xp_wellys_atc] Runway lock released (auto-correction)\n");
+          XPLMDebugString(
+              "[xp_wellys_atc] Runway lock released (auto-correction)\n");
           assigned_runway_.clear();
         }
         active_correction_key_.clear();

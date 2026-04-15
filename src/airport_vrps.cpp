@@ -44,8 +44,7 @@ static void load_from_file() {
   std::string path = settings::get_data_dir() + "/airport_vrps.json";
   std::ifstream in(path);
   if (!in.good()) {
-    XPLMDebugString(
-        "[xp_wellys_atc] Warning: airport_vrps.json not found\n");
+    XPLMDebugString("[xp_wellys_atc] Warning: airport_vrps.json not found\n");
     return;
   }
 

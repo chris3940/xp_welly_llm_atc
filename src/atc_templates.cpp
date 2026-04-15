@@ -35,8 +35,7 @@ static void load_from_file() {
   std::string path = settings::get_data_dir() + "/atc_templates.json";
   std::ifstream in(path);
   if (!in.good()) {
-    XPLMDebugString(
-        "[xp_wellys_atc] Warning: atc_templates.json not found\n");
+    XPLMDebugString("[xp_wellys_atc] Warning: atc_templates.json not found\n");
     loaded_ = false;
     return;
   }

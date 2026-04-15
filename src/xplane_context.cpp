@@ -100,7 +100,7 @@ static double haversine_distance(double lat1, double lon1, double lat2,
 }
 
 static float initial_bearing(double lat1, double lon1, double lat2,
-                              double lon2) {
+                             double lon2) {
   double lat1r = lat1 * kDeg2Rad;
   double lat2r = lat2 * kDeg2Rad;
   double dlon = (lon2 - lon1) * kDeg2Rad;
@@ -143,7 +143,9 @@ FrequencyType AirportFrequencies::lookup(float freq_mhz) const {
   return FrequencyType::UNKNOWN;
 }
 
-bool AirportFrequencies::has_ground() const { return has(FrequencyType::GROUND); }
+bool AirportFrequencies::has_ground() const {
+  return has(FrequencyType::GROUND);
+}
 
 // Forward decl (defined further down).
 static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
@@ -172,8 +174,7 @@ static void populate_ctx_from_cache(const std::string &icao,
   if (freq_it != freq_cache_.end()) {
     ctx.airport_freqs = freq_it->second;
     ctx.is_towered_airport = ctx.airport_freqs.has(FrequencyType::TOWER);
-    ctx.tower_only =
-        ctx.is_towered_airport && !ctx.airport_freqs.has_ground();
+    ctx.tower_only = ctx.is_towered_airport && !ctx.airport_freqs.has_ground();
     ctx.atis_freq_mhz = ctx.airport_freqs.first_mhz(FrequencyType::ATIS);
   } else {
     ctx.airport_freqs = {};
@@ -268,7 +269,8 @@ static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
   if (wind_speed < 3.0f) {
     const RunwayInfo *best = nullptr;
     for (const auto &rwy : runways) {
-      if (!best || (is_paved(rwy.surface_code) && !is_paved(best->surface_code)) ||
+      if (!best ||
+          (is_paved(rwy.surface_code) && !is_paved(best->surface_code)) ||
           (is_paved(rwy.surface_code) == is_paved(best->surface_code) &&
            rwy.length_m > best->length_m))
         best = &rwy;
@@ -291,7 +293,8 @@ static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
     for (const auto *end : {&rwy.end1, &rwy.end2}) {
       float diff =
           std::fmod(wind_dir - end->heading_deg + 540.0f, 360.0f) - 180.0f;
-      float headwind = wind_speed * std::cos(diff * static_cast<float>(kDeg2Rad));
+      float headwind =
+          wind_speed * std::cos(diff * static_cast<float>(kDeg2Rad));
       // Clearly better headwind (> 1 kt margin), or within 1 kt margin
       // with paved preference, then headwind, then length as tiebreakers
       bool clearly_better = headwind > best_headwind + 1.0f;
@@ -333,8 +336,8 @@ static std::string xplane_system_path() {
 
 // Frequency code mapping: apt.dat row code → FrequencyType
 struct FreqCodeMapping {
-  int old_code;  // 50-55
-  int new_code;  // 1050-1055
+  int old_code; // 50-55
+  int new_code; // 1050-1055
   FrequencyType type;
 };
 static constexpr FreqCodeMapping kFreqCodes[] = {
@@ -412,9 +415,8 @@ static void build_towered_cache() {
         if (i < line.size()) {
           // Trim trailing whitespace/CR
           size_t end = line.size();
-          while (end > i &&
-                 (line[end - 1] == ' ' || line[end - 1] == '\t' ||
-                  line[end - 1] == '\r'))
+          while (end > i && (line[end - 1] == ' ' || line[end - 1] == '\t' ||
+                             line[end - 1] == '\r'))
             --end;
           names[current_icao] = line.substr(i, end - i);
         }
@@ -474,8 +476,7 @@ static void build_towered_cache() {
           rwy.end1.lat, rwy.end1.lon, rwy.end2.lat, rwy.end2.lon));
       rwy.end1.heading_deg = initial_bearing(rwy.end1.lat, rwy.end1.lon,
                                              rwy.end2.lat, rwy.end2.lon);
-      rwy.end2.heading_deg =
-          std::fmod(rwy.end1.heading_deg + 180.0f, 360.0f);
+      rwy.end2.heading_deg = std::fmod(rwy.end1.heading_deg + 180.0f, 360.0f);
 
       runways[current_icao].push_back(rwy);
 
@@ -565,12 +566,11 @@ void init() {
       XPLMFindDataRef("sim/weather/region/wind_direction_degt"); // float[13]
   dr_wind_speed =
       XPLMFindDataRef("sim/weather/region/wind_speed_msc"); // float[13], m/s
-  dr_visibility =
-      XPLMFindDataRef("sim/weather/region/visibility_reported_sm"); // statute mi
+  dr_visibility = XPLMFindDataRef(
+      "sim/weather/region/visibility_reported_sm"); // statute mi
   dr_cloud_base =
-      XPLMFindDataRef("sim/weather/region/cloud_base_msl_m"); // float[3]
-  dr_cloud_type =
-      XPLMFindDataRef("sim/weather/region/cloud_type"); // float[3]
+      XPLMFindDataRef("sim/weather/region/cloud_base_msl_m");       // float[3]
+  dr_cloud_type = XPLMFindDataRef("sim/weather/region/cloud_type"); // float[3]
   dr_temperature =
       XPLMFindDataRef("sim/weather/region/sealevel_temperature_c"); // float
   dr_dewpoint =
@@ -765,8 +765,8 @@ void update() {
         float active_freq_mhz =
             (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
         if (active_freq_mhz > 1.0f)
-          com_khz = static_cast<uint32_t>(
-              std::round(active_freq_mhz * 1000.0f));
+          com_khz =
+              static_cast<uint32_t>(std::round(active_freq_mhz * 1000.0f));
       }
 
       // Frequency-driven switch is only valid when airborne. On the ground
@@ -777,8 +777,8 @@ void update() {
         cached_match_freq_khz = com_khz;
         cached_match_geom_id = ctx.geometric_nearest_id;
       } else if (towered_cache_ready_ &&
-          (com_khz != cached_match_freq_khz ||
-           ctx.geometric_nearest_id != cached_match_geom_id)) {
+                 (com_khz != cached_match_freq_khz ||
+                  ctx.geometric_nearest_id != cached_match_geom_id)) {
         // Only scan if the geometric nearest itself doesn't match the freq
         auto geom_freqs_it = freq_cache_.find(ctx.geometric_nearest_id);
         bool geom_handles_freq = false;
@@ -838,12 +838,10 @@ void update() {
         auto freq_it = freq_cache_.find(ctx.nearest_airport_id);
         if (freq_it != freq_cache_.end()) {
           ctx.airport_freqs = freq_it->second;
-          ctx.is_towered_airport =
-              ctx.airport_freqs.has(FrequencyType::TOWER);
+          ctx.is_towered_airport = ctx.airport_freqs.has(FrequencyType::TOWER);
           ctx.tower_only =
               ctx.is_towered_airport && !ctx.airport_freqs.has_ground();
-          ctx.atis_freq_mhz =
-              ctx.airport_freqs.first_mhz(FrequencyType::ATIS);
+          ctx.atis_freq_mhz = ctx.airport_freqs.first_mhz(FrequencyType::ATIS);
         } else {
           ctx.airport_freqs = {};
           ctx.is_towered_airport = false;
@@ -920,8 +918,8 @@ void lock_airport(const std::string &icao) {
   // Apply immediately so ATC logic doesn't lag up to 1 s behind the click.
   populate_ctx_from_cache(icao, ctx.latitude, ctx.longitude);
   char log[128];
-  std::snprintf(log, sizeof(log),
-                "[xp_wellys_atc] Airport lock: %s\n", icao.c_str());
+  std::snprintf(log, sizeof(log), "[xp_wellys_atc] Airport lock: %s\n",
+                icao.c_str());
   XPLMDebugString(log);
 }
 
@@ -929,8 +927,7 @@ void unlock_airport() {
   if (locked_airport_id_.empty())
     return;
   char log[128];
-  std::snprintf(log, sizeof(log),
-                "[xp_wellys_atc] Airport unlock (was %s)\n",
+  std::snprintf(log, sizeof(log), "[xp_wellys_atc] Airport unlock (was %s)\n",
                 locked_airport_id_.c_str());
   XPLMDebugString(log);
   locked_airport_id_.clear();
@@ -992,8 +989,7 @@ std::vector<NearbyAirport> find_nearby_airports(double max_nm,
 }
 
 void set_standby_freq(uint32_t freq_khz) {
-  XPLMDataRef dr =
-      (ctx.active_com == 1) ? dr_com1_standby : dr_com2_standby;
+  XPLMDataRef dr = (ctx.active_com == 1) ? dr_com1_standby : dr_com2_standby;
   if (dr) {
     XPLMSetDatai(dr, static_cast<int>(freq_khz));
     if (settings::debug_logging()) {

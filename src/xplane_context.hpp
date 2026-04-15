@@ -58,7 +58,8 @@ enum class FrequencyType {
 const char *frequency_type_name(FrequencyType ft);
 
 struct AirportFrequency {
-  uint32_t freq_khz = 0; // e.g. 121900 for 121.900 MHz (exact integer, no float)
+  uint32_t freq_khz =
+      0; // e.g. 121900 for 121.900 MHz (exact integer, no float)
   FrequencyType type = FrequencyType::UNKNOWN;
 };
 

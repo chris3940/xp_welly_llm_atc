@@ -64,8 +64,7 @@ void ask_async(
   bool on_ground = ctx.on_ground;
   std::string model = settings::gpt_model();
 
-  std::string system_prompt =
-      atc_templates::get_prompt("gpt_fallback_prompt");
+  std::string system_prompt = atc_templates::get_prompt("gpt_fallback_prompt");
   if (system_prompt.empty()) {
     system_prompt =
         "You are an ATC controller at {airport} airport. The pilot is "
@@ -75,17 +74,14 @@ void ask_async(
         "ground={on_ground}.";
   }
   system_prompt = atc_templates::fill(
-      system_prompt,
-      {{"airport", airport},
-       {"callsign", callsign},
-       {"on_ground", on_ground ? "true" : "false"}});
+      system_prompt, {{"airport", airport},
+                      {"callsign", callsign},
+                      {"on_ground", on_ground ? "true" : "false"}});
 
   if (settings::debug_logging()) {
+    XPLMDebugString("[xp_wellys_atc][DEBUG] GPT request (fallback) ---\n");
     XPLMDebugString(
-        "[xp_wellys_atc][DEBUG] GPT request (fallback) ---\n");
-    XPLMDebugString(("[xp_wellys_atc][DEBUG]   system: " + system_prompt +
-                     "\n")
-                        .c_str());
+        ("[xp_wellys_atc][DEBUG]   system: " + system_prompt + "\n").c_str());
     XPLMDebugString(
         ("[xp_wellys_atc][DEBUG]   user: " + pilot_text + "\n").c_str());
   }
@@ -185,38 +181,33 @@ void classify_intent_async(
   if (settings::debug_logging()) {
     XPLMDebugString(
         "[xp_wellys_atc][DEBUG] GPT request (classify_intent) ---\n");
-    XPLMDebugString(("[xp_wellys_atc][DEBUG]   system: " + system_prompt +
-                     "\n")
-                        .c_str());
+    XPLMDebugString(
+        ("[xp_wellys_atc][DEBUG]   system: " + system_prompt + "\n").c_str());
     XPLMDebugString(
         ("[xp_wellys_atc][DEBUG]   user: " + transcript + "\n").c_str());
   }
 
   // NOLINTNEXTLINE(bugprone-exception-escape)
-  std::thread([transcript, system_prompt,
-               callback = std::move(callback)]() {
+  std::thread([transcript, system_prompt, callback = std::move(callback)]() {
     try {
       std::string api_key = settings::get_api_key();
       if (api_key.empty()) {
-        enqueue_callback(
-            [callback]() { callback("_INVALID", false); });
+        enqueue_callback([callback]() { callback("_INVALID", false); });
         return;
       }
 
       CURL *curl = curl_easy_init();
       if (!curl) {
-        enqueue_callback(
-            [callback]() { callback("_INVALID", false); });
+        enqueue_callback([callback]() { callback("_INVALID", false); });
         return;
       }
 
-      nlohmann::json body = {
-          {"model", "gpt-4o-mini"},
-          {"messages",
-           {{{"role", "system"}, {"content", system_prompt}},
-            {{"role", "user"}, {"content", transcript}}}},
-          {"max_tokens", 20},
-          {"temperature", 0.0}};
+      nlohmann::json body = {{"model", "gpt-4o-mini"},
+                             {"messages",
+                              {{{"role", "system"}, {"content", system_prompt}},
+                               {{"role", "user"}, {"content", transcript}}}},
+                             {"max_tokens", 20},
+                             {"temperature", 0.0}};
 
       std::string body_str = body.dump();
 
@@ -244,8 +235,7 @@ void classify_intent_async(
                 .c_str());
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
-        enqueue_callback(
-            [callback]() { callback("_INVALID", false); });
+        enqueue_callback([callback]() { callback("_INVALID", false); });
         return;
       }
 
@@ -259,8 +249,7 @@ void classify_intent_async(
         XPLMDebugString(("[xp_wellys_atc][ERROR] GPT classify HTTP " +
                          std::to_string(http_code) + "\n")
                             .c_str());
-        enqueue_callback(
-            [callback]() { callback("_INVALID", false); });
+        enqueue_callback([callback]() { callback("_INVALID", false); });
         return;
       }
 
@@ -273,15 +262,12 @@ void classify_intent_async(
           content.erase(content.begin());
         while (!content.empty() && std::isspace(content.back()))
           content.pop_back();
-        enqueue_callback(
-            [callback, content]() { callback(content, true); });
+        enqueue_callback([callback, content]() { callback(content, true); });
       } catch (const std::exception &e) {
-        XPLMDebugString(
-            ("[xp_wellys_atc][ERROR] GPT classify parse error: " +
-             std::string(e.what()) + "\n")
-                .c_str());
-        enqueue_callback(
-            [callback]() { callback("_INVALID", false); });
+        XPLMDebugString(("[xp_wellys_atc][ERROR] GPT classify parse error: " +
+                         std::string(e.what()) + "\n")
+                            .c_str());
+        enqueue_callback([callback]() { callback("_INVALID", false); });
       }
     } catch (...) { // NOLINT(bugprone-empty-catch)
     }

@@ -17,15 +17,15 @@
  */
 
 #include "atc_ui.hpp"
-#include "atis_generator.hpp"
-#include "atc_session.hpp"
-#include "atc_state_machine.hpp"
 #include "airport_vrps.hpp"
 #include "airspace_db.hpp"
+#include "atc_session.hpp"
+#include "atc_state_machine.hpp"
 #include "atc_templates.hpp"
-#include "flight_phase.hpp"
+#include "atis_generator.hpp"
 #include "audio_player.hpp"
 #include "audio_recorder.hpp"
+#include "flight_phase.hpp"
 #include "intent_parser.hpp"
 #include "settings.hpp"
 #include "xplane_context.hpp"
@@ -110,8 +110,8 @@ static void draw_nearby_airports() {
       std::chrono::duration_cast<std::chrono::milliseconds>(
           now - nearby_last_refresh_)
               .count() >= 1000) {
-    nearby_cache_ = xplane_context::find_nearby_airports(
-        kNearbyAirportsRangeNm, kNearbyAirportsMax);
+    nearby_cache_ = xplane_context::find_nearby_airports(kNearbyAirportsRangeNm,
+                                                         kNearbyAirportsMax);
     nearby_last_refresh_ = now;
   }
 
@@ -139,12 +139,11 @@ static void draw_nearby_airports() {
                         double dist_nm, bool has_tower, bool has_atis,
                         bool is_locked) {
     char label[256];
-    std::snprintf(label, sizeof(label),
-                  "%s %-4s  %-24s  %5.1f NM  %s %s##nb_%s",
-                  is_locked ? ">" : " ", // lock marker
-                  icao.c_str(),
-                  name.empty() ? "" : name.substr(0, 24).c_str(), dist_nm,
-                  has_tower ? "T" : "-", has_atis ? "A" : "-", icao.c_str());
+    std::snprintf(
+        label, sizeof(label), "%s %-4s  %-24s  %5.1f NM  %s %s##nb_%s",
+        is_locked ? ">" : " ", // lock marker
+        icao.c_str(), name.empty() ? "" : name.substr(0, 24).c_str(), dist_nm,
+        has_tower ? "T" : "-", has_atis ? "A" : "-", icao.c_str());
     if (is_locked) {
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
     }
@@ -196,10 +195,10 @@ static void draw_nearby_airports() {
       double dlon = (ctx.airport_lon - ctx.longitude) * kDeg2Rad;
       double a = std::sin(dlat / 2) * std::sin(dlat / 2) +
                  std::cos(ctx.latitude * kDeg2Rad) *
-                     std::cos(ctx.airport_lat * kDeg2Rad) *
-                     std::sin(dlon / 2) * std::sin(dlon / 2);
-      double dm = 6371000.0 * 2.0 * std::atan2(std::sqrt(a),
-                                               std::sqrt(1.0 - a));
+                     std::cos(ctx.airport_lat * kDeg2Rad) * std::sin(dlon / 2) *
+                     std::sin(dlon / 2);
+      double dm =
+          6371000.0 * 2.0 * std::atan2(std::sqrt(a), std::sqrt(1.0 - a));
       dist_nm = dm / 1852.0;
     }
     render_row(locked, ctx.nearest_airport_name, dist_nm,
@@ -241,8 +240,7 @@ static void draw_status_tab() {
                 atc_state_machine::state_name(cur_state),
                 atc_state_machine::get_departure_type_name());
   } else {
-    ImGui::Text("   %s | %s",
-                flight_phase::phase_name(flight_phase::get()),
+    ImGui::Text("   %s | %s", flight_phase::phase_name(flight_phase::get()),
                 atc_state_machine::state_name(cur_state));
   }
   ImGui::SameLine();
@@ -267,15 +265,14 @@ static void draw_status_tab() {
     std::string apt_display =
         ctx.nearest_airport_id.empty()
             ? "---"
-            : ctx.nearest_airport_id +
-                  (ctx.nearest_airport_name.empty()
-                       ? ""
-                       : " " + ctx.nearest_airport_name);
-    ImGui::Text("Airport: %s %s", apt_display.c_str(),
-                ctx.nearest_airport_id.empty()
-                    ? ""
-                    : (ctx.is_towered_airport ? "(Towered)"
-                                              : "(Uncontrolled)"));
+            : ctx.nearest_airport_id + (ctx.nearest_airport_name.empty()
+                                            ? ""
+                                            : " " + ctx.nearest_airport_name);
+    ImGui::Text(
+        "Airport: %s %s", apt_display.c_str(),
+        ctx.nearest_airport_id.empty()
+            ? ""
+            : (ctx.is_towered_airport ? "(Towered)" : "(Uncontrolled)"));
     if (!ctx.geometric_nearest_id.empty() &&
         ctx.geometric_nearest_id != ctx.nearest_airport_id) {
       const char *reason = xplane_context::locked_airport().empty()
@@ -320,15 +317,15 @@ static void draw_status_tab() {
   // ATIS info
   {
     static const char *letter_names[] = {
-        "Alpha",   "Bravo",   "Charlie", "Delta",   "Echo",    "Foxtrot",
-        "Golf",    "Hotel",   "India",   "Juliet",  "Kilo",    "Lima",
-        "Mike",    "November","Oscar",   "Papa",    "Quebec",  "Romeo",
-        "Sierra",  "Tango",   "Uniform", "Victor",  "Whiskey", "X-ray",
-        "Yankee",  "Zulu"};
+        "Alpha",  "Bravo",    "Charlie", "Delta",  "Echo",    "Foxtrot",
+        "Golf",   "Hotel",    "India",   "Juliet", "Kilo",    "Lima",
+        "Mike",   "November", "Oscar",   "Papa",   "Quebec",  "Romeo",
+        "Sierra", "Tango",    "Uniform", "Victor", "Whiskey", "X-ray",
+        "Yankee", "Zulu"};
     char letter = atis_generator::current_letter();
     if (ctx.atis_freq_mhz > 100.0f) {
-      ImGui::Text("ATIS: Information %s | %.3f MHz",
-                  letter_names[letter - 'A'], ctx.atis_freq_mhz);
+      ImGui::Text("ATIS: Information %s | %.3f MHz", letter_names[letter - 'A'],
+                  ctx.atis_freq_mhz);
     } else {
       ImGui::Text("ATIS: Information %s | No freq", letter_names[letter - 'A']);
     }
@@ -386,8 +383,7 @@ static void draw_status_tab() {
 
   // Warning indicators
   if (!settings::api_key_saved()) {
-    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.0f, 1.0f),
-                       "[!] API key not set");
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.0f, 1.0f), "[!] API key not set");
   }
 }
 
@@ -432,7 +428,6 @@ static void draw_transcript_tab() {
 
   ImGui::EndChild();
 }
-
 
 // ── Audio test state ─────────────────────────────────────────────
 
@@ -486,7 +481,8 @@ static void draw_audio_tab() {
         audio_player::play_wav(audio_test_wav_, settings::volume());
       } else {
         audio_test_state_ = AudioTestState::IDLE;
-        XPLMDebugString("[xp_wellys_atc] Audio test: WAV encode returned empty — mic may not be working\n");
+        XPLMDebugString("[xp_wellys_atc] Audio test: WAV encode returned empty "
+                        "— mic may not be working\n");
       }
     }
   } else if (audio_test_state_ == AudioTestState::PLAYING) {
@@ -501,10 +497,12 @@ static void draw_audio_tab() {
       audio_test_state_ = AudioTestState::RECORDING;
       audio_test_timer_ = 0.0f;
       audio_test_wav_.clear();
-      XPLMDebugString("[xp_wellys_atc] Audio test: starting 3s mic recording\n");
+      XPLMDebugString(
+          "[xp_wellys_atc] Audio test: starting 3s mic recording\n");
       audio_recorder::start_recording();
     }
-    ImGui::TextDisabled("Records 3 seconds and plays back to verify mic + speakers.");
+    ImGui::TextDisabled(
+        "Records 3 seconds and plays back to verify mic + speakers.");
   }
 
   ImGui::Separator();
@@ -520,7 +518,8 @@ static void draw_audio_tab() {
     settings::save();
   }
 
-  ImGui::TextDisabled("Output: X-Plane Radio Device (Settings > Sound > Radio Device)");
+  ImGui::TextDisabled(
+      "Output: X-Plane Radio Device (Settings > Sound > Radio Device)");
 
   if (ImGui::Button("Test Speaker")) {
     audio_player::play_ptt_click();
@@ -540,7 +539,7 @@ static void draw_audio_tab() {
     settings::save();
   }
   if (ImGui::Combo("Ground Voice", &voice_sel_ground, voice_names,
-                    voice_count)) {
+                   voice_count)) {
     settings::set_tts_voice_ground(voice_names[voice_sel_ground]);
     settings::save();
   }
@@ -634,7 +633,7 @@ static void draw_settings_tab() {
 
   // Pattern direction (left/right hand traffic)
   if (ImGui::Combo("Pattern Direction", &pattern_dir_selection,
-                    pattern_dir_names, 2)) {
+                   pattern_dir_names, 2)) {
     settings::set_pattern_direction(pattern_dir_names[pattern_dir_selection]);
     settings::save();
   }
@@ -759,10 +758,9 @@ static void draw_atc_panel() {
       std::string apt_label =
           ctx.nearest_airport_id.empty()
               ? "---"
-              : ctx.nearest_airport_id +
-                    (ctx.nearest_airport_name.empty()
-                         ? ""
-                         : " " + ctx.nearest_airport_name);
+              : ctx.nearest_airport_id + (ctx.nearest_airport_name.empty()
+                                              ? ""
+                                              : " " + ctx.nearest_airport_name);
       const char *type_label =
           ctx.is_towered_airport
               ? (ctx.tower_only ? "(Tower-Only)" : "(Towered)")
@@ -782,17 +780,15 @@ static void draw_atc_panel() {
     // ATIS summary
     {
       static const char *letter_names[] = {
-          "Alpha",   "Bravo",   "Charlie", "Delta",   "Echo",    "Foxtrot",
-          "Golf",    "Hotel",   "India",   "Juliet",  "Kilo",    "Lima",
-          "Mike",    "November","Oscar",   "Papa",    "Quebec",  "Romeo",
-          "Sierra",  "Tango",   "Uniform", "Victor",  "Whiskey", "X-ray",
-          "Yankee",  "Zulu"};
+          "Alpha",  "Bravo",    "Charlie", "Delta",  "Echo",    "Foxtrot",
+          "Golf",   "Hotel",    "India",   "Juliet", "Kilo",    "Lima",
+          "Mike",   "November", "Oscar",   "Papa",   "Quebec",  "Romeo",
+          "Sierra", "Tango",    "Uniform", "Victor", "Whiskey", "X-ray",
+          "Yankee", "Zulu"};
       char letter = atis_generator::current_letter();
       int qnh_hpa = static_cast<int>(std::round(ctx.qnh_inhg * 33.8639f));
-      ImGui::Text("ATIS: %s | RWY %s | QNH %d",
-                  letter_names[letter - 'A'],
-                  ctx.active_runway.empty() ? "---"
-                                            : ctx.active_runway.c_str(),
+      ImGui::Text("ATIS: %s | RWY %s | QNH %d", letter_names[letter - 'A'],
+                  ctx.active_runway.empty() ? "---" : ctx.active_runway.c_str(),
                   qnh_hpa);
       if (ctx.wind_speed_kt < 3.0f) {
         ImGui::Text("Wind: calm");
@@ -810,8 +806,7 @@ static void draw_atc_panel() {
 
     // VRP list (if airport has published visual reporting points)
     if (!ctx.nearest_airport_id.empty()) {
-      const auto *vrp_data =
-          airport_vrps::get(ctx.nearest_airport_id);
+      const auto *vrp_data = airport_vrps::get(ctx.nearest_airport_id);
       if (vrp_data && !vrp_data->vrps.empty()) {
         std::string vrp_line = "VRPs: ";
         for (size_t i = 0; i < vrp_data->vrps.size(); ++i) {
@@ -870,21 +865,19 @@ static void draw_atc_panel() {
       for (size_t i = 0; i < ctx.airport_freqs.all.size(); ++i) {
         const auto &af = ctx.airport_freqs.all[i];
         float freq_mhz = static_cast<float>(af.freq_khz) / 1000.0f;
-        uint32_t diff = (active_khz > af.freq_khz)
-                            ? active_khz - af.freq_khz
-                            : af.freq_khz - active_khz;
+        uint32_t diff = (active_khz > af.freq_khz) ? active_khz - af.freq_khz
+                                                   : af.freq_khz - active_khz;
         bool is_active = (diff <= 1);
 
         if (is_active)
-          ImGui::PushStyleColor(ImGuiCol_Text,
-                                ImVec4(0.2f, 1.0f, 0.2f, 1.0f));
+          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.2f, 1.0f, 0.2f, 1.0f));
 
         char btn_label[96];
-        const char *apt =
-            ctx.nearest_airport_id.empty() ? "" : ctx.nearest_airport_id.c_str();
-        std::snprintf(btn_label, sizeof(btn_label),
-                      "%s %-6s %.3f##pfreq%zu", apt, freq_type_label(af.type),
-                      freq_mhz, i);
+        const char *apt = ctx.nearest_airport_id.empty()
+                              ? ""
+                              : ctx.nearest_airport_id.c_str();
+        std::snprintf(btn_label, sizeof(btn_label), "%s %-6s %.3f##pfreq%zu",
+                      apt, freq_type_label(af.type), freq_mhz, i);
 
         if (ImGui::SmallButton(btn_label)) {
           xplane_context::set_active_freq(af.freq_khz);
@@ -947,10 +940,9 @@ static void draw_atc_panel() {
             key == "RUNWAY_VACATED")
           return BtnCat::TOWER_OPS;
         if (key == "REPORT_POSITION" || key == "REPORT_POSITION_DOWNWIND" ||
-            key == "REPORT_POSITION_BASE" ||
-            key == "REPORT_POSITION_FINAL" || key == "REQUEST_LANDING" ||
-            key == "REQUEST_TOUCH_AND_GO" || key == "GO_AROUND" ||
-            key == "INITIAL_CALL_INBOUND")
+            key == "REPORT_POSITION_BASE" || key == "REPORT_POSITION_FINAL" ||
+            key == "REQUEST_LANDING" || key == "REQUEST_TOUCH_AND_GO" ||
+            key == "GO_AROUND" || key == "INITIAL_CALL_INBOUND")
           return BtnCat::PATTERN;
         return BtnCat::GENERAL;
       };
@@ -980,8 +972,7 @@ static void draw_atc_panel() {
         ImGui::TextDisabled("State: %s | Phase: %s", state_str.c_str(),
                             flight_phase::phase_name(phase));
 
-        bool is_idle =
-            atc_session::ptt_state() == atc_session::PTTState::IDLE;
+        bool is_idle = atc_session::ptt_state() == atc_session::PTTState::IDLE;
 
         // Build vars once for tooltip substitution
         intent_parser::PilotMessage dummy_msg{};
@@ -1015,11 +1006,9 @@ static void draw_atc_panel() {
 
           // Tooltip with pilot phraseology
           if (ImGui::IsItemHovered()) {
-            std::string phrase_tmpl =
-                flight_phase::get_pilot_phraseology(key);
+            std::string phrase_tmpl = flight_phase::get_pilot_phraseology(key);
             if (!phrase_tmpl.empty()) {
-              std::string phrase =
-                  atc_templates::fill(phrase_tmpl, vars);
+              std::string phrase = atc_templates::fill(phrase_tmpl, vars);
               ImGui::SetTooltip("%s", phrase.c_str());
             }
           }
@@ -1255,61 +1244,62 @@ static int draw_phase_cb(XPLMDrawingPhase, int, void *) {
   bool open = visible;
   if (visible) {
 #ifdef XP_WELLYS_ATC_VERSION
-  static const std::string window_title =
-      std::string("Welly's ATC v") + XP_WELLYS_ATC_VERSION + "##main";
+    static const std::string window_title =
+        std::string("Welly's ATC v") + XP_WELLYS_ATC_VERSION + "##main";
 #else
-  static const std::string window_title = "Welly's ATC##main";
+    static const std::string window_title = "Welly's ATC##main";
 #endif
-  if (ImGui::Begin(window_title.c_str(), &open, ImGuiWindowFlags_NoCollapse)) {
-    if (ImGui::BeginTabBar("MainTabs")) {
-      if (ImGui::BeginTabItem("Status")) {
-        draw_status_tab();
-        ImGui::EndTabItem();
+    if (ImGui::Begin(window_title.c_str(), &open,
+                     ImGuiWindowFlags_NoCollapse)) {
+      if (ImGui::BeginTabBar("MainTabs")) {
+        if (ImGui::BeginTabItem("Status")) {
+          draw_status_tab();
+          ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Transcript")) {
+          draw_transcript_tab();
+          ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Settings")) {
+          draw_settings_tab();
+          ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Audio")) {
+          draw_audio_tab();
+          ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
       }
-      if (ImGui::BeginTabItem("Transcript")) {
-        draw_transcript_tab();
-        ImGui::EndTabItem();
-      }
-      if (ImGui::BeginTabItem("Settings")) {
-        draw_settings_tab();
-        ImGui::EndTabItem();
-      }
-      if (ImGui::BeginTabItem("Audio")) {
-        draw_audio_tab();
-        ImGui::EndTabItem();
-      }
-      ImGui::EndTabBar();
-    }
 
-    // Save window geometry when moved/resized (debounced)
-    ImVec2 pos = ImGui::GetWindowPos();
-    ImVec2 size = ImGui::GetWindowSize();
-    float prev_x = settings::window_x();
-    float prev_y = settings::window_y();
-    float prev_w = settings::window_w();
-    float prev_h = settings::window_h();
-    if (pos.x != prev_x || pos.y != prev_y || size.x != prev_w ||
-        size.y != prev_h) {
-      settings::set_window_geometry(pos.x, pos.y, size.x, size.y);
-      geometry_save_timer_ = kGeometrySaveDelay;
-    }
-    if (geometry_save_timer_ > 0.0f) {
-      geometry_save_timer_ -= ImGui::GetIO().DeltaTime;
-      if (geometry_save_timer_ <= 0.0f) {
-        settings::save();
-        geometry_save_timer_ = 0.0f;
+      // Save window geometry when moved/resized (debounced)
+      ImVec2 pos = ImGui::GetWindowPos();
+      ImVec2 size = ImGui::GetWindowSize();
+      float prev_x = settings::window_x();
+      float prev_y = settings::window_y();
+      float prev_w = settings::window_w();
+      float prev_h = settings::window_h();
+      if (pos.x != prev_x || pos.y != prev_y || size.x != prev_w ||
+          size.y != prev_h) {
+        settings::set_window_geometry(pos.x, pos.y, size.x, size.y);
+        geometry_save_timer_ = kGeometrySaveDelay;
+      }
+      if (geometry_save_timer_ > 0.0f) {
+        geometry_save_timer_ -= ImGui::GetIO().DeltaTime;
+        if (geometry_save_timer_ <= 0.0f) {
+          settings::save();
+          geometry_save_timer_ = 0.0f;
+        }
       }
     }
-  }
-  ImGui::End();
+    ImGui::End();
 
-  if (!open) {
-    visible = false;
-    if (window_id) {
-      XPLMSetWindowIsVisible(window_id, 0);
-      XPLMTakeKeyboardFocus(nullptr);
+    if (!open) {
+      visible = false;
+      if (window_id) {
+        XPLMSetWindowIsVisible(window_id, 0);
+        XPLMTakeKeyboardFocus(nullptr);
+      }
     }
-  }
   } // end if (visible)
 
   // ATC Commands panel (independent of main window)

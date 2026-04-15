@@ -35,10 +35,9 @@ struct TranscriptResult {
   bool success = false;
 };
 
-void transcribe_async(
-    std::vector<uint8_t> wav_data,
-    std::function<void(TranscriptResult result)> callback,
-    const std::string &airport_context = {});
+void transcribe_async(std::vector<uint8_t> wav_data,
+                      std::function<void(TranscriptResult result)> callback,
+                      const std::string &airport_context = {});
 
 // Called from flight loop to drain pending callbacks on main thread
 void drain_callback_queue();

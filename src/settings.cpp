@@ -268,9 +268,7 @@ bool disable_default_atc() { return cfg.value("disable_default_atc", false); }
 
 void set_tts_voice_atis(const std::string &v) { cfg["tts_voice_atis"] = v; }
 void set_tts_voice_tower(const std::string &v) { cfg["tts_voice_tower"] = v; }
-void set_tts_voice_ground(const std::string &v) {
-  cfg["tts_voice_ground"] = v;
-}
+void set_tts_voice_ground(const std::string &v) { cfg["tts_voice_ground"] = v; }
 // ── ICAO phonetic alphabet conversion ───────────────────────────
 
 static const char *phonetic_letter(char c) {
