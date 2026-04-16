@@ -89,6 +89,8 @@ struct XPlaneContext {
   bool engines_running = false;
   float com1_freq_mhz = 0.0f;
   float com2_freq_mhz = 0.0f;
+  float com1_standby_mhz = 0.0f;
+  float com2_standby_mhz = 0.0f;
   int active_com = 1;
   std::string aircraft_icao;
   std::string nearest_airport_id;   // active airport (may be frequency-tuned)
@@ -97,6 +99,7 @@ struct XPlaneContext {
   bool is_towered_airport = false;
   FrequencyType frequency_type = FrequencyType::UNKNOWN;
   bool avionics_on = false;
+  bool com_radio_powered = false;
   float qnh_inhg = 29.92f;
   float wind_direction_deg = 0.0f;
   float wind_speed_kt = 0.0f;
@@ -126,10 +129,6 @@ const XPlaneContext &get();
 
 // Write a frequency (in kHz, e.g. 121900) to the active COM's standby slot
 void set_standby_freq(uint32_t freq_khz);
-
-// Tune the active COM directly to a frequency (in kHz). Used when the pilot
-// clicks a frequency button in the UI - expected behavior is immediate tune.
-void set_active_freq(uint32_t freq_khz);
 
 // ── Airport picker / lock ────────────────────────────────────────
 // Force `nearest_airport_id` (and all derived fields) to a specific ICAO.

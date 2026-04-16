@@ -204,6 +204,10 @@ void set_state(ATCState state) {
                 state_name(state_), state_name(state));
   XPLMDebugString(log);
   state_ = state;
+  if (state == ATCState::IDLE && !assigned_runway_.empty()) {
+    XPLMDebugString("[xp_wellys_atc] Runway lock released\n");
+    assigned_runway_.clear();
+  }
 }
 
 static std::string extract_position(const intent_parser::PilotMessage &msg,
@@ -616,7 +620,8 @@ void check_auto_correction(flight_phase::FlightPhase phase, float dt) {
       }
       correction_timer_ += dt;
 
-      if (correction_timer_ >= ac.delay_sec) {
+      if (correction_timer_ >=
+          ac.delay_sec * settings::auto_correction_factor()) {
         ATCState new_state = state_from_name(ac.next_state);
         char log[256];
         std::snprintf(log, sizeof(log),

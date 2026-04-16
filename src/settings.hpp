@@ -51,6 +51,9 @@ float volume();
 bool debug_logging();
 std::string pattern_direction();
 bool disable_default_atc();
+bool skip_radio_power_check();
+bool show_phraseology_hints();
+float auto_correction_factor();
 
 // Setters
 void set_tts_voice_atis(const std::string &v);
@@ -65,6 +68,9 @@ void set_debug_logging(bool v);
 void set_active_com(int com);
 void set_pattern_direction(const std::string &v);
 void set_disable_default_atc(bool v);
+void set_skip_radio_power_check(bool v);
+void set_show_phraseology_hints(bool v);
+void set_auto_correction_factor(float v);
 
 // Window geometry (-1 = use default/center)
 float window_x();

@@ -450,10 +450,14 @@ static bool match_report_position(const std::string &t) {
   return contains(t, "crosswind") || contains(t, "upwind");
 }
 
+static bool has_facility_keyword(const std::string &t,
+                                 const std::string &facility);
+
 static bool match_request_landing(const std::string &t) {
   return (contains(t, "inbound") || contains(t, "landing") ||
           contains(t, "full stop")) &&
-         !contains(t, "touch and go");
+         !contains(t, "touch and go") && !has_facility_keyword(t, "tower") &&
+         !has_facility_keyword(t, "approach");
 }
 
 static bool match_request_touch_and_go(const std::string &t) {

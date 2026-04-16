@@ -54,6 +54,9 @@ static XPLMDataRef dr_com2_freq = nullptr;
 static XPLMDataRef dr_active_com = nullptr;
 static XPLMDataRef dr_aircraft_icao = nullptr;
 static XPLMDataRef dr_avionics_on = nullptr;
+static XPLMDataRef dr_com1_power = nullptr;
+static XPLMDataRef dr_com2_power = nullptr;
+static XPLMDataRef dr_bus_volts = nullptr;
 static XPLMDataRef dr_barometer = nullptr;
 static XPLMDataRef dr_wind_direction = nullptr;
 static XPLMDataRef dr_wind_speed = nullptr;
@@ -555,6 +558,9 @@ void init() {
       XPLMFindDataRef("sim/cockpit2/radios/actuators/audio_com_selection");
   dr_aircraft_icao = XPLMFindDataRef("sim/aircraft/view/acf_ICAO");
   dr_avionics_on = XPLMFindDataRef("sim/cockpit/electrical/avionics_on");
+  dr_com1_power = XPLMFindDataRef("sim/cockpit2/radios/actuators/com1_power");
+  dr_com2_power = XPLMFindDataRef("sim/cockpit2/radios/actuators/com2_power");
+  dr_bus_volts = XPLMFindDataRef("sim/cockpit2/electrical/bus_volts");
   dr_com1_standby = XPLMFindDataRef(
       "sim/cockpit2/radios/actuators/com1_standby_frequency_hz_833");
   dr_com2_standby = XPLMFindDataRef(
@@ -640,6 +646,34 @@ void update() {
 
   if (dr_avionics_on)
     ctx.avionics_on = (XPLMGetDatai(dr_avionics_on) != 0);
+
+  // COM radio power: combine bus voltage (electrical system alive) with
+  // per-radio power switch. Bus voltage is the reliable indicator for
+  // cold-and-dark state; the actuator alone stays "on" without power.
+  {
+    XPLMDataRef dr_power =
+        (ctx.active_com == 1) ? dr_com1_power : dr_com2_power;
+    bool switch_on = dr_power ? (XPLMGetDatai(dr_power) != 0) : true;
+
+    // bus_volts is float[6] array; index 0 = main bus
+    bool bus_live = true; // fail-open
+    if (dr_bus_volts) {
+      float volts[1] = {};
+      XPLMGetDatavf(dr_bus_volts, volts, 0, 1);
+      bus_live = (volts[0] > 1.0f);
+    }
+
+    ctx.com_radio_powered =
+        settings::skip_radio_power_check() || (switch_on && bus_live);
+  }
+
+  // Standby frequencies
+  if (dr_com1_standby)
+    ctx.com1_standby_mhz =
+        static_cast<float>(XPLMGetDatai(dr_com1_standby)) / 1000.0f;
+  if (dr_com2_standby)
+    ctx.com2_standby_mhz =
+        static_cast<float>(XPLMGetDatai(dr_com2_standby)) / 1000.0f;
   // Barometer: region DataRef returns Pascals, convert to inHg
   if (dr_barometer)
     ctx.qnh_inhg = XPLMGetDataf(dr_barometer) / 3386.39f;
@@ -996,22 +1030,6 @@ void set_standby_freq(uint32_t freq_khz) {
       char dbg[128];
       std::snprintf(dbg, sizeof(dbg),
                     "[xp_wellys_atc][DEBUG] Set COM%d standby to %u "
-                    "(%.3f MHz)\n",
-                    ctx.active_com, freq_khz,
-                    static_cast<float>(freq_khz) / 1000.0f);
-      XPLMDebugString(dbg);
-    }
-  }
-}
-
-void set_active_freq(uint32_t freq_khz) {
-  XPLMDataRef dr = (ctx.active_com == 1) ? dr_com1_freq : dr_com2_freq;
-  if (dr) {
-    XPLMSetDatai(dr, static_cast<int>(freq_khz));
-    if (settings::debug_logging()) {
-      char dbg[128];
-      std::snprintf(dbg, sizeof(dbg),
-                    "[xp_wellys_atc][DEBUG] Tuned COM%d active to %u "
                     "(%.3f MHz)\n",
                     ctx.active_com, freq_khz,
                     static_cast<float>(freq_khz) / 1000.0f);

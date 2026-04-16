@@ -18,6 +18,7 @@
 
 #include "audio_recorder.hpp"
 #include "mic_permission.hpp"
+#include "settings.hpp"
 
 #include <XPLMUtilities.h>
 
@@ -57,7 +58,9 @@ static OSStatus render_callback(void * /*inRefCon*/,
                                 AudioBufferList * /*io_data*/) {
   int call_count = ++render_call_count_;
   if (call_count == 1) {
-    XPLMDebugString("[xp_wellys_atc] Render callback firing (first call)\n");
+    if (settings::debug_logging())
+      XPLMDebugString(
+          "[xp_wellys_atc][DEBUG] Render callback firing (first call)\n");
   }
 
   AudioBufferList buf_list;
@@ -322,7 +325,8 @@ void start_recording() {
     XPLMDebugString(log);
     recording_ = false;
   } else {
-    XPLMDebugString("[xp_wellys_atc] AudioUnit started OK\n");
+    if (settings::debug_logging())
+      XPLMDebugString("[xp_wellys_atc][DEBUG] AudioUnit started OK\n");
   }
 }
 
@@ -342,13 +346,16 @@ void stop_recording() {
     }
     float peak_pct = (static_cast<float>(peak) / 32767.0f) * 100.0f;
 
-    char log[256];
-    std::snprintf(log, sizeof(log),
-                  "[xp_wellys_atc] Recording stopped: %zu samples captured, "
-                  "render callbacks: %d, peak: %d (%.1f%%)\n",
-                  buffer_.size(), render_call_count_.load(),
-                  static_cast<int>(peak), peak_pct);
-    XPLMDebugString(log);
+    if (settings::debug_logging()) {
+      char log[256];
+      std::snprintf(
+          log, sizeof(log),
+          "[xp_wellys_atc][DEBUG] Recording stopped: %zu samples captured, "
+          "render callbacks: %d, peak: %d (%.1f%%)\n",
+          buffer_.size(), render_call_count_.load(), static_cast<int>(peak),
+          peak_pct);
+      XPLMDebugString(log);
+    }
     if (buffer_.empty() && render_call_count_.load() == 0) {
       XPLMDebugString(
           "[xp_wellys_atc] ERROR: No audio captured. Check: System Settings "
