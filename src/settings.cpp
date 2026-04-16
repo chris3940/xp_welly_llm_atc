@@ -57,6 +57,7 @@ static json default_config() {
           {"debug_logging", false},
           {"pattern_direction", "left"},
           {"disable_default_atc", false},
+          {"skip_radio_power_check", false},
           {"window_x", -1.0},
           {"window_y", -1.0},
           {"window_w", -1.0},
@@ -263,6 +264,9 @@ std::string pattern_direction() {
   return cfg.value("pattern_direction", std::string("left"));
 }
 bool disable_default_atc() { return cfg.value("disable_default_atc", false); }
+bool skip_radio_power_check() {
+  return cfg.value("skip_radio_power_check", false);
+}
 
 // --- Setters ---
 
@@ -320,6 +324,7 @@ void set_pattern_direction(const std::string &v) {
   cfg["pattern_direction"] = v;
 }
 void set_disable_default_atc(bool v) { cfg["disable_default_atc"] = v; }
+void set_skip_radio_power_check(bool v) { cfg["skip_radio_power_check"] = v; }
 
 float window_x() { return cfg.value("window_x", -1.0f); }
 float window_y() { return cfg.value("window_y", -1.0f); }

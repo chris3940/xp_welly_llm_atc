@@ -51,6 +51,7 @@ float volume();
 bool debug_logging();
 std::string pattern_direction();
 bool disable_default_atc();
+bool skip_radio_power_check();
 
 // Setters
 void set_tts_voice_atis(const std::string &v);
@@ -65,6 +66,7 @@ void set_debug_logging(bool v);
 void set_active_com(int com);
 void set_pattern_direction(const std::string &v);
 void set_disable_default_atc(bool v);
+void set_skip_radio_power_check(bool v);
 
 // Window geometry (-1 = use default/center)
 float window_x();

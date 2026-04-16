@@ -128,10 +128,11 @@ void on_ptt_pressed() {
     return;
   }
 
-  // Radio requires avionics power
+  // Radio requires power (checks COM radio power DataRef, handles
+  // avionics master, battery, and individual radio switches)
   const auto &ctx = xplane_context::get();
-  if (!ctx.avionics_on) {
-    XPLMDebugString("[xp_wellys_atc] PTT blocked — avionics off\n");
+  if (!ctx.com_radio_powered) {
+    XPLMDebugString("[xp_wellys_atc] PTT blocked — COM radio not powered\n");
     return;
   }
 
@@ -583,9 +584,9 @@ void update() {
     last_airport_id = actx.nearest_airport_id;
   }
 
-  // ATIS playback trigger — requires avionics + tuning delay
+  // ATIS playback trigger — requires COM radio power + tuning delay
   const auto &ctx = xplane_context::get();
-  bool tuned = ctx.avionics_on && atis_generator::is_tuned_to_atis(ctx);
+  bool tuned = ctx.com_radio_powered && atis_generator::is_tuned_to_atis(ctx);
 
   if (tuned) {
     atis_tuned_timer_ += dt;

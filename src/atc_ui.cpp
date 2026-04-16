@@ -179,7 +179,7 @@ static void draw_nearby_airports() {
           }
         }
       }
-      if (target_khz != 0)
+      if (target_khz != 0 && cur_ctx.com_radio_powered)
         xplane_context::set_standby_freq(target_khz);
       nearby_cache_.clear();
     }
@@ -650,6 +650,17 @@ static void draw_settings_tab() {
     settings::set_debug_logging(debug);
   }
 
+  // Skip radio power check (workaround for exotic aircraft)
+  bool skip_power = settings::skip_radio_power_check();
+  if (ImGui::Checkbox("Skip Radio Power Check", &skip_power)) {
+    settings::set_skip_radio_power_check(skip_power);
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "Enable if your aircraft does not report radio power correctly.\n"
+        "Radio buttons and PTT will work without electrical power.");
+  }
+
   // Disable Default X-Plane ATC
   bool disable_xp_atc = settings::disable_default_atc();
   if (ImGui::Checkbox("Disable Default X-Plane ATC", &disable_xp_atc)) {
@@ -713,6 +724,7 @@ static const char *intent_display_label(const std::string &key) {
       {"REQUEST_FREQUENCY", "Request Frequency"},
       {"RADIO_CHECK", "Radio Check"},
       {"SELF_ANNOUNCE", "Self Announce"},
+      {"INITIAL_CALL_APPROACH", "Initial Call (Approach)"},
   };
   for (const auto &p : labels)
     if (key == p.first)
@@ -741,6 +753,329 @@ static const char *freq_type_label(xplane_context::FrequencyType ft) {
   }
 }
 
+// ── Shared pilot action buttons (used by both tabs) ─────────────
+
+static void draw_pilot_actions(const xplane_context::XPlaneContext &ctx,
+                               bool force_towered = false) {
+  using FT = xplane_context::FrequencyType;
+  bool is_towered = force_towered || (ctx.is_towered_airport &&
+                                      ctx.frequency_type != FT::UNICOM &&
+                                      ctx.frequency_type != FT::CTAF);
+  // When tuned to APPROACH freq (detected via airspace_db), treat as towered
+  if (ctx.frequency_type == FT::APPROACH)
+    is_towered = true;
+
+  auto atc_state = atc_state_machine::get_state();
+  std::string state_str = atc_state_machine::state_name(atc_state);
+  auto valid = atc_templates::valid_intents(is_towered, state_str);
+
+  // Filter by frequency type and flight phase
+  auto phase = flight_phase::get();
+  valid.erase(std::remove_if(
+                  valid.begin(), valid.end(),
+                  [&](const std::string &key) {
+                    // Frequency filter
+                    if (!flight_phase::is_intent_valid_for_frequency(
+                            key, ctx.frequency_type)) {
+                      // Exception: tower-only airports allow ground intents on
+                      // tower freq
+                      if (!(ctx.tower_only && ctx.frequency_type == FT::TOWER))
+                        return true;
+                    }
+                    // Flight phase filter
+                    if (!flight_phase::check_precondition(key, phase).empty())
+                      return true;
+                    return false;
+                  }),
+              valid.end());
+
+  // Inject READBACK at top if pending and not already in list
+  if (atc_state_machine::is_readback_pending()) {
+    if (std::find(valid.begin(), valid.end(), "READBACK") == valid.end())
+      valid.insert(valid.begin(), "READBACK");
+  }
+
+  // Button category for grouping
+  enum class BtnCat { GROUND_OPS, TOWER_OPS, PATTERN, GENERAL };
+  auto intent_category = [](const std::string &key) -> BtnCat {
+    if (key == "INITIAL_CALL_GROUND" || key == "REQUEST_TAXI" ||
+        key == "REQUEST_TAXI_PARKING")
+      return BtnCat::GROUND_OPS;
+    if (key == "INITIAL_CALL_TOWER" || key == "READY_FOR_DEPARTURE" ||
+        key == "RUNWAY_VACATED")
+      return BtnCat::TOWER_OPS;
+    if (key == "REPORT_POSITION" || key == "REPORT_POSITION_DOWNWIND" ||
+        key == "REPORT_POSITION_BASE" || key == "REPORT_POSITION_FINAL" ||
+        key == "REQUEST_LANDING" || key == "REQUEST_TOUCH_AND_GO" ||
+        key == "GO_AROUND" || key == "INITIAL_CALL_INBOUND" ||
+        key == "INITIAL_CALL_APPROACH")
+      return BtnCat::PATTERN;
+    return BtnCat::GENERAL;
+  };
+  auto category_label = [](BtnCat cat) -> const char * {
+    switch (cat) {
+    case BtnCat::GROUND_OPS:
+      return "Ground Operations";
+    case BtnCat::TOWER_OPS:
+      return "Tower Operations";
+    case BtnCat::PATTERN:
+      return "Pattern / Approach";
+    case BtnCat::GENERAL:
+      return "General";
+    }
+    return "";
+  };
+
+  // Sort by category
+  std::stable_sort(valid.begin(), valid.end(),
+                   [&](const std::string &a, const std::string &b) {
+                     return static_cast<int>(intent_category(a)) <
+                            static_cast<int>(intent_category(b));
+                   });
+
+  if (!valid.empty()) {
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Pilot Actions");
+    ImGui::TextDisabled("State: %s | Phase: %s", state_str.c_str(),
+                        flight_phase::phase_name(phase));
+
+    bool is_idle = atc_session::ptt_state() == atc_session::PTTState::IDLE;
+    bool radio_off = !ctx.com_radio_powered;
+
+    // Build vars once for tooltip substitution
+    intent_parser::PilotMessage dummy_msg{};
+    dummy_msg.callsign = settings::pilot_callsign();
+    dummy_msg.runway = ctx.active_runway;
+    auto vars = atc_state_machine::build_vars(dummy_msg, ctx);
+
+    BtnCat last_cat = static_cast<BtnCat>(-1);
+    for (const auto &key : valid) {
+      BtnCat cat = intent_category(key);
+      if (cat != last_cat) {
+        if (last_cat != static_cast<BtnCat>(-1))
+          ImGui::Spacing();
+        ImGui::TextDisabled("%s", category_label(cat));
+        last_cat = cat;
+      }
+
+      const char *label = intent_display_label(key);
+      char btn_id[128];
+      std::snprintf(btn_id, sizeof(btn_id), "%s##pilot_%s", label, key.c_str());
+
+      if (!is_idle || radio_off)
+        ImGui::BeginDisabled();
+
+      if (ImGui::Button(btn_id, ImVec2(-1, 0))) {
+        auto intent = intent_parser::intent_from_key(key);
+        if (intent != intent_parser::PilotIntent::UNKNOWN)
+          atc_session::inject_intent(intent);
+      }
+
+      // Tooltip with pilot phraseology
+      if (ImGui::IsItemHovered()) {
+        std::string phrase_tmpl = flight_phase::get_pilot_phraseology(key);
+        if (!phrase_tmpl.empty()) {
+          std::string phrase = atc_templates::fill(phrase_tmpl, vars);
+          ImGui::SetTooltip("%s", phrase.c_str());
+        }
+      }
+
+      if (!is_idle || radio_off)
+        ImGui::EndDisabled();
+    }
+    if (radio_off)
+      ImGui::TextDisabled("(Radio requires power)");
+  } else {
+    // Context-aware empty state message
+    if (atc_state == atc_state_machine::ATCState::EN_ROUTE) {
+      ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Pilot Actions");
+      ImGui::TextDisabled("Tune to an Approach frequency above");
+    } else if (ctx.frequency_type == FT::ATIS ||
+               ctx.frequency_type == FT::UNKNOWN) {
+      ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Pilot Actions");
+      ImGui::TextDisabled("Tune to a Ground or Tower frequency");
+    }
+  }
+}
+
+// ── En-Route tab state (notification hint) ──────────────────────
+
+static size_t enroute_last_seen_count_ = 0;
+static bool enroute_has_update_ = false;
+
+// ── Airport tab content ─────────────────────────────────────────
+
+static void draw_airport_tab(const xplane_context::XPlaneContext &ctx) {
+  // Nearby airports picker
+  if (ImGui::CollapsingHeader("Nearby Airports",
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+    draw_nearby_airports();
+  }
+
+  // VRP list (if airport has published visual reporting points)
+  if (!ctx.nearest_airport_id.empty()) {
+    const auto *vrp_data = airport_vrps::get(ctx.nearest_airport_id);
+    if (vrp_data && !vrp_data->vrps.empty()) {
+      std::string vrp_line = "VRPs: ";
+      for (size_t i = 0; i < vrp_data->vrps.size(); ++i) {
+        if (i > 0)
+          vrp_line += " | ";
+        vrp_line += vrp_data->vrps[i].name;
+      }
+      ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "%s",
+                         vrp_line.c_str());
+    }
+  }
+
+  ImGui::Separator();
+
+  // Frequency list with clickable buttons
+  if (!ctx.airport_freqs.all.empty()) {
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Frequencies");
+
+    bool radio_off = !ctx.com_radio_powered;
+    if (radio_off)
+      ImGui::BeginDisabled();
+
+    float active_freq =
+        (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
+    uint32_t active_khz =
+        static_cast<uint32_t>(std::round(active_freq * 1000.0f));
+
+    for (size_t i = 0; i < ctx.airport_freqs.all.size(); ++i) {
+      const auto &af = ctx.airport_freqs.all[i];
+      float freq_mhz = static_cast<float>(af.freq_khz) / 1000.0f;
+      uint32_t diff = (active_khz > af.freq_khz) ? active_khz - af.freq_khz
+                                                 : af.freq_khz - active_khz;
+      bool is_active = (diff <= 1);
+
+      if (is_active)
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.2f, 1.0f, 0.2f, 1.0f));
+
+      char btn_label[96];
+      const char *apt =
+          ctx.nearest_airport_id.empty() ? "" : ctx.nearest_airport_id.c_str();
+      std::snprintf(btn_label, sizeof(btn_label), "%s %-6s %.3f##pfreq%zu", apt,
+                    freq_type_label(af.type), freq_mhz, i);
+
+      if (ImGui::SmallButton(btn_label)) {
+        xplane_context::set_standby_freq(af.freq_khz);
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Set COM%d standby to %.3f", ctx.active_com,
+                          freq_mhz);
+      }
+
+      if (is_active)
+        ImGui::PopStyleColor();
+    }
+
+    if (radio_off) {
+      ImGui::EndDisabled();
+      ImGui::TextDisabled("(Radio requires power)");
+    }
+  }
+
+  ImGui::Separator();
+
+  // Pilot action buttons
+  draw_pilot_actions(ctx);
+}
+
+// ── En-Route tab content ────────────────────────────────────────
+
+static void draw_enroute_tab(const xplane_context::XPlaneContext &ctx) {
+  // Airspace Controllers section
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Airspace Controllers");
+
+  if (!airspace_db::ready()) {
+    ImGui::TextDisabled("airspace index still loading...");
+  } else if (!airspace_db::enabled()) {
+    ImGui::TextDisabled(
+        "airspace data missing - check XP12 Custom Data install");
+  } else if (ctx.enclosing_airspaces.empty()) {
+    ImGui::TextDisabled("(outside controlled airspace)");
+  } else {
+    float active_freq =
+        (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
+    uint32_t active_khz =
+        static_cast<uint32_t>(std::round(active_freq * 1000.0f));
+
+    bool radio_off = !ctx.com_radio_powered;
+    if (radio_off)
+      ImGui::BeginDisabled();
+
+    for (size_t ci = 0; ci < ctx.enclosing_airspaces.size(); ++ci) {
+      const auto *c = ctx.enclosing_airspaces[ci];
+
+      // Controller header line
+      const char *role_label = airspace_db::role_name(c->role);
+      ImGui::Text("%s %s [%s] %d-%d ft", role_label, c->name.c_str(),
+                  c->facility_id.c_str(), c->floor_ft, c->ceiling_ft);
+
+      // Clickable frequency buttons
+      const char *type_short =
+          (c->role == airspace_db::ControllerRole::TRACON) ? "APP" : "INFO";
+      for (size_t fi = 0; fi < c->freqs_khz.size() && fi < 4; ++fi) {
+        uint32_t freq = c->freqs_khz[fi];
+        float freq_mhz = static_cast<float>(freq) / 1000.0f;
+        uint32_t diff =
+            (active_khz > freq) ? active_khz - freq : freq - active_khz;
+        bool is_active = (diff <= 1);
+
+        if (is_active)
+          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.2f, 1.0f, 0.2f, 1.0f));
+
+        char btn_label[96];
+        std::snprintf(btn_label, sizeof(btn_label),
+                      "%s %-4s %.3f##afreq%zu_%zu", c->facility_id.c_str(),
+                      type_short, freq_mhz, ci, fi);
+
+        if (ImGui::SmallButton(btn_label)) {
+          xplane_context::set_standby_freq(freq);
+        }
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Set COM%d standby to %.3f", ctx.active_com,
+                            freq_mhz);
+        }
+
+        if (is_active)
+          ImGui::PopStyleColor();
+      }
+      if (c->freqs_khz.size() > 4)
+        ImGui::TextDisabled("  ... +%zu more", c->freqs_khz.size() - 4);
+
+      ImGui::Spacing();
+    }
+
+    if (radio_off) {
+      ImGui::EndDisabled();
+      ImGui::TextDisabled("(Radio requires power)");
+    }
+  }
+
+  // Guidance banner
+  auto atc_state = atc_state_machine::get_state();
+  if (atc_state == atc_state_machine::ATCState::EN_ROUTE &&
+      !ctx.enclosing_airspaces.empty()) {
+    for (const auto *c : ctx.enclosing_airspaces) {
+      if (c->role == airspace_db::ControllerRole::TRACON) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 1.0f, 1.0f),
+                           "-> Contact %s Approach", c->name.c_str());
+        ImGui::TextDisabled("   tune to a frequency above");
+        break;
+      }
+    }
+  }
+
+  ImGui::Separator();
+
+  // Pilot action buttons (with force_towered when on approach freq)
+  draw_pilot_actions(ctx);
+}
+
+// ── ATC Commands Panel (tabbed) ─────────────────────────────────
+
 static void draw_atc_panel() {
   if (!atc_panel_visible_)
     return;
@@ -753,7 +1088,7 @@ static void draw_atc_panel() {
                    ImGuiWindowFlags_NoCollapse)) {
     const auto &ctx = xplane_context::get();
 
-    // Airport header
+    // Airport header (always visible above tabs)
     {
       std::string apt_label =
           ctx.nearest_airport_id.empty()
@@ -777,7 +1112,19 @@ static void draw_atc_panel() {
       }
     }
 
-    // ATIS summary
+    // Radio power warning (only when unpowered)
+    if (!ctx.com_radio_powered) {
+      ImGui::Spacing();
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+      ImGui::TextWrapped(
+          "COM%d radio has no power - ATC disabled. Turn on "
+          "avionics/battery or enable 'Skip Radio Power Check' in Settings.",
+          ctx.active_com);
+      ImGui::PopStyleColor();
+      ImGui::Spacing();
+    }
+
+    // ATIS summary (always visible above tabs)
     {
       static const char *letter_names[] = {
           "Alpha",  "Bravo",    "Charlie", "Delta",  "Echo",    "Foxtrot",
@@ -798,234 +1145,48 @@ static void draw_atc_panel() {
       }
     }
 
-    // Nearby airports picker — click to lock target airport
-    if (ImGui::CollapsingHeader("Nearby Airports",
-                                ImGuiTreeNodeFlags_DefaultOpen)) {
-      draw_nearby_airports();
-    }
-
-    // VRP list (if airport has published visual reporting points)
-    if (!ctx.nearest_airport_id.empty()) {
-      const auto *vrp_data = airport_vrps::get(ctx.nearest_airport_id);
-      if (vrp_data && !vrp_data->vrps.empty()) {
-        std::string vrp_line = "VRPs: ";
-        for (size_t i = 0; i < vrp_data->vrps.size(); ++i) {
-          if (i > 0)
-            vrp_line += " | ";
-          vrp_line += vrp_data->vrps[i].name;
-        }
-        ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "%s",
-                           vrp_line.c_str());
-      }
-    }
-
-    // Enclosing airspaces (M2.1 diagnostic)
-    if (ImGui::CollapsingHeader("Enclosing Airspaces")) {
-      if (!airspace_db::ready()) {
-        ImGui::TextDisabled("airspace index still loading...");
-      } else if (!airspace_db::enabled()) {
-        ImGui::TextDisabled(
-            "airspace data missing - check XP12 Custom Data install");
-      } else if (ctx.enclosing_airspaces.empty()) {
-        ImGui::TextDisabled("(outside any controlled airspace - %zu "
-                            "controllers indexed)",
-                            airspace_db::controller_count());
-      } else {
-        for (const auto *c : ctx.enclosing_airspaces) {
-          std::string freq_str;
-          for (size_t i = 0; i < c->freqs_khz.size() && i < 4; ++i) {
-            if (!freq_str.empty())
-              freq_str += " ";
-            char fb[16];
-            std::snprintf(fb, sizeof(fb), "%.3f",
-                          static_cast<float>(c->freqs_khz[i]) / 1000.0f);
-            freq_str += fb;
-          }
-          if (c->freqs_khz.size() > 4)
-            freq_str += " ...";
-          ImGui::Text("%s %s [%s] %d-%d ft  %s",
-                      airspace_db::role_name(c->role), c->name.c_str(),
-                      c->facility_id.c_str(), c->floor_ft, c->ceiling_ft,
-                      freq_str.c_str());
-        }
-      }
-    }
-
     ImGui::Separator();
 
-    // Frequency list with clickable buttons
-    if (!ctx.airport_freqs.all.empty()) {
-      ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Frequencies");
+    // Track airspace changes for En-Route tab notification
+    size_t current_airspace_count = ctx.enclosing_airspaces.size();
+    if (current_airspace_count != enroute_last_seen_count_) {
+      enroute_has_update_ = true;
+    }
 
-      float active_freq =
-          (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
-      uint32_t active_khz =
-          static_cast<uint32_t>(std::round(active_freq * 1000.0f));
+    // Tab bar
+    if (ImGui::BeginTabBar("ATC_Tabs")) {
+      // Airport tab
+      if (ImGui::BeginTabItem("Airport")) {
+        draw_airport_tab(ctx);
+        ImGui::EndTabItem();
+      }
 
-      for (size_t i = 0; i < ctx.airport_freqs.all.size(); ++i) {
-        const auto &af = ctx.airport_freqs.all[i];
-        float freq_mhz = static_cast<float>(af.freq_khz) / 1000.0f;
-        uint32_t diff = (active_khz > af.freq_khz) ? active_khz - af.freq_khz
-                                                   : af.freq_khz - active_khz;
-        bool is_active = (diff <= 1);
-
-        if (is_active)
-          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.2f, 1.0f, 0.2f, 1.0f));
-
-        char btn_label[96];
-        const char *apt = ctx.nearest_airport_id.empty()
-                              ? ""
-                              : ctx.nearest_airport_id.c_str();
-        std::snprintf(btn_label, sizeof(btn_label), "%s %-6s %.3f##pfreq%zu",
-                      apt, freq_type_label(af.type), freq_mhz, i);
-
-        if (ImGui::SmallButton(btn_label)) {
-          xplane_context::set_active_freq(af.freq_khz);
-        }
-        if (ImGui::IsItemHovered()) {
-          ImGui::SetTooltip("Tune COM%d to %.3f", ctx.active_com, freq_mhz);
-        }
-
-        if (is_active)
+      // En-Route tab (with notification hint)
+      bool hint_colored = false;
+      if (enroute_has_update_) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.9f, 1.0f, 1.0f));
+        hint_colored = true;
+      }
+      if (ImGui::BeginTabItem("En-Route")) {
+        // Mark notification as seen
+        enroute_has_update_ = false;
+        enroute_last_seen_count_ = current_airspace_count;
+        if (hint_colored) {
           ImGui::PopStyleColor();
+          hint_colored = false;
+        }
+        draw_enroute_tab(ctx);
+        ImGui::EndTabItem();
       }
+      if (hint_colored)
+        ImGui::PopStyleColor();
+
+      ImGui::EndTabBar();
     }
 
     ImGui::Separator();
 
-    // Pilot action buttons — filtered by frequency + flight phase
-    {
-      using FT = xplane_context::FrequencyType;
-      bool is_towered = ctx.is_towered_airport &&
-                        ctx.frequency_type != FT::UNICOM &&
-                        ctx.frequency_type != FT::CTAF;
-      std::string state_str =
-          atc_state_machine::state_name(atc_state_machine::get_state());
-      auto valid = atc_templates::valid_intents(is_towered, state_str);
-
-      // Filter by frequency type and flight phase
-      auto phase = flight_phase::get();
-      valid.erase(
-          std::remove_if(
-              valid.begin(), valid.end(),
-              [&](const std::string &key) {
-                // Frequency filter
-                if (!flight_phase::is_intent_valid_for_frequency(
-                        key, ctx.frequency_type)) {
-                  // Exception: tower-only airports allow ground intents on
-                  // tower freq
-                  if (!(ctx.tower_only && ctx.frequency_type == FT::TOWER))
-                    return true;
-                }
-                // Flight phase filter
-                if (!flight_phase::check_precondition(key, phase).empty())
-                  return true;
-                return false;
-              }),
-          valid.end());
-
-      // Inject READBACK at top if pending and not already in list
-      if (atc_state_machine::is_readback_pending()) {
-        if (std::find(valid.begin(), valid.end(), "READBACK") == valid.end())
-          valid.insert(valid.begin(), "READBACK");
-      }
-
-      // Button category for grouping
-      enum class BtnCat { GROUND_OPS, TOWER_OPS, PATTERN, GENERAL };
-      auto intent_category = [](const std::string &key) -> BtnCat {
-        if (key == "INITIAL_CALL_GROUND" || key == "REQUEST_TAXI" ||
-            key == "REQUEST_TAXI_PARKING")
-          return BtnCat::GROUND_OPS;
-        if (key == "INITIAL_CALL_TOWER" || key == "READY_FOR_DEPARTURE" ||
-            key == "RUNWAY_VACATED")
-          return BtnCat::TOWER_OPS;
-        if (key == "REPORT_POSITION" || key == "REPORT_POSITION_DOWNWIND" ||
-            key == "REPORT_POSITION_BASE" || key == "REPORT_POSITION_FINAL" ||
-            key == "REQUEST_LANDING" || key == "REQUEST_TOUCH_AND_GO" ||
-            key == "GO_AROUND" || key == "INITIAL_CALL_INBOUND")
-          return BtnCat::PATTERN;
-        return BtnCat::GENERAL;
-      };
-      auto category_label = [](BtnCat cat) -> const char * {
-        switch (cat) {
-        case BtnCat::GROUND_OPS:
-          return "Ground Operations";
-        case BtnCat::TOWER_OPS:
-          return "Tower Operations";
-        case BtnCat::PATTERN:
-          return "Pattern / Approach";
-        case BtnCat::GENERAL:
-          return "General";
-        }
-        return "";
-      };
-
-      // Sort by category
-      std::stable_sort(valid.begin(), valid.end(),
-                       [&](const std::string &a, const std::string &b) {
-                         return static_cast<int>(intent_category(a)) <
-                                static_cast<int>(intent_category(b));
-                       });
-
-      if (!valid.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Pilot Actions");
-        ImGui::TextDisabled("State: %s | Phase: %s", state_str.c_str(),
-                            flight_phase::phase_name(phase));
-
-        bool is_idle = atc_session::ptt_state() == atc_session::PTTState::IDLE;
-
-        // Build vars once for tooltip substitution
-        intent_parser::PilotMessage dummy_msg{};
-        dummy_msg.callsign = settings::pilot_callsign();
-        dummy_msg.runway = ctx.active_runway;
-        auto vars = atc_state_machine::build_vars(dummy_msg, ctx);
-
-        BtnCat last_cat = static_cast<BtnCat>(-1);
-        for (const auto &key : valid) {
-          BtnCat cat = intent_category(key);
-          if (cat != last_cat) {
-            if (last_cat != static_cast<BtnCat>(-1))
-              ImGui::Spacing();
-            ImGui::TextDisabled("%s", category_label(cat));
-            last_cat = cat;
-          }
-
-          const char *label = intent_display_label(key);
-          char btn_id[128];
-          std::snprintf(btn_id, sizeof(btn_id), "%s##pilot_%s", label,
-                        key.c_str());
-
-          if (!is_idle)
-            ImGui::BeginDisabled();
-
-          if (ImGui::Button(btn_id, ImVec2(-1, 0))) {
-            auto intent = intent_parser::intent_from_key(key);
-            if (intent != intent_parser::PilotIntent::UNKNOWN)
-              atc_session::inject_intent(intent);
-          }
-
-          // Tooltip with pilot phraseology
-          if (ImGui::IsItemHovered()) {
-            std::string phrase_tmpl = flight_phase::get_pilot_phraseology(key);
-            if (!phrase_tmpl.empty()) {
-              std::string phrase = atc_templates::fill(phrase_tmpl, vars);
-              ImGui::SetTooltip("%s", phrase.c_str());
-            }
-          }
-
-          if (!is_idle)
-            ImGui::EndDisabled();
-        }
-      } else if (ctx.frequency_type == FT::ATIS ||
-                 ctx.frequency_type == FT::UNKNOWN) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Pilot Actions");
-        ImGui::TextDisabled("Tune to a Ground or Tower frequency");
-      }
-    }
-
-    ImGui::Separator();
-
-    // Last ATC response
+    // Last ATC response (always visible below tabs)
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Last ATC");
     std::string last_atc = atc_session::last_atc_response();
     if (!last_atc.empty()) {
