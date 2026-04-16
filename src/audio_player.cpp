@@ -100,12 +100,15 @@ static void play_pcm16(std::vector<int16_t> pcm16, int freq_hz, int channels,
   else if (bus == xplm_AudioUI)
     bus_name = "UI";
 
-  char log[128];
-  std::snprintf(log, sizeof(log),
-                "[xp_wellys_atc] Playback started: %zu samples, %d Hz, "
-                "%s bus\n",
-                active_pcm16_.size() / channels, freq_hz, bus_name);
-  XPLMDebugString(log);
+  if (settings::debug_logging()) {
+    char log[128];
+    std::snprintf(
+        log, sizeof(log),
+        "[xp_wellys_atc][DEBUG] Playback started: %zu samples, %d Hz, "
+        "%s bus\n",
+        active_pcm16_.size() / channels, freq_hz, bus_name);
+    XPLMDebugString(log);
+  }
 }
 
 // ── MP3 decode via AudioToolbox ──────────────────────────────────
@@ -229,11 +232,14 @@ static bool decode_mp3_to_pcm16(const std::vector<uint8_t> &mp3_data,
   out_channels = static_cast<int>(src_fmt.mChannelsPerFrame);
   out_sample_rate = static_cast<int>(src_fmt.mSampleRate);
 
-  char log[128];
-  std::snprintf(log, sizeof(log),
-                "[xp_wellys_atc] MP3 decoded: %u frames, %d ch, %d Hz\n",
-                frames_to_read, out_channels, out_sample_rate);
-  XPLMDebugString(log);
+  if (settings::debug_logging()) {
+    char log[128];
+    std::snprintf(
+        log, sizeof(log),
+        "[xp_wellys_atc][DEBUG] MP3 decoded: %u frames, %d ch, %d Hz\n",
+        frames_to_read, out_channels, out_sample_rate);
+    XPLMDebugString(log);
+  }
   return true;
 }
 

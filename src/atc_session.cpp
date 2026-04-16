@@ -85,7 +85,6 @@ static void speak_response(const std::string &text, float speed = 1.0f,
                 "[xp_wellys_atc][DEBUG] TTS response: %zu bytes MP3\n",
                 mp3_data.size());
             XPLMDebugString(dbg);
-            XPLMDebugString("[xp_wellys_atc][DEBUG] Playback started\n");
           }
           audio_player::play(mp3_data, settings::volume());
         } else {

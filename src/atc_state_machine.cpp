@@ -204,6 +204,10 @@ void set_state(ATCState state) {
                 state_name(state_), state_name(state));
   XPLMDebugString(log);
   state_ = state;
+  if (state == ATCState::IDLE && !assigned_runway_.empty()) {
+    XPLMDebugString("[xp_wellys_atc] Runway lock released\n");
+    assigned_runway_.clear();
+  }
 }
 
 static std::string extract_position(const intent_parser::PilotMessage &msg,

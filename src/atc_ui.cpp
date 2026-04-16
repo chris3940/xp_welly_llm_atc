@@ -889,11 +889,23 @@ static void draw_pilot_actions(const xplane_context::XPlaneContext &ctx,
                             static_cast<int>(intent_category(b));
                    });
 
-  if (!valid.empty()) {
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Phraseology Hints");
-    ImGui::TextDisabled("State: %s | Phase: %s", state_str.c_str(),
-                        flight_phase::phase_name(phase));
+  // Phraseology header + Disregard button (always shown when hints enabled)
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Phraseology Hints");
+  if (atc_state != atc_state_machine::ATCState::IDLE) {
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Disregard")) {
+      atc_state_machine::set_state(atc_state_machine::ATCState::IDLE);
+      XPLMDebugString("[xp_wellys_atc] Manual disregard -> IDLE\n");
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Clear current ATC dialog -- you can contact ATC again anytime");
+    }
+  }
+  ImGui::TextDisabled("State: %s | Phase: %s", state_str.c_str(),
+                      flight_phase::phase_name(phase));
 
+  if (!valid.empty()) {
     bool radio_off = !ctx.com_radio_powered;
 
     // Build two var sets: short (display) and spoken (tooltip)
@@ -948,16 +960,13 @@ static void draw_pilot_actions(const xplane_context::XPlaneContext &ctx,
   } else {
     // Context-aware empty state message
     if (atc_state == atc_state_machine::ATCState::EN_ROUTE) {
-      ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Phraseology Hints");
       ImGui::TextDisabled("Tune to an Approach frequency above");
     } else if (ctx.frequency_type == FT::TOWER &&
                atc_state == atc_state_machine::ATCState::IDLE &&
                ctx.on_ground && ctx.airport_freqs.has_ground()) {
-      ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Phraseology Hints");
       ImGui::TextDisabled("Tune to Ground frequency first");
     } else if (ctx.frequency_type == FT::ATIS ||
                ctx.frequency_type == FT::UNKNOWN) {
-      ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Phraseology Hints");
       ImGui::TextDisabled("Tune to a Ground or Tower frequency");
     }
   }
