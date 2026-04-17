@@ -17,6 +17,7 @@
  */
 
 #include "atis_generator.hpp"
+#include "settings.hpp"
 
 #include <XPLMProcessing.h>
 #include <XPLMUtilities.h>
@@ -52,6 +53,16 @@ static int visibility_category(float vis_m) {
 }
 
 static std::string format_visibility(float vis_m) {
+  if (settings::flow_region() == "US") {
+    // Statute miles, FAA AIM. 1 SM = 1609.344 m. Cap at "10 or more" like ATIS.
+    float sm = vis_m / 1609.344f;
+    if (sm >= 10.0f)
+      return "1 0 statute miles";
+    int sm_int = static_cast<int>(std::round(sm));
+    if (sm_int < 1)
+      sm_int = 1;
+    return std::to_string(sm_int) + " statute miles";
+  }
   if (vis_m >= 10000.0f)
     return "10 kilometers or more";
   if (vis_m >= 1000.0f) {
@@ -99,6 +110,13 @@ static std::string format_wind(float dir, float spd) {
 static std::string format_qnh(float inhg) {
   int hpa = static_cast<int>(std::round(inhg * 33.8639f));
   return std::to_string(hpa);
+}
+
+static std::string format_altimeter(float inhg) {
+  // Two decimal places, spoken as "two niner point niner two".
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "%.2f", inhg);
+  return buf;
 }
 
 void init() {
@@ -197,7 +215,10 @@ std::string generate_atis_text(const xplane_context::XPlaneContext &ctx) {
   text += "Temperature " + std::to_string(static_cast<int>(ctx.temperature_c)) +
           ", dewpoint " + std::to_string(static_cast<int>(ctx.dewpoint_c)) +
           ". ";
-  text += "QNH " + format_qnh(ctx.qnh_inhg) + ". ";
+  if (settings::flow_region() == "US")
+    text += "Altimeter " + format_altimeter(ctx.qnh_inhg) + ". ";
+  else
+    text += "QNH " + format_qnh(ctx.qnh_inhg) + ". ";
   text += "Advise on initial contact you have information " +
           std::string(letter_name) + ".";
 

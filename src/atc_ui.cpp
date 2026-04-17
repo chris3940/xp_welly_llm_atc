@@ -78,6 +78,11 @@ static int voice_sel_ground = 1; // default: echo
 static const char *pattern_dir_names[] = {"left", "right"};
 static int pattern_dir_selection = 0; // default: left
 
+static const char *flow_region_names[] = {"EU", "US"};
+static int flow_region_selection = 0; // default: EU
+static float region_feedback_timer = 0.0f;
+static char region_feedback_msg[128] = {0};
+
 // ── Time ─────────────────────────────────────────────────────────
 static double last_frame_time_ = 0.0;
 static double get_xp_time() {
@@ -559,6 +564,8 @@ static void draw_settings_tab() {
     init_voice_sel(settings::tts_voice_ground(), voice_sel_ground);
     std::string pdir = settings::pattern_direction();
     pattern_dir_selection = (pdir == "right") ? 1 : 0;
+    std::string region = settings::flow_region();
+    flow_region_selection = (region == "US") ? 1 : 0;
     buffers_initialized = true;
   }
 
@@ -632,6 +639,32 @@ static void draw_settings_tab() {
                    pattern_dir_names, 2)) {
     settings::set_pattern_direction(pattern_dir_names[pattern_dir_selection]);
     settings::save();
+  }
+
+  // ATC flow region — EU (ICAO) vs US/Canada (FAA/NAV CANADA).
+  // Changing this reloads region-scoped config files at runtime.
+  if (ImGui::Combo("Region", &flow_region_selection, flow_region_names, 2)) {
+    settings::set_flow_region(flow_region_names[flow_region_selection]);
+    settings::save();
+    atc_templates::reload();
+    flight_phase::reload();
+    airport_vrps::reload();
+    std::snprintf(region_feedback_msg, sizeof(region_feedback_msg),
+                  "Region changed to %s - templates reloaded",
+                  flow_region_names[flow_region_selection]);
+    region_feedback_timer = 3.0f;
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "EU: ICAO phraseology, QNH in hPa, VRP-based arrivals.\n"
+        "US: FAA/NAV CANADA phraseology, Altimeter in inHg, CTAF self-"
+        "announce.\n"
+        "Switching reloads templates and flight rules.");
+  }
+  if (region_feedback_timer > 0.0f) {
+    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s",
+                       region_feedback_msg);
+    region_feedback_timer -= ImGui::GetIO().DeltaTime;
   }
 
   // GPT Fallback

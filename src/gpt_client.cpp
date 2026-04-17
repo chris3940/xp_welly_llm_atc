@@ -64,12 +64,21 @@ void ask_async(
   bool on_ground = ctx.on_ground;
   std::string model = settings::gpt_model();
 
-  std::string system_prompt = atc_templates::get_prompt("gpt_fallback_prompt");
+  // Prefer region-specific prompt if present (gpt_fallback_prompt_us for US,
+  // otherwise fall back to gpt_fallback_prompt).
+  std::string system_prompt;
+  if (settings::flow_region() == "US")
+    system_prompt = atc_templates::get_prompt("gpt_fallback_prompt_us");
+  if (system_prompt.empty())
+    system_prompt = atc_templates::get_prompt("gpt_fallback_prompt");
   if (system_prompt.empty()) {
+    const bool us = (settings::flow_region() == "US");
     system_prompt =
-        "You are an ATC controller at {airport} airport. The pilot is "
-        "flying VFR. Respond using standard ICAO phraseology only. "
-        "Plain text, no markdown. Maximum 2 sentences. The pilot's "
+        std::string(
+            "You are an ATC controller at {airport} airport. The pilot is "
+            "flying VFR. Respond using standard ") +
+        (us ? "FAA/NAV CANADA phraseology" : "ICAO phraseology") +
+        " only. Plain text, no markdown. Maximum 2 sentences. The pilot's "
         "callsign is {callsign}. Current conditions: on "
         "ground={on_ground}.";
   }

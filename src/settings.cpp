@@ -18,6 +18,7 @@
 
 #include "settings.hpp"
 
+#include <cctype>
 #include <fstream>
 #include <string>
 #include <sys/stat.h>
@@ -60,6 +61,7 @@ static json default_config() {
           {"skip_radio_power_check", false},
           {"show_phraseology_hints", true},
           {"auto_correction_factor", 1.0},
+          {"flow_region", "EU"},
           {"window_x", -1.0},
           {"window_y", -1.0},
           {"window_w", -1.0},
@@ -146,6 +148,17 @@ void init() {
 void stop() {}
 
 std::string get_data_dir() { return data_dir_path; }
+
+std::string region_data_dir() {
+  std::string region = flow_region();
+  std::string lower;
+  lower.reserve(region.size());
+  for (char c : region)
+    lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (lower != "eu" && lower != "us")
+    lower = "eu";
+  return data_dir_path + "/regions/" + lower;
+}
 
 void save() {
   std::string json_path = data_dir_path + "/settings.json";
@@ -275,6 +288,16 @@ bool show_phraseology_hints() {
 float auto_correction_factor() {
   return cfg.value("auto_correction_factor", 1.0f);
 }
+std::string flow_region() {
+  std::string v = cfg.value("flow_region", std::string("EU"));
+  if (v == "eu")
+    v = "EU";
+  else if (v == "us")
+    v = "US";
+  if (v != "EU" && v != "US")
+    v = "EU";
+  return v;
+}
 
 // --- Setters ---
 
@@ -340,6 +363,12 @@ void set_auto_correction_factor(float v) {
   if (v > 2.0f)
     v = 2.0f;
   cfg["auto_correction_factor"] = v;
+}
+void set_flow_region(const std::string &v) {
+  if (v == "US" || v == "us")
+    cfg["flow_region"] = "US";
+  else
+    cfg["flow_region"] = "EU";
 }
 
 float window_x() { return cfg.value("window_x", -1.0f); }

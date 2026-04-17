@@ -46,13 +46,16 @@ jobs:
       - name: Build ZIP
         run: |
           mkdir -p dist/xp_wellys_atc/mac_x64
-          mkdir -p dist/xp_wellys_atc/data
+          mkdir -p dist/xp_wellys_atc/data/regions/eu
+          mkdir -p dist/xp_wellys_atc/data/regions/us
           cp dist/macos/xp_wellys_atc.xpl dist/xp_wellys_atc/mac_x64/xp_wellys_atc.xpl
-          cp data/atc_templates.json dist/xp_wellys_atc/data/
           cp data/atc_prompt_templates.json dist/xp_wellys_atc/data/
-          cp data/flight_rules.json dist/xp_wellys_atc/data/
-          cp data/airport_vrps.json dist/xp_wellys_atc/data/
-          cp data/settings.json dist/xp_wellys_atc/data/
+          cp data/settings.json            dist/xp_wellys_atc/data/
+          cp data/regions/eu/atc_templates.json dist/xp_wellys_atc/data/regions/eu/
+          cp data/regions/eu/flight_rules.json  dist/xp_wellys_atc/data/regions/eu/
+          cp data/regions/eu/airport_vrps.json  dist/xp_wellys_atc/data/regions/eu/
+          cp data/regions/us/atc_templates.json dist/xp_wellys_atc/data/regions/us/
+          cp data/regions/us/flight_rules.json  dist/xp_wellys_atc/data/regions/us/
           cp -r docs dist/xp_wellys_atc/docs
           cd dist && zip -r xp_wellys_atc.zip xp_wellys_atc/
 
