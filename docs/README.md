@@ -18,6 +18,21 @@ airborne).
 
 Airports without a Tower fall back to a simple CTAF self-announce loop.
 
+### Regions
+
+The plugin supports two phraseology sets selectable in the Settings tab:
+
+- **EU** — ICAO phraseology, QNH in hPa, "taxi to holding point", VRP-based
+  arrival clearances, CTAF self-announce with airport as prefix only.
+- **US** — FAA / NAV CANADA phraseology (covers United States and Canada),
+  Altimeter in inHg, "taxi via Alpha, hold short runway X", squawk 1200,
+  `REQUEST_FLIGHT_FOLLOWING` for VFR advisory service, CTAF self-announce with
+  airport name as both prefix and suffix.
+
+Region-specific templates live under `data/regions/{eu,us}/`. Switching the
+region hot-reloads templates, flight rules, and VRPs without restarting
+X-Plane. The example ATC responses below all use the EU region.
+
 ---
 
 ## Tower Calls per State
@@ -146,7 +161,8 @@ All responses are filled at runtime from X-Plane context:
 | `{airport}` | Nearest airport (geometric or frequency-driven) |
 | `{runway}` | Wind-selected active runway |
 | `{wind}` | `sim/weather/wind_*` direction + speed |
-| `{qnh}` | `sim/weather/barometer_sealevel_inhg` → hPa |
+| `{qnh}` | `sim/weather/barometer_sealevel_inhg` → hPa (EU region) |
+| `{altimeter}` | `sim/weather/barometer_sealevel_inhg`, 2 decimals (US region) |
 | `{atis_letter}` | Current ATIS info letter (Alpha–Zulu) |
 | `{pattern_direction}` | Runway pattern side (left/right) |
 | `{entry_vrp}` | Detected VRP from `airport_vrps.json` |

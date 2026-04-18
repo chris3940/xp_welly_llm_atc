@@ -128,7 +128,7 @@ bool is_on_ground(FlightPhase phase) {
 // ── JSON loading ─────────────────────────────────────────────────
 
 static void load_from_file() {
-  std::string path = settings::get_data_dir() + "/flight_rules.json";
+  std::string path = settings::region_data_dir() + "/flight_rules.json";
   std::ifstream in(path);
   if (!in.good()) {
     XPLMDebugString("[xp_wellys_atc] Warning: flight_rules.json not found\n");

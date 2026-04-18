@@ -45,6 +45,7 @@ Einrichtung:
 | `active_com` | int | `1` | Überwachtes COM-Radio (`1` oder `2`) |
 | `volume` | float | `1.0` | Wiedergabelautstärke der ATC-Antworten (`0.0`–`1.0`) |
 | `pattern_direction` | string | `"left"` | Standard-Platzrundenrichtung (wird pro Flugplatz/Piste durch `airport_vrps.json` überschrieben) |
+| `flow_region` | string | `"EU"` | Regional-Phraseologie: `"EU"` (ICAO, QNH hPa, holding point, VRP-Anflüge) oder `"US"` (FAA/NAV CANADA, Altimeter inHg, hold short, CTAF-Self-Announce). Wählt die Config-Dateien unter `data/regions/<region>/`. |
 | `tts_voice_tower` | string | `"onyx"` | OpenAI-TTS-Stimme für Tower-Antworten |
 | `tts_voice_ground` | string | `"echo"` | OpenAI-TTS-Stimme für Ground-Antworten |
 | `tts_voice_atis` | string | `"nova"` | OpenAI-TTS-Stimme für ATIS-Meldungen |
@@ -57,6 +58,23 @@ Einrichtung:
 | `show_phraseology_hints` | bool | `true` | Phraseologie-Spickzettel im ATC-Panel anzeigen |
 | `auto_correction_factor` | float | `1.0` | Multiplikator für ATC-Recovery-Timeout (`0.5`--`2.0`). Niedrig = schnellere Korrektur, hoch = mehr Zeit zum Funken |
 | `debug_logging` | bool | `false` | Ausführliche Debug-Ausgabe in X-Plane Log.txt aktivieren |
+
+### 2.2.1 Regional-Auswahl (EU vs US/Kanada)
+
+Das Plugin bringt zwei ATC-Phraseologie-Sätze mit. Umschaltbar über den Settings-Tab (`Region: EU | US`) oder durch Setzen von `flow_region` in `settings.json`.
+
+- **EU** verwendet ICAO-Phraseologie: `"QNH 1013"`, `"taxi to holding point runway X via Alpha"`, `"squawk 7000"`, VRP-basierte Einflug-Clearances, CTAF-Self-Announce nur mit Airport-Namen als Prefix.
+- **US** verwendet FAA / NAV CANADA-Phraseologie (deckt USA und Kanada ab): `"Altimeter 29.92"`, `"taxi via Alpha, hold short runway X"`, `"squawk 1200"`, `"request flight following"` (VFR-Advisory-Service auf Approach/Center), CTAF-Self-Announce mit Airport-Name als Prefix UND Suffix (z.B. *"Palo Alto traffic, N123AB, midfield downwind runway 31, Palo Alto."*).
+
+Regional-spezifische Dateien liegen unter `data/regions/eu/` und `data/regions/us/`:
+
+| Datei | Region |
+|---|---|
+| `atc_templates.json` | EU + US |
+| `flight_rules.json` | EU + US |
+| `airport_vrps.json` | nur EU (US kennt keine VRPs) |
+
+Ein Regionswechsel im UI triggert einen Hot-Reload aller drei Dateien ohne X-Plane-Neustart.
 
 ### 2.3 Push-to-Talk-Zuweisung
 
@@ -107,6 +125,8 @@ Jeder Antworteintrag enthält:
 | `{qnh}` | Luftdruck in hPa |
 | `{atis_letter}` | Aktueller ATIS-Informationsbuchstabe (Alpha–Zulu) |
 | `{pattern_direction}` | Platzrundenseite (left/right) |
+| `{qnh}` | Luftdruck in hPa (wird von EU-Templates genutzt) |
+| `{altimeter}` | Altimeter-Einstellung in inHg mit zwei Dezimalstellen (wird von US-Templates genutzt) |
 | `{entry_vrp}` | Erkannter Visual Reporting Point |
 | `{frequency}` | Ground-/Übergabe-Frequenz |
 | `{position_remark}` | Positionsbeschreibung |

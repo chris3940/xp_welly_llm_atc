@@ -95,11 +95,18 @@ static std::string get_runway(const intent_parser::PilotMessage &msg,
   return "28"; // last resort fallback
 }
 
-// Helper: format QNH from inHg
+// Helper: format QNH from inHg (hPa, EU)
 static std::string format_qnh(float inhg) {
   int hpa = static_cast<int>(std::round(inhg * 33.8639f));
   char buf[32];
   std::snprintf(buf, sizeof(buf), "%d", hpa);
+  return buf;
+}
+
+// Helper: format altimeter in inHg (US)
+static std::string format_altimeter(float inhg) {
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "%.2f", inhg);
   return buf;
 }
 
@@ -283,6 +290,7 @@ build_vars(const intent_parser::PilotMessage &msg,
       {"runway", get_runway(msg, ctx)},
       {"wind", format_wind(ctx.wind_direction_deg, ctx.wind_speed_kt)},
       {"qnh", format_qnh(ctx.qnh_inhg)},
+      {"altimeter", format_altimeter(ctx.qnh_inhg)},
       {"atis_letter", atis_letter_name},
       {"frequency", format_freq(ground_freq)},
       {"tower_frequency", format_freq(tower_freq)},

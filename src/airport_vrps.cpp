@@ -41,10 +41,14 @@ static std::string to_lower(const std::string &s) {
 
 static void load_from_file() {
   airports_.clear();
-  std::string path = settings::get_data_dir() + "/airport_vrps.json";
+  std::string path = settings::region_data_dir() + "/airport_vrps.json";
   std::ifstream in(path);
   if (!in.good()) {
-    XPLMDebugString("[xp_wellys_atc] Warning: airport_vrps.json not found\n");
+    // Missing file is acceptable for regions without VRPs (e.g. US/CA).
+    // Only log when the user is on a region that should provide it.
+    if (settings::flow_region() == "EU") {
+      XPLMDebugString("[xp_wellys_atc] Warning: airport_vrps.json not found\n");
+    }
     return;
   }
 

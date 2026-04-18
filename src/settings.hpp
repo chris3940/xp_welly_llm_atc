@@ -36,6 +36,9 @@ std::string get_api_key();
 // Data directory path
 std::string get_data_dir();
 
+// Region-scoped data directory (e.g. <data>/regions/eu or <data>/regions/us)
+std::string region_data_dir();
+
 // Getters
 bool api_key_saved();
 std::string tts_voice_atis();
@@ -54,6 +57,7 @@ bool disable_default_atc();
 bool skip_radio_power_check();
 bool show_phraseology_hints();
 float auto_correction_factor();
+std::string flow_region(); // "EU" or "US"
 
 // Setters
 void set_tts_voice_atis(const std::string &v);
@@ -71,6 +75,7 @@ void set_disable_default_atc(bool v);
 void set_skip_radio_power_check(bool v);
 void set_show_phraseology_hints(bool v);
 void set_auto_correction_factor(float v);
+void set_flow_region(const std::string &v);
 
 // Window geometry (-1 = use default/center)
 float window_x();

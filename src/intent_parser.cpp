@@ -477,6 +477,12 @@ static bool match_request_frequency(const std::string &t) {
          contains(t, "switching");
 }
 
+static bool match_request_flight_following(const std::string &t) {
+  // US-specific VFR advisory service.
+  return contains(t, "flight following") || contains(t, "vfr advisory") ||
+         contains(t, "radar service") || contains(t, "flight follow");
+}
+
 static bool match_leaving_frequency(const std::string &t) {
   if (contains(t, "leaving your frequency") ||
       contains(t, "leaving frequency") || contains(t, "signing off"))
@@ -589,6 +595,8 @@ static const std::vector<IntentRule> kRules = {
     {PilotIntent::REPORT_POSITION_FINAL, 0.90f, match_report_position_final},
     {PilotIntent::REPORT_POSITION, 0.85f, match_report_position},
     {PilotIntent::REQUEST_LANDING, 0.85f, match_request_landing},
+    {PilotIntent::REQUEST_FLIGHT_FOLLOWING, 0.92f,
+     match_request_flight_following},
     {PilotIntent::REQUEST_FREQUENCY, 0.80f, match_request_frequency},
     {PilotIntent::INITIAL_CALL_APPROACH, 0.88f, match_initial_call_approach},
     {PilotIntent::INITIAL_CALL_GROUND, 0.85f, match_initial_call_ground},
@@ -653,6 +661,8 @@ const char *intent_name(PilotIntent intent) {
     return "UNABLE";
   case PilotIntent::SELF_ANNOUNCE:
     return "SELF_ANNOUNCE";
+  case PilotIntent::REQUEST_FLIGHT_FOLLOWING:
+    return "REQUEST_FLIGHT_FOLLOWING";
   case PilotIntent::INAPPROPRIATE_LANGUAGE:
     return "INAPPROPRIATE_LANGUAGE";
   case PilotIntent::NEGATIVE_CORRECTION:
@@ -699,6 +709,7 @@ PilotIntent intent_from_key(const std::string &key) {
       {"LEAVING_FREQUENCY", PilotIntent::LEAVING_FREQUENCY},
       {"UNABLE", PilotIntent::UNABLE},
       {"SELF_ANNOUNCE", PilotIntent::SELF_ANNOUNCE},
+      {"REQUEST_FLIGHT_FOLLOWING", PilotIntent::REQUEST_FLIGHT_FOLLOWING},
       {"INAPPROPRIATE_LANGUAGE", PilotIntent::INAPPROPRIATE_LANGUAGE},
       {"NEGATIVE_CORRECTION", PilotIntent::NEGATIVE_CORRECTION},
   };
@@ -792,7 +803,8 @@ PilotMessage parse(const std::string &transcript,
     return i == PI::REPORT_POSITION || i == PI::REPORT_POSITION_DOWNWIND ||
            i == PI::REPORT_POSITION_BASE || i == PI::REPORT_POSITION_FINAL ||
            i == PI::REQUEST_LANDING || i == PI::REQUEST_TOUCH_AND_GO ||
-           i == PI::GO_AROUND || i == PI::INITIAL_CALL_APPROACH;
+           i == PI::GO_AROUND || i == PI::INITIAL_CALL_APPROACH ||
+           i == PI::REQUEST_FLIGHT_FOLLOWING;
   };
 
   if (ctx.on_ground && is_airborne_only(msg.intent)) {
