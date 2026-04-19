@@ -21,7 +21,8 @@
     { "note": "Part A — Pilot asks for flight following in EU (not an offered service)",
       "text": "Grenchen Tower Hotel Bravo Lima Uniform Kilo request flight following",
       "expect": "not available in this region",
-      "expect_state": "IDLE" },
+      "expect_state": "IDLE",
+      "expect_not": "squawk" },
     { "note": "Part B — regular Tower inbound call works normally",
       "text": "Grenchen Tower Hotel Bravo Lima Uniform Kilo inbound for landing",
       "expect": "runway" }
