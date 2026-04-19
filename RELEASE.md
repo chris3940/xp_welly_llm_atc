@@ -3,6 +3,12 @@
 macOS only. Built for macOS users who lack access to commercial ATC voice solutions on their platform.
 
 
+### What's New in v1.5.1
+
+  - **US / Canada phraseology support** — the plugin now speaks FAA/TC-style ATC in addition to EU/ICAO. Regional phraseology is selected automatically based on the nearest airport's country, covering the key US/Canada flow differences (e.g. Ground issues "contact Tower when ready" with the taxi clearance, Tower clears for takeoff without a separate "ready for departure" call, position reports and readbacks follow FAA wording). EU/ICAO remains the default everywhere else.
+  - **Automated test engine** — a new end-to-end test harness replays scripted VFR flights (happy-path and error-path scenarios) against the full ATC pipeline and asserts on state transitions, phraseology, and auto-corrections. This is a foundational step: every future change now runs against a growing regression suite, which should noticeably lift release quality and make ATC behaviour changes much safer to ship.
+
+
 ### What's New in v1.5.0
 
   - **Voice-only workflow** — pilot action buttons removed entirely. All ATC communication is now exclusively via push-to-talk voice input. The former button panel is replaced by read-only **Phraseology Hints** — a context-aware cheat sheet showing the correct radio call for your current situation. Hover any hint for the full ICAO phraseology with phonetic callsign.
@@ -56,7 +62,7 @@ macOS only. Built for macOS users who lack access to commercial ATC voice soluti
 
   - Single pilot — no traffic sequencing, always "number one"
   - English communication only
-  - EU / ICAO phraseology only — ATC flow and wording follow European / ICAO standards (Ground hands off to Tower at the holding point, pilot reports "ready for departure" to Ground). US-style procedures (e.g., Ground issuing "contact tower when ready" already in the taxi clearance) are not modelled.
+  - EU/ICAO and US/Canada phraseology supported; other regional variants (e.g. UK CAA-specific wording, Australian AIP) fall back to ICAO defaults.
   - Hardcoded taxiway — taxi instructions always use "via Alpha" regardless of airport layout
   - Multi-leg handoffs require X-Plane 12 atc.dat (ships by default); gracefully disabled if missing
   - macOS only — no Windows or Linux support
