@@ -22,6 +22,9 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release $RELEASE_FLAG -Wno-dev
           cmake --build build --parallel
 
+      - name: Run scenario tests
+        run: make test
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
