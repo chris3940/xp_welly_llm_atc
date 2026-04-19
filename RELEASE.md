@@ -75,4 +75,4 @@ macOS only. Built for macOS users who lack access to commercial ATC voice soluti
   - VFR Reporting Points beyond the currently shipped Swiss / German set
   - IFR Support — IFR introduces significantly more complexity (clearances, holds, approach procedures, etc.) and will be tackled in a later phase. Stay tuned!
 
-  Full Changelog: https://github.com/rwellinger/xp_welly_atc/compare/v1.4.0...v1.5.0
+  Full Changelog: https://github.com/rwellinger/xp_welly_atc/compare/v1.5.0...v1.5.1
