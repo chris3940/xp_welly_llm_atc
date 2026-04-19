@@ -7,7 +7,7 @@ SDK_SENTINEL   := sdk/XPLM/XPLMPlugin.h
 IMGUI_SENTINEL := vendor/imgui/imgui.h
 JSON_SENTINEL  := vendor/json.hpp
 
-.PHONY: all help setup build install clean format lint release release-build cleanup-tags cleanup-branches repl run-repl test
+.PHONY: all help setup build install clean format lint release release-build cleanup-tags cleanup-branches cleanup-runs repl run-repl test
 
 .DEFAULT_GOAL := help
 
@@ -31,6 +31,7 @@ help:
 	@echo "  make release-build     Build plugin with RELEASE=ON (embeds VERSION.txt)"
 	@echo "  make cleanup-tags      Prune local tags no longer on origin"
 	@echo "  make cleanup-branches  Prune local branches whose remote is gone"
+	@echo "  make cleanup-runs      Delete all GitHub Actions runs except the newest per workflow"
 	@echo "  make clean             Remove build/ and build-lint/"
 	@echo "  make help              Show this help"
 
@@ -198,6 +199,17 @@ cleanup-branches:
 	    echo "$$STALE" | xargs -n1 git branch -d; \
 	fi
 	@echo "Local branches synced with remote."
+
+# ── Cleanup GitHub Actions Runs ───────────────────────────────────────────────
+cleanup-runs:
+	@command -v gh >/dev/null 2>&1 || { \
+	    echo "gh not found. Install with: brew install gh"; exit 1; }
+	@echo "Deleting GitHub Actions runs (keeping newest per workflow)..."
+	@for wf in $$(gh workflow list --json id -q '.[].id'); do \
+	    gh run list --workflow=$$wf --limit 1000 --json databaseId -q '.[1:] | .[].databaseId' \
+	        | xargs -I {} gh run delete {}; \
+	done
+	@echo "Cleanup complete."
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 clean:
