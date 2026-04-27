@@ -3,6 +3,15 @@
 macOS only. Built for macOS users who lack access to commercial ATC voice solutions on their platform.
 
 
+### What's New in vX.Y.Z (TBD)
+
+  - **ATC no longer asks you to tune the frequency you are already on** — if you switch to Tower before being handed off (e.g. immediately after taxi clearance), Tower now responds with the actual takeoff clearance instead of "contact Tower on X.XXX" — the frequency you are already on. The state machine advances internally when your COM frequency is further along the flow than the current state implies. Driven by a new data-driven `frequency_auto_corrections` block in `flight_rules.json`, mirroring the existing flight-phase auto-corrections. Covers `TAXI_CLEARED → TOWER_CONTACT` and `GROUND_CONTACT → TOWER_CONTACT` for both EU/ICAO and US regions.
+  - **Takeoff clearances no longer auto-revoke after 10 seconds on the ground** — the previous `on_parked` auto-correction reset `DEPARTURE_CLEARED` back to `IDLE` after a short dwell, even though the pilot was still doing run-up, briefing, or waiting for traffic. The follow-up downwind report then landed in a "say again" loop because the state was gone. The clearance now stays valid until you actually take off (the existing `on_airborne` transition handles the `→ PATTERN_ENTRY` advance).
+  - **Post-landing "request taxi to parking" works after stopping briefly** — pilots typically come to a brief stop on the taxiway after vacating the runway before calling Ground, which dropped flight phase to `PARKED`. The phase guard then misinterpreted this as "already at the gate" and rejected the request with "you are already at the parking position." `REQUEST_TAXI_PARKING` is now allowed in `PARKED` phase for both regions.
+  - **Parser disambiguation for combined status + request phrases** — utterances like "runway vacated, request taxi to the parking" now classify as `REQUEST_TAXI_PARKING` (the actionable request) instead of `RUNWAY_VACATED` (the status), letting Ground respond with taxi instructions in one turn.
+  - **Three new regression scenarios** — `bad_16` (TAXI_CLEARED + early Tower tune), `bad_17` (DEPARTURE_CLEARED dwell + takeoff + downwind report), and `bad_18` (post-landing taxi to parking) close the regression gaps that let these bugs ship in v1.5.1.
+
+
 ### What's New in v1.5.1
 
   - **US / Canada phraseology support** — the plugin now speaks FAA/TC-style ATC in addition to EU/ICAO. Regional phraseology is selected manually in Settings (Region: EU or US), covering the key US/Canada flow differences (e.g. Ground issues "contact Tower when ready" with the taxi clearance, Tower clears for takeoff without a separate "ready for departure" call, position reports and readbacks follow FAA wording). EU/ICAO is the default.
