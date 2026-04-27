@@ -36,8 +36,7 @@
       "rejection_airborne": "{callsign}, unable, you appear to be airborne."
     },
     "REQUEST_TAXI_PARKING": {
-      "allowed_phases": ["TAXI", "LANDING_ROLL"],
-      "rejection_parked": "{callsign}, you are already at the ramp.",
+      "allowed_phases": ["PARKED", "TAXI", "LANDING_ROLL"],
       "rejection_airborne": "{callsign}, unable, you appear to be airborne."
     },
     "READY_FOR_DEPARTURE": {
@@ -96,11 +95,6 @@
         "phases": ["CLIMB", "PATTERN", "FINAL_APPROACH", "CRUISE"],
         "next_state": "PATTERN_ENTRY",
         "delay_sec": 5.0
-      },
-      "on_parked": {
-        "phases": ["PARKED"],
-        "next_state": "IDLE",
-        "delay_sec": 10.0
       }
     },
     "PATTERN_ENTRY": {
@@ -148,6 +142,22 @@
         "phases": ["TAXI", "PARKED"],
         "next_state": "IDLE",
         "delay_sec": 3.0
+      }
+    }
+  },
+  "frequency_auto_corrections": {
+    "TAXI_CLEARED": {
+      "on_tower_freq": {
+        "frequencies": ["TOWER"],
+        "next_state": "TOWER_CONTACT",
+        "log": "pilot tuned Tower while taxi-cleared, advancing handoff"
+      }
+    },
+    "GROUND_CONTACT": {
+      "on_tower_freq": {
+        "frequencies": ["TOWER"],
+        "next_state": "TOWER_CONTACT",
+        "log": "pilot tuned Tower from GROUND_CONTACT, advancing"
       }
     }
   },

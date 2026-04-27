@@ -595,9 +595,11 @@ static const std::vector<IntentRule> kRules = {
     {PilotIntent::READY_FOR_DEPARTURE_VFR, 0.92f,
      match_ready_for_departure_vfr},
     {PilotIntent::READY_FOR_DEPARTURE, 0.90f, match_ready_for_departure},
-    {PilotIntent::RUNWAY_VACATED, 0.90f, match_runway_vacated},
     {PilotIntent::REQUEST_TOUCH_AND_GO, 0.90f, match_request_touch_and_go},
+    // REQUEST_TAXI_PARKING before RUNWAY_VACATED: when pilot says
+    // "runway vacated, request taxi to parking", the actionable request wins.
     {PilotIntent::REQUEST_TAXI_PARKING, 0.90f, match_request_taxi_parking},
+    {PilotIntent::RUNWAY_VACATED, 0.90f, match_runway_vacated},
     {PilotIntent::REQUEST_TAXI, 0.90f, match_request_taxi},
     {PilotIntent::REPORT_POSITION_DOWNWIND, 0.90f,
      match_report_position_downwind},

@@ -51,6 +51,12 @@ struct AutoCorrection {
   float delay_sec = 3.0f;
 };
 
+struct FrequencyAutoCorrection {
+  std::vector<xplane_context::FrequencyType> frequencies;
+  std::string next_state;
+  std::string log;
+};
+
 struct FrequencyRule {
   std::vector<std::string> allowed; // FrequencyType names: GROUND, TOWER, etc.
   std::string rejection;            // rendered when current freq not allowed
@@ -73,6 +79,13 @@ std::string check_precondition(const std::string &intent_key,
 // Auto-correction lookup for a given ATC state
 const std::map<std::string, AutoCorrection> *
 get_auto_corrections(const std::string &atc_state);
+
+// Frequency-driven forward-progression lookup for a given ATC state.
+// First-match semantics. Used inline in atc_state_machine::process()
+// to advance state when the pilot is already on a frequency further
+// along the expected flow than the current state implies.
+const std::map<std::string, FrequencyAutoCorrection> *
+get_frequency_auto_corrections(const std::string &atc_state);
 
 FlightPhase phase_from_name(const std::string &name);
 

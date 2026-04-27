@@ -58,6 +58,8 @@ static HysteresisConfig hysteresis_;
 static std::map<std::string, IntentPrecondition> preconditions_;
 static std::map<std::string, std::map<std::string, AutoCorrection>>
     auto_corrections_;
+static std::map<std::string, std::map<std::string, FrequencyAutoCorrection>>
+    frequency_auto_corrections_;
 static std::map<std::string, FrequencyRule> intent_frequency_;
 static std::map<std::string, std::string> pilot_phraseology_;
 static bool loaded_ = false;
@@ -126,6 +128,11 @@ bool is_on_ground(FlightPhase phase) {
          phase == FlightPhase::TAKEOFF_ROLL ||
          phase == FlightPhase::LANDING_ROLL;
 }
+
+// ── Frequency-name mapping (forward-declared, used in load_from_file) ──
+
+static xplane_context::FrequencyType
+freq_type_from_name(const std::string &name);
 
 // ── JSON loading ─────────────────────────────────────────────────
 
@@ -198,6 +205,27 @@ static void load_from_file() {
           state_corrections[cond_name] = std::move(ac);
         }
         auto_corrections_[state] = std::move(state_corrections);
+      }
+    }
+
+    // Frequency-driven auto corrections
+    frequency_auto_corrections_.clear();
+    if (j.contains("frequency_auto_corrections")) {
+      for (auto &[state, conditions] :
+           j["frequency_auto_corrections"].items()) {
+        std::map<std::string, FrequencyAutoCorrection> state_corrections;
+        for (auto &[cond_name, cond_val] : conditions.items()) {
+          FrequencyAutoCorrection fc;
+          if (cond_val.contains("frequencies")) {
+            for (auto &f : cond_val["frequencies"])
+              fc.frequencies.push_back(
+                  freq_type_from_name(f.get<std::string>()));
+          }
+          fc.next_state = cond_val.value("next_state", "IDLE");
+          fc.log = cond_val.value("log", "");
+          state_corrections[cond_name] = std::move(fc);
+        }
+        frequency_auto_corrections_[state] = std::move(state_corrections);
       }
     }
 
@@ -323,6 +351,7 @@ void init() { load_from_file(); }
 void stop() {
   preconditions_.clear();
   auto_corrections_.clear();
+  frequency_auto_corrections_.clear();
   intent_frequency_.clear();
   pilot_phraseology_.clear();
   loaded_ = false;
@@ -416,6 +445,14 @@ get_auto_corrections(const std::string &atc_state) {
   return &it->second;
 }
 
+const std::map<std::string, FrequencyAutoCorrection> *
+get_frequency_auto_corrections(const std::string &atc_state) {
+  auto it = frequency_auto_corrections_.find(atc_state);
+  if (it == frequency_auto_corrections_.end())
+    return nullptr;
+  return &it->second;
+}
+
 static std::string freq_type_name(xplane_context::FrequencyType freq_type) {
   using FT = xplane_context::FrequencyType;
   switch (freq_type) {
@@ -432,6 +469,26 @@ static std::string freq_type_name(xplane_context::FrequencyType freq_type) {
   default:
     return {};
   }
+}
+
+static xplane_context::FrequencyType
+freq_type_from_name(const std::string &name) {
+  using FT = xplane_context::FrequencyType;
+  if (name == "GROUND")
+    return FT::GROUND;
+  if (name == "TOWER")
+    return FT::TOWER;
+  if (name == "APPROACH")
+    return FT::APPROACH;
+  if (name == "UNICOM")
+    return FT::UNICOM;
+  if (name == "CTAF")
+    return FT::CTAF;
+  if (name == "DELIVERY")
+    return FT::DELIVERY;
+  if (name == "ATIS")
+    return FT::ATIS;
+  return FT::UNKNOWN;
 }
 
 bool is_intent_valid_for_frequency(const std::string &intent_key,

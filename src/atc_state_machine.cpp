@@ -468,6 +468,39 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
     }
   }
 
+  // Frequency-driven forward-progression. Pilot already on a frequency
+  // further along the flow than the current state implies (e.g. on TOWER
+  // while still in TAXI_CLEARED) — advance state inline before template
+  // lookup so the response matches reality. Data-driven via
+  // frequency_auto_corrections in flight_rules.json.
+  {
+    std::string current_state = state_name(state_);
+    auto *fc = flight_phase::get_frequency_auto_corrections(current_state);
+    if (fc) {
+      for (const auto &[cond_name, rule] : *fc) {
+        bool match = false;
+        for (auto ft : rule.frequencies) {
+          if (ctx.frequency_type == ft) {
+            match = true;
+            break;
+          }
+        }
+        if (match) {
+          ATCState target = state_from_name(rule.next_state);
+          if (target != state_) {
+            logging::info(
+                "Frequency auto-correction: %s -> %s (freq_type=%s, %s)",
+                state_name(state_), state_name(target),
+                xplane_context::frequency_type_name(ctx.frequency_type),
+                rule.log.empty() ? cond_name.c_str() : rule.log.c_str());
+            state_ = target;
+          }
+          break;
+        }
+      }
+    }
+  }
+
   // Frequency-aware intent routing in IDLE state
   if (state_ == ATCState::IDLE) {
     using PI = intent_parser::PilotIntent;
