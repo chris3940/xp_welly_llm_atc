@@ -16,14 +16,14 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "atc_session.hpp"
-#include "atc_state_machine.hpp"
-#include "atis_generator.hpp"
+#include "atc/atc_session.hpp"
+#include "atc/atc_state_machine.hpp"
+#include "atc/atis_generator.hpp"
 #include "audio/audio_player.hpp"
 #include "audio/audio_recorder.hpp"
-#include "engine/engine.hpp"
-#include "flight_phase.hpp"
-#include "intent_parser.hpp"
+#include "atc/engine.hpp"
+#include "atc/flight_phase.hpp"
+#include "atc/intent_parser.hpp"
 #include "core/logging.hpp"
 #include "openai/tts_client.hpp"
 #include "openai/whisper_client.hpp"

@@ -8,11 +8,11 @@
 
 #include "scenario.hpp"
 
-#include "atc_state_machine.hpp"
-#include "atc_templates.hpp"
-#include "engine/engine.hpp"
-#include "flight_phase.hpp"
-#include "intent_parser.hpp"
+#include "atc/atc_state_machine.hpp"
+#include "atc/atc_templates.hpp"
+#include "atc/engine.hpp"
+#include "atc/flight_phase.hpp"
+#include "atc/intent_parser.hpp"
 #include "persistence/settings.hpp"
 #include "core/xplane_context.hpp"
 

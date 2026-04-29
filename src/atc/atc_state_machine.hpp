@@ -19,8 +19,8 @@
 #ifndef ATC_STATE_MACHINE_HPP
 #define ATC_STATE_MACHINE_HPP
 
-#include "flight_phase.hpp"
-#include "intent_parser.hpp"
+#include "atc/flight_phase.hpp"
+#include "atc/intent_parser.hpp"
 #include "core/xplane_context.hpp"
 
 #include <map>

@@ -17,7 +17,7 @@
  */
 
 #include "audio/ptt_input.hpp"
-#include "atc_session.hpp"
+#include "atc/atc_session.hpp"
 
 #include <XPLMUtilities.h>
 

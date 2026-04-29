@@ -19,7 +19,7 @@
 #ifndef ATC_SESSION_HPP
 #define ATC_SESSION_HPP
 
-#include "intent_parser.hpp"
+#include "atc/intent_parser.hpp"
 
 #include <cstddef>
 #include <string>

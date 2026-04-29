@@ -16,7 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "atc_templates.hpp"
+#include "atc/atc_templates.hpp"
 #include "core/logging.hpp"
 #include "persistence/settings.hpp"
 

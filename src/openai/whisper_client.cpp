@@ -17,7 +17,7 @@
  */
 
 #include "openai/whisper_client.hpp"
-#include "atc_templates.hpp"
+#include "atc/atc_templates.hpp"
 #include "core/logging.hpp"
 #include "persistence/settings.hpp"
 

@@ -35,12 +35,12 @@ find_package(CURL REQUIRED)
 # translation unit that pulls in <XPLM*.h> will fail to compile here.
 add_library(xp_atc_engine OBJECT
     src/core/logging.cpp
-    src/engine/engine.cpp
-    src/intent_parser.cpp
-    src/atc_state_machine.cpp
-    src/atc_templates.cpp
-    src/flight_phase.cpp
-    src/atis_generator.cpp
+    src/atc/engine.cpp
+    src/atc/intent_parser.cpp
+    src/atc/atc_state_machine.cpp
+    src/atc/atc_templates.cpp
+    src/atc/flight_phase.cpp
+    src/atc/atis_generator.cpp
     src/openai/gpt_client.cpp
     src/openai/whisper_client.cpp
     src/openai/tts_client.cpp
@@ -67,7 +67,7 @@ target_link_libraries(xp_atc_engine PRIVATE CURL::libcurl)
 add_library(xp_wellys_atc MODULE
     $<TARGET_OBJECTS:xp_atc_engine>
     src/main.cpp
-    src/atc_session.cpp
+    src/atc/atc_session.cpp
     src/core/xplane_context_runtime.cpp
     src/audio/ptt_input.cpp
     src/audio/audio_recorder.cpp

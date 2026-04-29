@@ -16,7 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "atis_generator.hpp"
+#include "atc/atis_generator.hpp"
 #include "core/logging.hpp"
 #include "persistence/settings.hpp"
 

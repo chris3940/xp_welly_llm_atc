@@ -7,9 +7,9 @@
  *   atc_repl                                     REPL with LSZH default
  */
 
-#include "atc_state_machine.hpp"
-#include "atc_templates.hpp"
-#include "flight_phase.hpp"
+#include "atc/atc_state_machine.hpp"
+#include "atc/atc_templates.hpp"
+#include "atc/flight_phase.hpp"
 #include "repl.hpp"
 #include "scenario.hpp"
 #include "core/xplane_context.hpp"

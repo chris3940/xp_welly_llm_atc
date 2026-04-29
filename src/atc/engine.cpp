@@ -10,8 +10,8 @@
 
 #include "engine.hpp"
 
-#include "atc_state_machine.hpp"
-#include "atc_templates.hpp"
+#include "atc/atc_state_machine.hpp"
+#include "atc/atc_templates.hpp"
 #include "core/logging.hpp"
 #include "openai/gpt_client.hpp"
 #include "persistence/settings.hpp"

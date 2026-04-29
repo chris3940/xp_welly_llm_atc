@@ -16,11 +16,11 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "atc_state_machine.hpp"
+#include "atc/atc_state_machine.hpp"
 #include "data/airport_vrps.hpp"
-#include "atc_templates.hpp"
-#include "atis_generator.hpp"
-#include "flight_phase.hpp"
+#include "atc/atc_templates.hpp"
+#include "atc/atis_generator.hpp"
+#include "atc/flight_phase.hpp"
 #include "core/logging.hpp"
 #include "persistence/settings.hpp"
 
