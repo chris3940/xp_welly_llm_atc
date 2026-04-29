@@ -28,7 +28,7 @@
 #include "atc_session.hpp"
 #include "atc_state_machine.hpp"
 #include "atc_templates.hpp"
-#include "atc_ui.hpp"
+#include "ui/atc_ui.hpp"
 #include "atis_generator.hpp"
 #include "audio/audio_player.hpp"
 #include "audio/audio_recorder.hpp"

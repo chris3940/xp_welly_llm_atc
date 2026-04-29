@@ -74,7 +74,7 @@ add_library(xp_wellys_atc MODULE
     src/audio/audio_player.cpp
     src/audio/mic_permission.mm
     src/persistence/settings.cpp
-    src/atc_ui.cpp
+    src/ui/atc_ui.cpp
     ${IMGUI_SOURCES}
 )
 
@@ -103,7 +103,7 @@ if(APPLE)
 
     # Suppress OpenGL deprecation warnings in our code only (ImGui defines its own)
     set_source_files_properties(
-        src/main.cpp src/atc_ui.cpp
+        src/main.cpp src/ui/atc_ui.cpp
         PROPERTIES COMPILE_DEFINITIONS "GL_SILENCE_DEPRECATION"
     )
     target_compile_options(xp_wellys_atc PRIVATE

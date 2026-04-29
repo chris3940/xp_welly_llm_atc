@@ -16,7 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "atc_ui.hpp"
+#include "ui/atc_ui.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/airspace_db.hpp"
 #include "atc_session.hpp"
