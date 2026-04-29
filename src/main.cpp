@@ -95,6 +95,11 @@ static float flight_loop_cb(float, float, int, void *) {
 }
 
 PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
+  // Required for X-Plane installs on external volumes — without it the SDK
+  // returns HFS paths that lose the /Volumes/<name>/ mount prefix when
+  // naively converted to POSIX, causing all file I/O to fail.
+  XPLMEnableFeature("XPLM_USE_NATIVE_PATHS", 1);
+
 #ifdef XP_WELLYS_ATC_VERSION
   std::snprintf(name, 256, "Welly's ATC v%s", XP_WELLYS_ATC_VERSION);
 #else
