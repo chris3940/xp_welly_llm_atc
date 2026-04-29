@@ -17,8 +17,8 @@
  */
 
 #include "atc/intent_parser.hpp"
-#include "data/airport_vrps.hpp"
 #include "core/logging.hpp"
+#include "data/airport_vrps.hpp"
 #include "persistence/settings.hpp"
 
 #include <algorithm>

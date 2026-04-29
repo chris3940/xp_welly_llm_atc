@@ -17,11 +17,11 @@
  */
 
 #include "atc/atc_state_machine.hpp"
-#include "data/airport_vrps.hpp"
 #include "atc/atc_templates.hpp"
 #include "atc/atis_generator.hpp"
 #include "atc/flight_phase.hpp"
 #include "core/logging.hpp"
+#include "data/airport_vrps.hpp"
 #include "persistence/settings.hpp"
 
 #include <cmath>

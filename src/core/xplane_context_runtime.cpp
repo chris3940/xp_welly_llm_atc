@@ -8,9 +8,9 @@
  * (at your option) any later version.
  */
 
+#include "core/xplane_context.hpp"
 #include "data/airspace_db.hpp"
 #include "persistence/settings.hpp"
-#include "core/xplane_context.hpp"
 
 #include <XPLMDataAccess.h>
 #include <XPLMNavigation.h>

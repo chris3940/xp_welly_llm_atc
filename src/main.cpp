@@ -23,23 +23,23 @@
 #include <XPLMProcessing.h>
 #include <XPLMUtilities.h>
 
-#include "data/airport_vrps.hpp"
-#include "data/airspace_db.hpp"
 #include "atc/atc_session.hpp"
 #include "atc/atc_state_machine.hpp"
 #include "atc/atc_templates.hpp"
-#include "ui/atc_ui.hpp"
 #include "atc/atis_generator.hpp"
+#include "atc/flight_phase.hpp"
 #include "audio/audio_player.hpp"
 #include "audio/audio_recorder.hpp"
 #include "audio/ptt_input.hpp"
-#include "atc/flight_phase.hpp"
 #include "core/logging.hpp"
+#include "core/xplane_context.hpp"
+#include "data/airport_vrps.hpp"
+#include "data/airspace_db.hpp"
 #include "openai/gpt_client.hpp"
 #include "openai/tts_client.hpp"
 #include "openai/whisper_client.hpp"
 #include "persistence/settings.hpp"
-#include "core/xplane_context.hpp"
+#include "ui/atc_ui.hpp"
 
 static XPLMMenuID menu_id = nullptr;
 static int menu_container_idx = -1;

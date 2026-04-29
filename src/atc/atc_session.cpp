@@ -19,16 +19,16 @@
 #include "atc/atc_session.hpp"
 #include "atc/atc_state_machine.hpp"
 #include "atc/atis_generator.hpp"
-#include "audio/audio_player.hpp"
-#include "audio/audio_recorder.hpp"
 #include "atc/engine.hpp"
 #include "atc/flight_phase.hpp"
 #include "atc/intent_parser.hpp"
+#include "audio/audio_player.hpp"
+#include "audio/audio_recorder.hpp"
 #include "core/logging.hpp"
+#include "core/xplane_context.hpp"
 #include "openai/tts_client.hpp"
 #include "openai/whisper_client.hpp"
 #include "persistence/settings.hpp"
-#include "core/xplane_context.hpp"
 
 #include <XPLMProcessing.h>
 #include <XPLMUtilities.h>

@@ -17,18 +17,18 @@
  */
 
 #include "ui/atc_ui.hpp"
-#include "data/airport_vrps.hpp"
-#include "data/airspace_db.hpp"
 #include "atc/atc_session.hpp"
 #include "atc/atc_state_machine.hpp"
 #include "atc/atc_templates.hpp"
 #include "atc/atis_generator.hpp"
-#include "audio/audio_player.hpp"
-#include "audio/audio_recorder.hpp"
 #include "atc/flight_phase.hpp"
 #include "atc/intent_parser.hpp"
-#include "persistence/settings.hpp"
+#include "audio/audio_player.hpp"
+#include "audio/audio_recorder.hpp"
 #include "core/xplane_context.hpp"
+#include "data/airport_vrps.hpp"
+#include "data/airspace_db.hpp"
+#include "persistence/settings.hpp"
 
 #include <XPLMDataAccess.h>
 #include <XPLMDisplay.h>
