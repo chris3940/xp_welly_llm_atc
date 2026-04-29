@@ -171,7 +171,7 @@ format:
 	    echo "clang-format not found. Install with: brew install llvm"; \
 	    echo "Then add to PATH: export PATH=\"$$(brew --prefix llvm)/bin:$$PATH\""; \
 	    exit 1; }
-	clang-format -i src/*.cpp src/*.hpp src/engine/*.cpp src/engine/*.hpp
+	clang-format -i src/main.cpp src/*/*.cpp src/*/*.hpp
 
 lint: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@command -v clang-tidy >/dev/null 2>&1 || { \
@@ -179,7 +179,7 @@ lint: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	    echo "Then add to PATH: export PATH=\"$$(brew --prefix llvm)/bin:$$PATH\""; \
 	    exit 1; }
 	cmake -B build-lint -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_OSX_ARCHITECTURES=arm64 -Wno-dev
-	clang-tidy -p build-lint --extra-arg="-isysroot" --extra-arg="$(shell xcrun --show-sdk-path)" src/*.cpp src/engine/*.cpp
+	clang-tidy -p build-lint --extra-arg="-isysroot" --extra-arg="$(shell xcrun --show-sdk-path)" src/main.cpp src/*/*.cpp
 
 # ── Release ───────────────────────────────────────────────────────────────────
 release:
