@@ -3,11 +3,14 @@ SHELL := /bin/bash
 XPLANE_ROOT := /Users/robertw/X-Plane 12
 PLUGIN_DIR  := $(XPLANE_ROOT)/Resources/available plugins/xp_wellys_atc
 
-SDK_SENTINEL   := sdk/XPLM/XPLMPlugin.h
-IMGUI_SENTINEL := vendor/imgui/imgui.h
-JSON_SENTINEL  := vendor/json.hpp
+SDK_SENTINEL    := sdk/XPLM/XPLMPlugin.h
+IMGUI_SENTINEL  := vendor/imgui/imgui.h
+JSON_SENTINEL   := vendor/json.hpp
+CATCH2_SENTINEL := vendor/catch2/catch_amalgamated.hpp
 
-.PHONY: all help setup build install clean format lint release release-build cleanup-tags cleanup-branches cleanup-runs repl run-repl test
+CATCH2_VERSION := 3.7.1
+
+.PHONY: all help setup build install clean format lint release release-build cleanup-tags cleanup-branches cleanup-runs repl run-repl test test-unit test-scenarios
 
 .DEFAULT_GOAL := help
 
@@ -23,7 +26,9 @@ help:
 	@echo "  make build             Build plugin (Release) -> build/xp_wellys_atc.xpl"
 	@echo "  make repl              Build headless CLI -> build/atc_repl"
 	@echo "  make run-repl          Build + run the CLI (stdin transcripts)"
-	@echo "  make test              Build + run all scenario tests in testscripts/"
+	@echo "  make test              Run unit tests + scenario tests"
+	@echo "  make test-unit         Build + run Catch2 unit tests"
+	@echo "  make test-scenarios    Build + run all scenario tests in testscripts/"
 	@echo "  make install           Code-sign and install plugin to X-Plane"
 	@echo "  make format            Run clang-format on src/*.cpp src/*.hpp"
 	@echo "  make lint              Run clang-tidy on src/*.cpp"
@@ -36,7 +41,7 @@ help:
 	@echo "  make help              Show this help"
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
-setup: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
+setup: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "Setup complete. Run 'make build' to compile."
 
 $(SDK_SENTINEL):
@@ -78,8 +83,21 @@ $(JSON_SENTINEL):
 	     -o vendor/json.hpp
 	@echo "nlohmann/json installed."
 
+$(CATCH2_SENTINEL):
+	@echo "Downloading Catch2 v$(CATCH2_VERSION) (amalgamated)..."
+	@set -euo pipefail; \
+	TMP=$$(mktemp -d); \
+	trap "rm -rf $$TMP" EXIT; \
+	mkdir -p vendor/catch2; \
+	curl -fsSL "https://github.com/catchorg/Catch2/archive/refs/tags/v$(CATCH2_VERSION).tar.gz" \
+	     -o "$$TMP/catch2.tar.gz"; \
+	tar -xzf "$$TMP/catch2.tar.gz" -C "$$TMP/"; \
+	cp "$$TMP/Catch2-$(CATCH2_VERSION)/extras/catch_amalgamated.hpp" vendor/catch2/; \
+	cp "$$TMP/Catch2-$(CATCH2_VERSION)/extras/catch_amalgamated.cpp" vendor/catch2/
+	@echo "Catch2 installed."
+
 # ── Build ─────────────────────────────────────────────────────────────────────
-build: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
+build: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "=== Building xp_wellys_atc ==="
 	cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 	cmake --build build --parallel
@@ -88,7 +106,7 @@ build: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
 	@echo "Done. Run 'make install' to deploy."
 
 # ── REPL (headless CLI) ───────────────────────────────────────────────────────
-repl: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
+repl: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "=== Building atc_repl ==="
 	cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 	cmake --build build --target atc_repl --parallel
@@ -99,8 +117,18 @@ repl: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
 run-repl: repl
 	./build/atc_repl
 
-# ── Scenario batch tests ──────────────────────────────────────────────────────
-test: repl
+# ── Tests ─────────────────────────────────────────────────────────────────────
+test: test-unit test-scenarios
+
+test-unit: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+	@echo "=== Building xp_wellys_atc unit tests ==="
+	cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+	cmake --build build --target xp_wellys_atc_tests --parallel
+	@echo ""
+	@echo "=== Running unit tests ==="
+	@./build/xp_wellys_atc_tests
+
+test-scenarios: repl
 	@echo "=== Running scenario tests ==="
 	./build/atc_repl run testscripts/*.json
 
@@ -144,7 +172,7 @@ format:
 	    exit 1; }
 	clang-format -i src/*.cpp src/*.hpp src/engine/*.cpp src/engine/*.hpp
 
-lint: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
+lint: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@command -v clang-tidy >/dev/null 2>&1 || { \
 	    echo "clang-tidy not found. Install with: brew install llvm"; \
 	    echo "Then add to PATH: export PATH=\"$$(brew --prefix llvm)/bin:$$PATH\""; \
@@ -171,7 +199,7 @@ release:
 	@git push origin "v$(VERSION)"
 	@echo "Released v$(VERSION) and pushed tag to origin."
 
-release-build: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
+release-build: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "=== Building xp_wellys_atc (release) ==="
 	cmake -B build -DCMAKE_BUILD_TYPE=Release -DRELEASE=ON -Wno-dev
 	cmake --build build --parallel

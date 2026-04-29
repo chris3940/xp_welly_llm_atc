@@ -4,6 +4,8 @@ project(xp_wellys_atc CXX OBJCXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(BUILD_TESTS "Build Catch2 unit tests" ON)
+
 # ── Version from VERSION.txt ────────────────────────────────────────────────
 file(READ "${CMAKE_SOURCE_DIR}/VERSION.txt" VERSION_STRING)
 string(STRIP "${VERSION_STRING}" VERSION_STRING)
@@ -149,3 +151,8 @@ endif()
 set_target_properties(atc_repl PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+
+# ── Tests ────────────────────────────────────────────────────────────────────
+if(BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
