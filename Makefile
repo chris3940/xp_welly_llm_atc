@@ -8,6 +8,13 @@ IMGUI_SENTINEL  := vendor/imgui/imgui.h
 JSON_SENTINEL   := vendor/json.hpp
 CATCH2_SENTINEL := vendor/catch2/catch_amalgamated.hpp
 
+# One sentinel for the three submodule trees (whisper.cpp, llama.cpp,
+# Piper). They are all pulled in by a single
+# `git submodule update --init --recursive` invocation, so tracking
+# only the first one is sufficient — if it's missing, the whole
+# submodule init runs and lands all three.
+SUBMODULES_SENTINEL := spikes/spike_whisper/third_party/whisper.cpp/CMakeLists.txt
+
 CATCH2_VERSION := 3.7.1
 
 .PHONY: all help setup build install clean distclean format lint release release-build cleanup-tags cleanup-branches cleanup-runs repl run-repl test test-unit test-scenarios
@@ -22,7 +29,7 @@ help:
 	@echo ""
 	@echo "  make                   Show this help (default)"
 	@echo "  make all               clean + format + build + lint"
-	@echo "  make setup             Download X-Plane SDK, Dear ImGui, nlohmann/json"
+	@echo "  make setup             Init submodules + download X-Plane SDK, Dear ImGui, nlohmann/json, Catch2"
 	@echo "  make build             Build plugin (Release) -> build/xp_wellys_atc.xpl"
 	@echo "  make repl              Build headless CLI -> build/atc_repl"
 	@echo "  make run-repl          Build + run the CLI (stdin transcripts)"
@@ -42,8 +49,23 @@ help:
 	@echo "  make help              Show this help"
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
-setup: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+setup: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "Setup complete. Run 'make build' to compile."
+
+$(SUBMODULES_SENTINEL):
+	@if [ ! -d .git ]; then \
+	    echo "ERROR: not a git checkout - submodules cannot be initialised."; \
+	    echo ""; \
+	    echo "If you downloaded a release ZIP, the third-party sources"; \
+	    echo "(whisper.cpp, llama.cpp, Piper) are not bundled. Re-clone with:"; \
+	    echo ""; \
+	    echo "    git clone --recurse-submodules <repo-url>"; \
+	    echo ""; \
+	    exit 1; \
+	fi
+	@echo "Initialising git submodules (whisper.cpp, llama.cpp, Piper)..."
+	@git submodule update --init --recursive
+	@echo "Submodules ready."
 
 $(SDK_SENTINEL):
 	@echo "Downloading X-Plane SDK..."
@@ -98,7 +120,7 @@ $(CATCH2_SENTINEL):
 	@echo "Catch2 installed."
 
 # ── Build ─────────────────────────────────────────────────────────────────────
-build: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "=== Building xp_wellys_atc ==="
 	cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 	cmake --build build --parallel
@@ -107,7 +129,7 @@ build: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "Done. Run 'make install' to deploy."
 
 # ── REPL (headless CLI) ───────────────────────────────────────────────────────
-repl: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+repl: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "=== Building atc_repl ==="
 	cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 	cmake --build build --target atc_repl --parallel
@@ -121,7 +143,7 @@ run-repl: repl
 # ── Tests ─────────────────────────────────────────────────────────────────────
 test: test-unit test-scenarios
 
-test-unit: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+test-unit: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "=== Building xp_wellys_atc unit tests ==="
 	cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 	cmake --build build --target xp_wellys_atc_tests --parallel
@@ -209,7 +231,7 @@ format:
 	    exit 1; }
 	clang-format -i src/main.cpp src/*/*.cpp src/*/*.hpp
 
-lint: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+lint: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@command -v clang-tidy >/dev/null 2>&1 || { \
 	    echo "clang-tidy not found. Install with: brew install llvm"; \
 	    echo "Then add to PATH: export PATH=\"$$(brew --prefix llvm)/bin:$$PATH\""; \
