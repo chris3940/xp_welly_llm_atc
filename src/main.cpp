@@ -31,13 +31,14 @@
 #include "audio/audio_player.hpp"
 #include "audio/audio_recorder.hpp"
 #include "audio/ptt_input.hpp"
+#include "backends/downloader.hpp"
+#include "backends/loader.hpp"
+#include "backends/manager.hpp"
 #include "core/logging.hpp"
 #include "core/xplane_context.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/airspace_db.hpp"
-#include "openai/gpt_client.hpp"
-#include "openai/tts_client.hpp"
-#include "openai/whisper_client.hpp"
+#include "persistence/model_paths.hpp"
 #include "persistence/settings.hpp"
 #include "ui/atc_ui.hpp"
 
@@ -79,9 +80,7 @@ static float flight_loop_cb(float, float, int, void *) {
   if (++atis_check_counter_ % 60 == 0)
     atis_generator::check_for_update(xplane_context::get());
   ptt_input::update();
-  whisper_client::drain_callback_queue();
-  gpt_client::drain_callback_queue();
-  tts_client::drain_callback_queue();
+  backends::drain_callback_queue();
   atc_session::update();
 
   if (settings::disable_default_atc()) {
@@ -138,9 +137,12 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
   atis_generator::init();
   audio_recorder::init();
   audio_player::init();
-  whisper_client::init();
-  gpt_client::init();
-  tts_client::init();
+  backends::init();
+  // Resolve <plugin>/Resources/{models,espeak-ng-data} paths once.
+  // Both the loader (model SHA256 + backend instantiation) and the
+  // downloader (P5) read these. Initialised before the loader since
+  // the loader walks models_dir() on startup.
+  model_paths::init();
   atc_state_machine::init();
   atc_ui::init();
 
@@ -185,9 +187,10 @@ PLUGIN_API void XPluginStop() {
 
   atc_ui::stop();
   atc_state_machine::stop();
-  tts_client::stop();
-  gpt_client::stop();
-  whisper_client::stop();
+  // backends::stop() joins worker threads + drops registered backends.
+  // Must run before audio_player::stop() so an in-flight TTS callback
+  // does not hand a buffer to a torn-down audio path.
+  backends::stop();
   audio_player::stop();
   audio_recorder::stop();
   atis_generator::stop();
@@ -204,12 +207,28 @@ PLUGIN_API void XPluginStop() {
 PLUGIN_API int XPluginEnable() {
   ptt_input::init();
   atc_session::init();
+  // Kick off the verification + load worker. SHA256 of the 2 GB
+  // llama model takes a few seconds on M1; running this in the
+  // foreground would freeze the X-Plane main thread, so the loader
+  // runs on its own std::thread and writes status into a struct the
+  // UI snapshots each frame. PTT is gated by `Status::all_ready()`,
+  // so the user sees a "models not loaded" message until the worker
+  // succeeds.
+  backends::loader::start();
   return 1;
 }
 
 PLUGIN_API void XPluginDisable() {
   ptt_input::stop();
   atc_session::stop();
+  // Stop downloader first — its worker may call loader::start()
+  // when a download finishes; doing it the other way round risks
+  // re-spawning the loader thread between loader::stop() and the
+  // downloader's last enqueue.
+  backends::downloader::stop();
+  // Joins the verification / load worker before the .xpl unloads —
+  // matches the no-threads-survive-XPluginDisable rule.
+  backends::loader::stop();
 }
 
 PLUGIN_API void XPluginReceiveMessage(XPLMPluginID, int, void *) {}

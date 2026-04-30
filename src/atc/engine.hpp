@@ -28,7 +28,6 @@ struct Input {
   // callbacks it spawns.
   const xplane_context::XPlaneContext *ctx = nullptr;
   std::string pilot_callsign;
-  bool gpt_fallback_enabled = true;
 };
 
 struct Output {
@@ -43,26 +42,26 @@ struct Output {
 
 using Done = std::function<void(Output)>;
 
-// Reset internal counters (profanity warnings, GPT call count). Call from
+// Reset internal counters (profanity warnings, LLM call count). Call from
 // plugin init / re-enable. Separate from the per-call flow so engine has
 // no "stop" phase.
 void reset();
 
-// Number of GPT API calls made since last reset(). Callers that maintain
-// their own aggregate API-call counter (Whisper + TTS + GPT) read this to
-// include engine-initiated calls in the total.
-int gpt_api_calls();
+// Number of LLM inferences kicked off by the engine since last reset()
+// (intent classification, sub-variant disambiguation). Callers that
+// maintain an aggregate inference counter (STT + TTS + LM) add this in.
+int lm_inferences();
 
 // Process a pilot transcript end-to-end:
 //   - quality check (low quality -> say again)
 //   - rule-based intent parse
 //   - INAPPROPRIATE_LANGUAGE interception (escalating warnings)
-//   - departure sub-variant disambiguation via GPT (if enabled)
-//   - state machine invocation with two-stage (direct vs. GPT) routing
+//   - departure sub-variant disambiguation via local LLM (if loaded)
+//   - state machine invocation with two-stage (direct vs. LLM) routing
 //
 // `done` is always called exactly once. On the sync path it runs before
-// process_transcript returns; on the GPT-async path it runs later on the
-// thread that the GPT callback is dispatched on (main thread, via the
+// process_transcript returns; on the LLM-async path it runs later on the
+// thread that the LLM callback is dispatched on (main thread, via the
 // plugin's callback drain).
 void process_transcript(Input in, Done done);
 

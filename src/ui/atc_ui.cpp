@@ -25,10 +25,18 @@
 #include "atc/intent_parser.hpp"
 #include "audio/audio_player.hpp"
 #include "audio/audio_recorder.hpp"
+#include "backends/downloader.hpp"
+#include "backends/loader.hpp"
+#include "backends/manager.hpp"
 #include "core/xplane_context.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/airspace_db.hpp"
+#include "persistence/model_manifest.hpp"
 #include "persistence/settings.hpp"
+
+#include <mach/mach.h>
+#include <mach/task.h>
+#include <mach/task_info.h>
 
 #include <XPLMDataAccess.h>
 #include <XPLMDisplay.h>
@@ -62,18 +70,8 @@ static bool visible = false;
 static bool atc_panel_visible_ = false;
 
 // ImGui persistent buffers
-static char api_key_buf[256] = {};
 static char callsign_raw_buf[64] = {};
-static float save_feedback_timer = 0.0f;
-static bool key_just_saved = false;
 static bool buffers_initialized = false;
-
-static const char *voice_names[] = {"alloy", "echo", "fable",
-                                    "onyx",  "nova", "shimmer"};
-static const int voice_count = 6;
-static int voice_sel_atis = 4;   // default: nova
-static int voice_sel_tower = 3;  // default: onyx
-static int voice_sel_ground = 1; // default: echo
 
 static const char *pattern_dir_names[] = {"left", "right"};
 static int pattern_dir_selection = 0; // default: left
@@ -82,6 +80,108 @@ static const char *flow_region_names[] = {"EU", "US"};
 static int flow_region_selection = 0; // default: EU
 static float region_feedback_timer = 0.0f;
 static char region_feedback_msg[128] = {0};
+
+// ── Helpers: format bytes, resident memory, model state strings ──
+
+static std::string format_bytes(uint64_t b) {
+  // SI-style for sizes the user reads next to disk-space numbers; the
+  // exact base does not matter for a UI hint — picking 1024-based
+  // (binary) kept consistency with `du -h` output the user sees in
+  // Terminal during the manual-fallback download path.
+  char buf[32];
+  if (b < 1024ULL) {
+    std::snprintf(buf, sizeof(buf), "%llu B",
+                  static_cast<unsigned long long>(b));
+  } else if (b < 1024ULL * 1024) {
+    std::snprintf(buf, sizeof(buf), "%.1f KB", static_cast<double>(b) / 1024.0);
+  } else if (b < 1024ULL * 1024 * 1024) {
+    std::snprintf(buf, sizeof(buf), "%.1f MB",
+                  static_cast<double>(b) / 1024.0 / 1024.0);
+  } else {
+    std::snprintf(buf, sizeof(buf), "%.2f GB",
+                  static_cast<double>(b) / 1024.0 / 1024.0 / 1024.0);
+  }
+  return buf;
+}
+
+// Resident set size in bytes via Mach. Polled at most once a second
+// from the Models tab — the call itself is cheap (microseconds) but
+// not worth running every frame.
+static uint64_t resident_bytes() {
+  mach_task_basic_info_data_t info{};
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+    return info.resident_size;
+  }
+  return 0;
+}
+
+static const char *file_state_label(backends::loader::FileState s) {
+  using FS = backends::loader::FileState;
+  switch (s) {
+  case FS::NotChecked:
+    return "Not checked";
+  case FS::Missing:
+    return "Missing";
+  case FS::SizeMismatch:
+    return "Wrong size";
+  case FS::Verifying:
+    return "Verifying";
+  case FS::HashMismatch:
+    return "Corrupt";
+  case FS::Verified:
+    return "Verified";
+  case FS::Loading:
+    return "Loading";
+  case FS::Ready:
+    return "Ready";
+  case FS::LoadError:
+    return "Load error";
+  }
+  return "?";
+}
+
+static ImVec4 file_state_color(backends::loader::FileState s) {
+  using FS = backends::loader::FileState;
+  switch (s) {
+  case FS::Ready:
+    return ImVec4(0.4f, 1.0f, 0.4f, 1.0f); // green
+  case FS::Verifying:
+  case FS::Loading:
+    return ImVec4(1.0f, 0.8f, 0.2f, 1.0f); // amber
+  case FS::Missing:
+  case FS::SizeMismatch:
+  case FS::HashMismatch:
+  case FS::LoadError:
+    return ImVec4(1.0f, 0.4f, 0.2f, 1.0f); // red
+  default:
+    return ImVec4(0.7f, 0.7f, 0.7f, 1.0f); // grey
+  }
+}
+
+static const char *download_state_label(backends::downloader::State s) {
+  using DS = backends::downloader::State;
+  switch (s) {
+  case DS::Idle:
+    return "";
+  case DS::Queued:
+    return "Queued";
+  case DS::Downloading:
+    return "Downloading";
+  case DS::Verifying:
+    return "Verifying";
+  case DS::Done:
+    return "Done";
+  case DS::Failed:
+    return "Failed";
+  case DS::Cancelled:
+    return "Cancelled";
+  case DS::InsufficientDisk:
+    return "No disk space";
+  }
+  return "";
+}
 
 // ── Time ─────────────────────────────────────────────────────────
 static double last_frame_time_ = 0.0;
@@ -223,6 +323,27 @@ static void draw_nearby_airports() {
 // ── Tab drawing ──────────────────────────────────────────────────
 
 static void draw_status_tab() {
+  // Models-not-ready banner. PTT is hard-gated on all three backends
+  // being registered, so the user sees nothing happen if they hit
+  // the key before models load. Surface that explicitly here and
+  // point at the Models tab.
+  {
+    auto status = backends::loader::snapshot();
+    if (!status.all_ready()) {
+      ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.4f, 0.1f, 0.1f, 0.6f));
+      ImGui::BeginChild(
+          "##model_banner",
+          ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 2 + 8), true);
+      ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                         "Local inference models not ready — PTT disabled.");
+      ImGui::TextDisabled(
+          "Open the Models tab to download / verify (~2.0 GB total).");
+      ImGui::EndChild();
+      ImGui::PopStyleColor();
+      ImGui::Spacing();
+    }
+  }
+
   // PTT State
   auto ptt = atc_session::ptt_state();
   std::string label = atc_session::ptt_state_label();
@@ -377,14 +498,213 @@ static void draw_status_tab() {
 
   // Session stats
   ImGui::Separator();
-  ImGui::Text("Session: %d transcriptions, %d API calls",
+  ImGui::Text("Session: %d transcriptions, %d inferences",
               atc_session::total_transcriptions(),
               atc_session::total_api_calls());
+}
 
-  // Warning indicators
-  if (!settings::api_key_saved()) {
-    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.0f, 1.0f), "[!] API key not set");
+// Models tab — lifecycle UI for the three local inference models.
+// Shows per-file state (Missing / Verifying / Ready / etc.), the
+// expected size + SHA256 hint, and a single contextual action
+// button per row whose verb depends on the current state.
+//
+// RAM usage and per-stage inference latency live at the bottom for
+// live tuning during dev sessions; both are read-only.
+static void draw_models_tab() {
+  auto loader_status = backends::loader::snapshot();
+  auto downloads = backends::downloader::snapshot();
+
+  // ── Top summary: where files live + free disk + still-required ──
+  ImGui::TextDisabled("Models live in <plugin>/Resources/models/");
+  uint64_t free_b = backends::downloader::free_space_bytes();
+  uint64_t need_b = backends::downloader::bytes_still_required();
+  if (need_b == 0) {
+    ImGui::Text("All files present. Free disk: %s",
+                format_bytes(free_b).c_str());
+  } else {
+    bool low_disk = free_b < need_b + (50ULL * 1024 * 1024); // 50 MB slack
+    if (low_disk) {
+      ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                         "Need %s — only %s free on this volume!",
+                         format_bytes(need_b).c_str(),
+                         format_bytes(free_b).c_str());
+    } else {
+      ImGui::Text("Still need: %s   |   Free disk: %s",
+                  format_bytes(need_b).c_str(), format_bytes(free_b).c_str());
+    }
   }
+  ImGui::Spacing();
+
+  // ── Bulk action: download all missing ──
+  bool any_pending_or_active = false;
+  for (const auto &d : downloads) {
+    using DS = backends::downloader::State;
+    if (d.state == DS::Queued || d.state == DS::Downloading ||
+        d.state == DS::Verifying) {
+      any_pending_or_active = true;
+      break;
+    }
+  }
+  if (need_b > 0) {
+    if (any_pending_or_active) {
+      ImGui::BeginDisabled();
+      ImGui::Button("Download all missing");
+      ImGui::EndDisabled();
+      ImGui::SameLine();
+      ImGui::TextDisabled("(download in progress)");
+    } else {
+      if (ImGui::Button("Download all missing")) {
+        backends::downloader::enqueue_all_missing();
+      }
+    }
+  } else {
+    if (ImGui::Button("Re-verify all")) {
+      backends::loader::start();
+    }
+  }
+  ImGui::SameLine();
+  ImGui::TextDisabled(
+      "HuggingFace HTTPS, resumable. 5–30 min on typical home internet.");
+
+  ImGui::Separator();
+
+  // ── Per-file rows ──
+  // Iterate the manifest (authoritative) and stitch in loader state +
+  // download progress by Kind.
+  const auto &manifest = model_manifest::all();
+  for (size_t i = 0; i < manifest.size(); ++i) {
+    const auto &m = manifest[i];
+    backends::loader::FileStatus loader_fs{
+        m.kind, backends::loader::FileState::NotChecked, ""};
+    for (const auto &fs : loader_status.files) {
+      if (fs.kind == m.kind) {
+        loader_fs = fs;
+        break;
+      }
+    }
+    backends::downloader::Progress dl{};
+    dl.kind = m.kind;
+    if (i < downloads.size() && downloads[i].kind == m.kind) {
+      dl = downloads[i];
+    } else {
+      for (const auto &d : downloads) {
+        if (d.kind == m.kind) {
+          dl = d;
+          break;
+        }
+      }
+    }
+
+    ImGui::PushID(static_cast<int>(i));
+
+    // Row header: filename + state badge
+    ImGui::Text("%s", m.display_name.c_str());
+    ImGui::SameLine();
+    ImGui::TextColored(file_state_color(loader_fs.state), "[%s]",
+                       file_state_label(loader_fs.state));
+
+    // Live download line (if active)
+    using DS = backends::downloader::State;
+    if (dl.state == DS::Downloading) {
+      float frac = dl.bytes_total > 0
+                       ? static_cast<float>(dl.bytes_downloaded) /
+                             static_cast<float>(dl.bytes_total)
+                       : 0.0f;
+      char overlay[64];
+      std::snprintf(overlay, sizeof(overlay), "%s / %s",
+                    format_bytes(dl.bytes_downloaded).c_str(),
+                    format_bytes(dl.bytes_total).c_str());
+      ImGui::ProgressBar(frac, ImVec2(-1.0f, 0.0f), overlay);
+    } else if (dl.state == DS::Queued) {
+      ImGui::TextDisabled("Queued — waiting for previous download to finish");
+    } else if (dl.state == DS::Verifying) {
+      ImGui::TextDisabled("Verifying SHA256…");
+    } else if (dl.state == DS::Failed || dl.state == DS::InsufficientDisk) {
+      ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.2f, 1.0f), "%s: %s",
+                         download_state_label(dl.state),
+                         dl.error_message.c_str());
+    }
+
+    // Compact metadata: size + first 8 hex of SHA256
+    ImGui::TextDisabled("   %s · sha256 %s…  · %s",
+                        format_bytes(m.size_bytes).c_str(),
+                        m.sha256_hex.substr(0, 8).c_str(), m.filename.c_str());
+
+    // Loader-side messages (verify errors, load errors)
+    if (!loader_fs.message.empty() &&
+        loader_fs.state != backends::loader::FileState::Verifying &&
+        loader_fs.state != backends::loader::FileState::Loading) {
+      ImGui::TextWrapped("   %s", loader_fs.message.c_str());
+    }
+
+    // Action buttons: contextual to current state. We keep this a
+    // single button per row to avoid a wall of buttons that confuse
+    // first-time users.
+    using FS = backends::loader::FileState;
+    if (dl.state == DS::Downloading || dl.state == DS::Queued ||
+        dl.state == DS::Verifying) {
+      if (ImGui::Button("Cancel")) {
+        backends::downloader::cancel(m.kind);
+      }
+    } else if (loader_fs.state == FS::Missing ||
+               loader_fs.state == FS::SizeMismatch ||
+               loader_fs.state == FS::HashMismatch) {
+      if (ImGui::Button("Download")) {
+        backends::downloader::enqueue(m.kind);
+      }
+    } else if (loader_fs.state == FS::LoadError) {
+      if (ImGui::Button("Re-download")) {
+        backends::downloader::enqueue(m.kind);
+      }
+    } else if (loader_fs.state == FS::Ready) {
+      if (ImGui::Button("Re-verify")) {
+        backends::loader::start();
+      }
+    } else if (loader_fs.state == FS::NotChecked ||
+               loader_fs.state == FS::Verifying ||
+               loader_fs.state == FS::Loading ||
+               loader_fs.state == FS::Verified) {
+      ImGui::BeginDisabled();
+      ImGui::Button("…");
+      ImGui::EndDisabled();
+    }
+
+    ImGui::PopID();
+    ImGui::Separator();
+  }
+
+  // ── Footer: backend readiness + RAM + per-stage latency ──
+  ImGui::Spacing();
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Backend status");
+  auto badge = [](const char *name, bool ready) {
+    ImGui::Text("%s", name);
+    ImGui::SameLine();
+    if (ready)
+      ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Ready");
+    else
+      ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "Not loaded");
+  };
+  badge("  STT (whisper.cpp):", backends::stt_ready());
+  badge("  LM  (llama.cpp):  ", backends::lm_ready());
+  badge("  TTS (Piper):      ", backends::tts_ready());
+
+  ImGui::Spacing();
+  // RAM polling: cache for 1 s so we don't tax mach every frame.
+  static uint64_t cached_rss_ = 0;
+  static double rss_last_refresh_ = -1.0;
+  double now_sec = static_cast<double>(ImGui::GetTime());
+  if (rss_last_refresh_ < 0 || (now_sec - rss_last_refresh_) > 1.0) {
+    cached_rss_ = resident_bytes();
+    rss_last_refresh_ = now_sec;
+  }
+  ImGui::Text("RAM resident: %s", format_bytes(cached_rss_).c_str());
+
+  // Per-stage latency: 0 while no inference has run yet.
+  uint32_t stt_ms = backends::last_stt_ms();
+  uint32_t lm_ms = backends::last_lm_ms();
+  uint32_t tts_ms = backends::last_tts_ms();
+  ImGui::Text("Last inference (ms): STT %u · LM %u · TTS %u", stt_ms, lm_ms,
+              tts_ms);
 }
 
 static void draw_transcript_tab() {
@@ -527,22 +847,12 @@ static void draw_audio_tab() {
 
   ImGui::Separator();
 
-  // ── TTS Voices ──────────────────────────────────────────────────
+  // ── TTS ─────────────────────────────────────────────────────────
+  // Voice selection is no longer per-frequency: the plugin ships with
+  // a single Piper voice (en_US-lessac-medium). ATIS speaks slower via
+  // length_scale; tower/ground use the same voice at normal rate.
   ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Text-to-Speech");
-  ImGui::Spacing();
-  if (ImGui::Combo("ATIS Voice", &voice_sel_atis, voice_names, voice_count)) {
-    settings::set_tts_voice_atis(voice_names[voice_sel_atis]);
-    settings::save();
-  }
-  if (ImGui::Combo("Tower Voice", &voice_sel_tower, voice_names, voice_count)) {
-    settings::set_tts_voice_tower(voice_names[voice_sel_tower]);
-    settings::save();
-  }
-  if (ImGui::Combo("Ground Voice", &voice_sel_ground, voice_names,
-                   voice_count)) {
-    settings::set_tts_voice_ground(voice_names[voice_sel_ground]);
-    settings::save();
-  }
+  ImGui::TextDisabled("Voice: en_US-lessac-medium (Piper, local)");
 }
 
 static void draw_settings_tab() {
@@ -550,69 +860,12 @@ static void draw_settings_tab() {
   if (!buffers_initialized) {
     std::strncpy(callsign_raw_buf, settings::pilot_callsign_raw().c_str(),
                  sizeof(callsign_raw_buf) - 1);
-    auto init_voice_sel = [](const std::string &voice, int &sel) {
-      for (int i = 0; i < voice_count; ++i) {
-        if (voice == voice_names[i]) {
-          sel = i;
-          break;
-        }
-      }
-    };
-    init_voice_sel(settings::tts_voice_atis(), voice_sel_atis);
-    init_voice_sel(settings::tts_voice_tower(), voice_sel_tower);
-    init_voice_sel(settings::tts_voice_ground(), voice_sel_ground);
     std::string pdir = settings::pattern_direction();
     pattern_dir_selection = (pdir == "right") ? 1 : 0;
     std::string region = settings::flow_region();
     flow_region_selection = (region == "US") ? 1 : 0;
     buffers_initialized = true;
   }
-
-  // API Key
-  ImGui::Text("OpenAI API Key:");
-  ImGui::InputText("##apikey", api_key_buf, sizeof(api_key_buf),
-                   ImGuiInputTextFlags_Password);
-  ImGui::SameLine();
-  if (ImGui::Button("Paste")) {
-    // NOLINTNEXTLINE(bugprone-command-processor)
-    FILE *fp = popen("pbpaste", "r");
-    if (fp) {
-      char clip[256] = {};
-      if (fgets(clip, sizeof(clip), fp)) {
-        // Strip trailing newline
-        size_t len = std::strlen(clip);
-        if (len > 0 && clip[len - 1] == '\n')
-          clip[len - 1] = '\0';
-        std::strncpy(api_key_buf, clip, sizeof(api_key_buf) - 1);
-      }
-      pclose(fp);
-    }
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Save Key")) {
-    if (settings::save_api_key(api_key_buf)) {
-      key_just_saved = true;
-      save_feedback_timer = 2.0f;
-      std::memset(api_key_buf, 0, sizeof(api_key_buf));
-    }
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Delete Key")) {
-    settings::delete_api_key();
-    std::memset(api_key_buf, 0, sizeof(api_key_buf));
-  }
-  if (key_just_saved && save_feedback_timer > 0.0f) {
-    ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0, 1, 0, 1), "Saved (OK)");
-    save_feedback_timer -= ImGui::GetIO().DeltaTime;
-    if (save_feedback_timer <= 0.0f)
-      key_just_saved = false;
-  } else if (settings::api_key_saved()) {
-    ImGui::SameLine();
-    ImGui::TextDisabled("(Key stored in Keychain)");
-  }
-
-  ImGui::Separator();
 
   // PTT — bound via X-Plane settings
   ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Push-to-Talk");
@@ -664,12 +917,6 @@ static void draw_settings_tab() {
     ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s",
                        region_feedback_msg);
     region_feedback_timer -= ImGui::GetIO().DeltaTime;
-  }
-
-  // GPT Fallback
-  bool gpt_fb = settings::gpt_fallback_enabled();
-  if (ImGui::Checkbox("GPT Fallback", &gpt_fb)) {
-    settings::set_gpt_fallback_enabled(gpt_fb);
   }
 
   // Debug logging
@@ -1514,6 +1761,24 @@ static int draw_phase_cb(XPLMDrawingPhase, int, void *) {
       if (ImGui::BeginTabBar("MainTabs")) {
         if (ImGui::BeginTabItem("Status")) {
           draw_status_tab();
+          ImGui::EndTabItem();
+        }
+        // "Models" sits second so first-launch users see it
+        // immediately after Status — they cannot use the plugin
+        // until they download here.
+        bool models_attention = !backends::loader::snapshot().all_ready();
+        if (models_attention) {
+          // Highlight the tab label so it's obvious where to go on
+          // a fresh install.
+          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.7f, 0.2f, 1.0f));
+        }
+        bool models_open =
+            ImGui::BeginTabItem(models_attention ? "Models  (!)" : "Models");
+        if (models_attention) {
+          ImGui::PopStyleColor();
+        }
+        if (models_open) {
+          draw_models_tab();
           ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Transcript")) {

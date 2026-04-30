@@ -22,8 +22,6 @@
 #include <XPLMSound.h>
 #include <XPLMUtilities.h>
 
-#include <AudioToolbox/AudioToolbox.h>
-
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -109,138 +107,6 @@ static void play_pcm16(std::vector<int16_t> pcm16, int freq_hz, int channels,
         active_pcm16_.size() / channels, freq_hz, bus_name);
     XPLMDebugString(log);
   }
-}
-
-// ── MP3 decode via AudioToolbox ──────────────────────────────────
-
-struct AudioFileReadContext {
-  const uint8_t *data;
-  size_t size;
-};
-
-static OSStatus audio_file_read_proc(void *inClientData, SInt64 inPosition,
-                                     UInt32 requestCount, void *buffer,
-                                     UInt32 *actualCount) {
-  auto *ctx = static_cast<AudioFileReadContext *>(inClientData);
-  if (inPosition >= static_cast<SInt64>(ctx->size)) {
-    *actualCount = 0;
-    return noErr;
-  }
-  size_t avail = ctx->size - static_cast<size_t>(inPosition);
-  size_t to_read = (requestCount < avail) ? requestCount : avail;
-  std::memcpy(buffer, ctx->data + inPosition, to_read);
-  *actualCount = static_cast<UInt32>(to_read);
-  return noErr;
-}
-
-static SInt64 audio_file_get_size_proc(void *inClientData) {
-  auto *ctx = static_cast<AudioFileReadContext *>(inClientData);
-  return static_cast<SInt64>(ctx->size);
-}
-
-static bool decode_mp3_to_pcm16(const std::vector<uint8_t> &mp3_data,
-                                std::vector<int16_t> &out_pcm,
-                                int &out_channels, int &out_sample_rate) {
-  AudioFileReadContext ctx{mp3_data.data(), mp3_data.size()};
-
-  AudioFileID audio_file = nullptr;
-  OSStatus err = AudioFileOpenWithCallbacks(&ctx, audio_file_read_proc, nullptr,
-                                            audio_file_get_size_proc, nullptr,
-                                            kAudioFileMP3Type, &audio_file);
-  if (err != noErr) {
-    char log[128];
-    std::snprintf(log, sizeof(log),
-                  "[xp_wellys_atc] MP3 AudioFileOpen failed: %d\n",
-                  static_cast<int>(err));
-    XPLMDebugString(log);
-    return false;
-  }
-
-  AudioStreamBasicDescription src_fmt{};
-  UInt32 fmt_size = sizeof(src_fmt);
-  err = AudioFileGetProperty(audio_file, kAudioFilePropertyDataFormat,
-                             &fmt_size, &src_fmt);
-  if (err != noErr) {
-    AudioFileClose(audio_file);
-    return false;
-  }
-
-  ExtAudioFileRef ext_file = nullptr;
-  err = ExtAudioFileWrapAudioFileID(audio_file, false, &ext_file);
-  if (err != noErr) {
-    AudioFileClose(audio_file);
-    return false;
-  }
-
-  // Decode to int16 PCM (native FMOD_SOUND_FORMAT_PCM16)
-  AudioStreamBasicDescription dst_fmt{};
-  dst_fmt.mSampleRate = src_fmt.mSampleRate;
-  dst_fmt.mFormatID = kAudioFormatLinearPCM;
-  dst_fmt.mFormatFlags =
-      kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
-  dst_fmt.mBitsPerChannel = 16;
-  dst_fmt.mChannelsPerFrame = src_fmt.mChannelsPerFrame;
-  dst_fmt.mBytesPerFrame = sizeof(int16_t) * dst_fmt.mChannelsPerFrame;
-  dst_fmt.mFramesPerPacket = 1;
-  dst_fmt.mBytesPerPacket = dst_fmt.mBytesPerFrame;
-
-  err =
-      ExtAudioFileSetProperty(ext_file, kExtAudioFileProperty_ClientDataFormat,
-                              sizeof(dst_fmt), &dst_fmt);
-  if (err != noErr) {
-    ExtAudioFileDispose(ext_file);
-    AudioFileClose(audio_file);
-    return false;
-  }
-
-  SInt64 total_frames = 0;
-  UInt32 prop_size = sizeof(total_frames);
-  ExtAudioFileGetProperty(ext_file, kExtAudioFileProperty_FileLengthFrames,
-                          &prop_size, &total_frames);
-
-  if (total_frames <= 0) {
-    ExtAudioFileDispose(ext_file);
-    AudioFileClose(audio_file);
-    return false;
-  }
-
-  out_pcm.resize(static_cast<size_t>(total_frames) * src_fmt.mChannelsPerFrame);
-
-  UInt32 frames_to_read = static_cast<UInt32>(total_frames);
-  AudioBufferList buf_list{};
-  buf_list.mNumberBuffers = 1;
-  buf_list.mBuffers[0].mNumberChannels = dst_fmt.mChannelsPerFrame;
-  buf_list.mBuffers[0].mDataByteSize =
-      static_cast<UInt32>(out_pcm.size() * sizeof(int16_t));
-  buf_list.mBuffers[0].mData = out_pcm.data();
-
-  err = ExtAudioFileRead(ext_file, &frames_to_read, &buf_list);
-  ExtAudioFileDispose(ext_file);
-  AudioFileClose(audio_file);
-
-  if (err != noErr) {
-    char log[128];
-    std::snprintf(log, sizeof(log),
-                  "[xp_wellys_atc] ExtAudioFileRead failed: %d\n",
-                  static_cast<int>(err));
-    XPLMDebugString(log);
-    return false;
-  }
-
-  out_pcm.resize(static_cast<size_t>(frames_to_read) *
-                 src_fmt.mChannelsPerFrame);
-  out_channels = static_cast<int>(src_fmt.mChannelsPerFrame);
-  out_sample_rate = static_cast<int>(src_fmt.mSampleRate);
-
-  if (settings::debug_logging()) {
-    char log[128];
-    std::snprintf(
-        log, sizeof(log),
-        "[xp_wellys_atc][DEBUG] MP3 decoded: %u frames, %d ch, %d Hz\n",
-        frames_to_read, out_channels, out_sample_rate);
-    XPLMDebugString(log);
-  }
-  return true;
 }
 
 // ── WAV decode (PCM16 only) ───────────────────────────────────────
@@ -370,25 +236,23 @@ void play_ptt_click() {
              bus);
 }
 
-// ── MP3 playback (ATC responses → radio bus) ────────────────────
+// ── PCM playback (Piper TTS → radio bus) ────────────────────────
 
-void play(const std::vector<uint8_t> &mp3_data, float volume) {
-  if (mp3_data.empty()) {
-    XPLMDebugString("[xp_wellys_atc] play() called with empty MP3\n");
+void play_pcm(std::vector<int16_t> pcm16, uint32_t sample_rate_hz, int channels,
+              float volume) {
+  if (pcm16.empty()) {
+    XPLMDebugString("[xp_wellys_atc] play_pcm() called with empty buffer\n");
     return;
   }
-
-  std::vector<int16_t> pcm16;
-  int channels = 0;
-  int sample_rate = 0;
-  if (!decode_mp3_to_pcm16(mp3_data, pcm16, channels, sample_rate)) {
-    XPLMDebugString("[xp_wellys_atc] MP3 decode failed\n");
+  if (sample_rate_hz == 0 || channels < 1) {
+    XPLMDebugString("[xp_wellys_atc] play_pcm() called with invalid format\n");
     return;
   }
 
   XPLMAudioBus bus =
       (settings::active_com() == 2) ? xplm_AudioRadioCom2 : xplm_AudioRadioCom1;
-  play_pcm16(std::move(pcm16), sample_rate, channels, volume, bus);
+  play_pcm16(std::move(pcm16), static_cast<int>(sample_rate_hz), channels,
+             volume, bus);
 }
 
 // ── WAV playback (test → UI bus, always audible) ────────────────

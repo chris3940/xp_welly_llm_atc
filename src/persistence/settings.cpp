@@ -27,31 +27,15 @@
 #include <XPLMUtilities.h>
 #include <json.hpp>
 
-#if defined(__APPLE__)
-#include <Security/Security.h>
-#endif
-
 namespace settings {
 
 using json = nlohmann::json;
 
 static json cfg;
-static std::string cached_api_key;
 static std::string data_dir_path;
 
-static const char *kKeychainService = "xp_wellys_atc";
-static const char *kKeychainAccount = "openai_api_key";
-
 static json default_config() {
-  return {{"api_key_saved", false},
-          {"tts_voice_atis", "nova"},
-          {"tts_voice_tower", "onyx"},
-          {"tts_voice_ground", "echo"},
-          {"tts_model", "tts-1"},
-          {"whisper_model", "whisper-1"},
-          {"gpt_model", "gpt-4o-mini"},
-          {"gpt_fallback_enabled", true},
-          {"pilot_callsign_raw", ""},
+  return {{"pilot_callsign_raw", ""},
           {"pilot_callsign", ""},
           {"active_com", 1},
           {"volume", 1.0},
@@ -67,6 +51,15 @@ static json default_config() {
           {"window_w", -1.0},
           {"window_h", -1.0}};
 }
+
+// Strip OpenAI-era keys that previous plugin versions wrote into
+// settings.json. We never read them again; clearing them keeps the file
+// tidy when the user upgrades.
+static const char *kLegacyKeys[] = {
+    "api_key_saved",   "tts_voice",        "tts_voice_atis",
+    "tts_voice_tower", "tts_voice_ground", "tts_model",
+    "whisper_model",   "gpt_model",        "gpt_fallback_enabled",
+};
 
 void init() {
   // Resolve plugin path to find data/ directory
@@ -104,6 +97,7 @@ void init() {
 
   std::string json_path = data_dir_path + "/settings.json";
   std::ifstream in(json_path);
+  bool needs_save = false;
   if (in.good()) {
     try {
       in >> cfg;
@@ -118,29 +112,21 @@ void init() {
       XPLMDebugString("[xp_wellys_atc] Warning: failed to parse settings.json, "
                       "using defaults\n");
       cfg = default_config();
+      needs_save = true;
     }
   } else {
     cfg = default_config();
-    save();
+    needs_save = true;
   }
 
-  // Migrate old tts_voice → tts_voice_tower
-  if (cfg.contains("tts_voice") && !cfg.contains("tts_voice_tower")) {
-    cfg["tts_voice_tower"] = cfg["tts_voice"];
-    cfg.erase("tts_voice");
-    save();
-  } else if (cfg.contains("tts_voice")) {
-    cfg.erase("tts_voice");
-  }
-
-  if (cfg.value("api_key_saved", false)) {
-    cached_api_key = load_api_key();
-    if (cached_api_key.empty()) {
-      XPLMDebugString("[xp_wellys_atc] Warning: api_key_saved flag set but "
-                      "Keychain load failed\n");
-      cfg["api_key_saved"] = false;
+  for (const char *legacy : kLegacyKeys) {
+    if (cfg.contains(legacy)) {
+      cfg.erase(legacy);
+      needs_save = true;
     }
   }
+  if (needs_save)
+    save();
 
   XPLMDebugString("[xp_wellys_atc] Settings loaded\n");
 }
@@ -170,102 +156,8 @@ void save() {
   }
 }
 
-// --- Keychain ---
-
-#if defined(__APPLE__)
-
-bool save_api_key(const std::string &key) {
-  SecKeychainItemRef item_ref = nullptr;
-  OSStatus status = SecKeychainFindGenericPassword(
-      nullptr, static_cast<UInt32>(strlen(kKeychainService)), kKeychainService,
-      static_cast<UInt32>(strlen(kKeychainAccount)), kKeychainAccount, nullptr,
-      nullptr, &item_ref);
-
-  if (status == errSecSuccess && item_ref) {
-    status = SecKeychainItemModifyAttributesAndData(
-        item_ref, nullptr, static_cast<UInt32>(key.size()), key.c_str());
-    CFRelease(item_ref);
-  } else {
-    status = SecKeychainAddGenericPassword(
-        nullptr, static_cast<UInt32>(strlen(kKeychainService)),
-        kKeychainService, static_cast<UInt32>(strlen(kKeychainAccount)),
-        kKeychainAccount, static_cast<UInt32>(key.size()), key.c_str(),
-        nullptr);
-  }
-
-  if (status == errSecSuccess) {
-    cached_api_key = key;
-    cfg["api_key_saved"] = true;
-    save();
-    return true;
-  }
-  XPLMDebugString(
-      "[xp_wellys_atc] Error: failed to save API key to Keychain\n");
-  return false;
-}
-
-std::string load_api_key() {
-  UInt32 pw_len = 0;
-  void *pw_data = nullptr;
-  OSStatus status = SecKeychainFindGenericPassword(
-      nullptr, static_cast<UInt32>(strlen(kKeychainService)), kKeychainService,
-      static_cast<UInt32>(strlen(kKeychainAccount)), kKeychainAccount, &pw_len,
-      &pw_data, nullptr);
-
-  if (status == errSecSuccess && pw_data) {
-    std::string result(static_cast<char *>(pw_data), pw_len);
-    SecKeychainItemFreeContent(nullptr, pw_data);
-    return result;
-  }
-  return "";
-}
-
-void delete_api_key() {
-  SecKeychainItemRef item_ref = nullptr;
-  OSStatus status = SecKeychainFindGenericPassword(
-      nullptr, static_cast<UInt32>(strlen(kKeychainService)), kKeychainService,
-      static_cast<UInt32>(strlen(kKeychainAccount)), kKeychainAccount, nullptr,
-      nullptr, &item_ref);
-
-  if (status == errSecSuccess && item_ref) {
-    SecKeychainItemDelete(item_ref);
-    CFRelease(item_ref);
-  }
-  cached_api_key.clear();
-  cfg["api_key_saved"] = false;
-  save();
-}
-
-#else
-
-bool save_api_key(const std::string &) { return false; }
-std::string load_api_key() { return ""; }
-void delete_api_key() {}
-
-#endif
-
-std::string get_api_key() { return cached_api_key; }
-
 // --- Getters ---
 
-bool api_key_saved() { return cfg.value("api_key_saved", false); }
-std::string tts_voice_atis() {
-  return cfg.value("tts_voice_atis", std::string("nova"));
-}
-std::string tts_voice_tower() {
-  return cfg.value("tts_voice_tower", std::string("onyx"));
-}
-std::string tts_voice_ground() {
-  return cfg.value("tts_voice_ground", std::string("echo"));
-}
-std::string tts_model() { return cfg.value("tts_model", std::string("tts-1")); }
-std::string whisper_model() {
-  return cfg.value("whisper_model", std::string("whisper-1"));
-}
-std::string gpt_model() {
-  return cfg.value("gpt_model", std::string("gpt-4o-mini"));
-}
-bool gpt_fallback_enabled() { return cfg.value("gpt_fallback_enabled", true); }
 std::string pilot_callsign_raw() {
   return cfg.value("pilot_callsign_raw", std::string(""));
 }
@@ -301,9 +193,6 @@ std::string flow_region() {
 
 // --- Setters ---
 
-void set_tts_voice_atis(const std::string &v) { cfg["tts_voice_atis"] = v; }
-void set_tts_voice_tower(const std::string &v) { cfg["tts_voice_tower"] = v; }
-void set_tts_voice_ground(const std::string &v) { cfg["tts_voice_ground"] = v; }
 // ── ICAO phonetic alphabet conversion ───────────────────────────
 
 static const char *phonetic_letter(char c) {
@@ -348,7 +237,6 @@ void set_pilot_callsign_raw(const std::string &raw) {
   cfg["pilot_callsign"] = to_icao_phonetic(raw);
 }
 void set_volume(float v) { cfg["volume"] = v; }
-void set_gpt_fallback_enabled(bool v) { cfg["gpt_fallback_enabled"] = v; }
 void set_debug_logging(bool v) { cfg["debug_logging"] = v; }
 void set_active_com(int com) { cfg["active_com"] = com; }
 void set_pattern_direction(const std::string &v) {

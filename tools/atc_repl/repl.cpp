@@ -130,7 +130,6 @@ void cmd_say(const std::string &callsign, const std::string &rest) {
       /*quality=*/1.0f,
       /*ctx=*/&xplane_context::g_cli_ctx,
       /*pilot_callsign=*/callsign,
-      /*gpt_fallback_enabled=*/false,
   };
   engine::process_transcript(std::move(in), [](engine::Output out) {
     std::printf("PILOT : %s\n", out.parsed.raw_transcript.c_str());

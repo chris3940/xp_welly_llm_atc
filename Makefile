@@ -138,11 +138,47 @@ install:
 	@if [ ! -f "build/xp_wellys_atc.xpl" ]; then \
 	    echo "Plugin not built yet. Run 'make build' first."; exit 1; \
 	fi
+	@if [ ! -f "build/libpiper.dylib" ] || [ ! -f "build/libonnxruntime.1.22.0.dylib" ]; then \
+	    echo "Runtime dylibs missing in build/. Did 'make build' succeed?"; exit 1; \
+	fi
 	@echo "=== Installing xp_wellys_atc ==="
 	@mkdir -p "$(PLUGIN_DIR)/mac_x64"
 	@cp build/xp_wellys_atc.xpl "$(PLUGIN_DIR)/mac_x64/"
+	@cp build/libpiper.dylib "$(PLUGIN_DIR)/mac_x64/"
+	@cp build/libonnxruntime.1.22.0.dylib "$(PLUGIN_DIR)/mac_x64/"
+	@cp build/libonnxruntime.dylib "$(PLUGIN_DIR)/mac_x64/"
 	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl" 2>/dev/null || true
+	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/mac_x64/libpiper.dylib" 2>/dev/null || true
+	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/mac_x64/libonnxruntime.1.22.0.dylib" 2>/dev/null || true
+	@# Strip the dev-time rpaths (build/, source-tree onnxruntime path)
+	@# baked in by CMake and replace with @loader_path so the .xpl finds
+	@# the dylibs we just copied next to it.
+	@for rp in $$(otool -l "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl" \
+	    | awk '/LC_RPATH/{flag=1; next} flag && /path/ {print $$2; flag=0}'); do \
+	    install_name_tool -delete_rpath "$$rp" "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl" 2>/dev/null || true; \
+	done
+	@install_name_tool -add_rpath "@loader_path" "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl"
+	@codesign --force --deep --sign - "$(PLUGIN_DIR)/mac_x64/libonnxruntime.1.22.0.dylib"
+	@codesign --force --deep --sign - "$(PLUGIN_DIR)/mac_x64/libpiper.dylib"
 	@codesign --force --deep --sign - "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl"
+	@# Bundle espeak-ng-data (~19 MB) inside the plugin so Piper's
+	@# phonemizer finds its dictionary at runtime via the plugin-relative
+	@# path resolved by model_paths::espeakng_data_dir(). Models live in
+	@# Resources/models/ and are downloaded by the user on first launch
+	@# (P5); espeak-ng-data is part of the .xpl bundle, NOT downloaded.
+	@if [ -d "build/espeak_ng-install/share/espeak-ng-data" ]; then \
+	    mkdir -p "$(PLUGIN_DIR)/Resources/espeak-ng-data"; \
+	    rsync -a --delete \
+	        "build/espeak_ng-install/share/espeak-ng-data/" \
+	        "$(PLUGIN_DIR)/Resources/espeak-ng-data/"; \
+	    echo "Installed: $(PLUGIN_DIR)/Resources/espeak-ng-data/"; \
+	else \
+	    echo "WARNING: build/espeak_ng-install/share/espeak-ng-data missing — run make build first"; \
+	fi
+	@# Models live under Resources/models/. Created empty here so the
+	@# in-plugin downloader has a target dir on first launch even
+	@# before the user has downloaded anything.
+	@mkdir -p "$(PLUGIN_DIR)/Resources/models"
 	@mkdir -p "$(PLUGIN_DIR)/data"
 	@if [ ! -f "$(PLUGIN_DIR)/data/settings.json" ]; then \
 	    cp data/settings.json "$(PLUGIN_DIR)/data/"; \

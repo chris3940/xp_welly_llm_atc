@@ -376,6 +376,13 @@ void stop_recording() {}
 
 #endif
 
+std::vector<int16_t> take_pcm() {
+  std::lock_guard<std::mutex> lock(buffer_mutex_);
+  return std::move(buffer_);
+}
+
+unsigned sample_rate_hz() { return actual_sample_rate_; }
+
 std::vector<uint8_t> encode_wav() {
   std::lock_guard<std::mutex> lock(buffer_mutex_);
 

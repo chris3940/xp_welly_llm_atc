@@ -1,280 +1,319 @@
 # xp_welly_llm_atc
 
-> **Spike fork of [`rwellinger/xp_welly_atc`](https://github.com/rwellinger/xp_welly_atc).**
-> Goal: replace the cloud-based STT / LLM / TTS stack with **fully local inference** on
-> Apple Silicon — `whisper.cpp` (Metal) + `llama.cpp` (Metal) + Piper TTS — statically
-> linked into the plugin. No daemons, no helper apps, no cloud dependencies, no API keys
-> at runtime. The ATC state machine is unchanged; only the inference backend is being
-> swapped.
+> **Local-inference fork of [`rwellinger/xp_welly_atc`](https://github.com/rwellinger/xp_welly_atc).**
+> The cloud-based STT / LLM / TTS stack is replaced with **fully local inference**
+> on Apple Silicon: `whisper.cpp` (Metal) + `llama.cpp` (Metal) + Piper TTS,
+> bundled with the plugin. **No daemons, no helper apps, no cloud, no API keys.**
+> The ATC state machine, intent parser, ATIS generator, and UI structure are
+> unchanged from the upstream project — only the inference backend differs.
 >
-> Active milestones live in [`.claude/tasks/`](.claude/tasks/README.md). Current status:
-> **Milestones 01–05 complete** (architecture analysis + three component spikes +
-> end-to-end CLI). See [`docs/architecture-analysis.md`](docs/architecture-analysis.md)
-> and [`spikes/spike_e2e/RESULTS.md`](spikes/spike_e2e/RESULTS.md).
+> Active milestones live in [`.claude/tasks/`](.claude/tasks/README.md). The
+> spike phase (milestones 01–05) is documented in
+> [`docs/architecture-analysis.md`](docs/architecture-analysis.md) and
+> [`spikes/spike_e2e/RESULTS.md`](spikes/spike_e2e/RESULTS.md).
 >
-> **Plugin integration recommended (milestone 05 go).** The end-to-end pipeline
-> (whisper.cpp → llama.cpp → Piper, single process, persistent model handles)
-> hits a warm wall-clock of **≈ 1.15 s per request** on Apple M4 — well under
-> the 3 s acceptance target, with > 1.8 s of headroom for the M4-vs-M1
-> generational gap and the plugin's main-thread / Core Audio overhead. The
-> Strategy interfaces validated in `spikes/spike_e2e/` (`ISpeechToText`,
-> `ILanguageModel`, `ITextToSpeech`) lift verbatim into milestone 06.
-> Bottleneck is the LLM stage at ~55 % of pipeline; obvious optimisation
-> levers (token-streaming TTS, system-prompt KV-cache reuse) remain
-> untouched. One open follow-up before milestone 06 sign-off:
-> re-validate timings on M1 hardware.
->
-> This repository will replace `xp_welly_atc` if milestone 06 succeeds.
-> Until then, treat the original as the reference for everything that is not inference.
+> **Measured pipeline latency** (warm, M4, milestone 05 spike):
+> STT 321 ms · LM 634 ms · TTS 200 ms · **total ≈ 1.16 s per request** —
+> well under the 3 s acceptance target with > 1.8 s of headroom for the
+> M4-vs-M1 generational gap and the plugin's main-thread / Core Audio
+> overhead. M1 re-validation: pending real-flight smoke test.
 
 ---
 
-AI-powered ATC voice communication plugin for X-Plane 12 VFR flights.
+AI-powered ATC voice communication plugin for X-Plane 12 VFR flights, running
+fully offline once the models are downloaded.
 
-Talk to ATC using your microphone via push-to-talk. The plugin transcribes your speech, interprets your intent through a rule-based ATC state machine, and plays back realistic ATC responses.
+Talk to ATC using your microphone via push-to-talk. The plugin transcribes your
+speech locally with whisper.cpp, interprets your intent through a rule-based
+ATC state machine (with low-confidence fallback to a local Llama 3.2 3B
+classifier), and plays back ATC responses synthesised locally with Piper.
 
 ## Features
 
-- **Push-to-Talk** — via X-Plane command binding (keyboard or joystick)
-- **Speech-to-Text** — OpenAI Whisper transcription
+- **Push-to-Talk** — bound via X-Plane command binding (keyboard or joystick)
+- **Local Speech-to-Text** — `whisper.cpp` `small.en-q5_1`, Metal-accelerated
+- **Local LLM** — `llama.cpp` running Llama 3.2 3B Instruct (Q4_K_M),
+  Metal-accelerated; used for intent disambiguation when the rule-based
+  parser is uncertain
+- **Local Text-to-Speech** — Piper, neutral US accent (`en_US-lessac-medium`),
+  CPU + onnxruntime
 - **ATC State Machine** — VFR phraseology for towered and non-towered airports
-- **Flight Phase Detection** — context-aware guards prevent unrealistic ATC interactions based on aircraft state (parked, taxi, airborne, etc.)
+- **Flight Phase Detection** — context-aware guards prevent unrealistic ATC
+  interactions based on aircraft state (parked, taxi, airborne, etc.)
 - **ATIS Generation** — automatic ATIS broadcasts from live sim weather data
-- **GPT Fallback** — GPT-4o-mini handles ambiguous or unrecognized intents
-- **Text-to-Speech** — natural ATC voice responses via OpenAI TTS (separate voices for Tower, Ground, and ATIS)
-- **Radio discipline coaching** — ATC issues a polite reminder when the pilot uses inappropriate language, followed by a firm "last warning" on repeated offenses
-- **Phraseology Hints** — context-aware cheat sheet showing the correct radio call for your current situation, with full ICAO phraseology on hover
-- **Cross-Country Support** — full VFR departure, en-route frequency change, and inbound flow between airports
-- **Radio Power Awareness** — ATC panel disables when COM radio has no electrical power, with optional bypass for exotic aircraft
-- **ImGui UI** — in-sim ATC panel with frequency management, phraseology hints, transcript history, and settings
+- **Radio discipline coaching** — ATC issues a polite reminder when the pilot
+  uses inappropriate language, escalating on repeats
+- **Phraseology Hints** — context-aware cheat sheet with full ICAO phraseology
+  on hover
+- **Cross-Country Support** — full VFR departure, en-route frequency change,
+  and inbound flow between airports
+- **Radio Power Awareness** — ATC panel disables when COM radio has no
+  electrical power, with optional bypass for exotic aircraft
+- **In-plugin model downloader** — first launch surfaces an ImGui dialog,
+  HTTPS-resumable downloads from HuggingFace, SHA256-verified before use
+- **ImGui UI** — in-sim ATC panel with frequency management, phraseology
+  hints, transcript history, and a Models tab for download / re-verify
 
-## Getting Started — Video Tutorial
+## Hardware Requirements
 
-[![Watch the tutorial](https://img.youtube.com/vi/jh2lbBgA8Fw/maxresdefault.jpg)](https://youtu.be/jh2lbBgA8Fw)
+| Item | Requirement |
+|---|---|
+| CPU | Apple Silicon (M1 / M2 / M3 / M4). **Intel Macs are not supported.** |
+| RAM | 32 GB recommended (X-Plane 12 typically uses 8–16 GB; budget ~3 GB headroom for the inference stack) |
+| Disk | ~2.5 GB free wherever the plugin is installed (models + bundle) |
+| GPU | Any Metal-capable GPU on the same Apple Silicon chip |
 
-This walkthrough covers initial plugin configuration inside X-Plane — setting your callsign, entering your OpenAI API key, and binding push-to-talk — followed by a first live ATC interaction: tuning the ATIS frequency at Grenchen (LSZG) and receiving the automated weather broadcast.
+The plugin builds and ships **arm64-only**. On an Intel Mac the `.xpl` is
+silently skipped by X-Plane (a single line in `Log.txt`: *"Couldn't load
+plugin … bad architecture"*) — there is no in-sim error. Verify your Mac's
+architecture before installing:
 
-## Preparing for a Traffic Pattern — Video Tutorial
-
-[![Watch the tutorial](https://img.youtube.com/vi/N333BPBY4Rs/maxresdefault.jpg)](https://youtu.be/N333BPBY4Rs)
-
-Preparing for a left-hand traffic pattern at Grenchen (LSZG): tuning the ATIS frequency for current weather and runway information, then contacting Ground to request taxi to the active runway.
-
-## Documentation
-
-- [User Manual (English)](docs/xpwellysatc_manual_en.md)
-- [Benutzerhandbuch (Deutsch)](docs/xpwellysatc_manual_de.md)
-- [ATC Call Reference](docs/README.md)
-
-## Platform
-
-**macOS only.** Built for macOS users who lack access to commercial ATC voice solutions on their platform. Windows and Linux are not supported — the plugin relies on macOS-specific frameworks (Core Audio, AudioToolbox, Security/Keychain, AVFoundation).
-
-## Requirements (Development)
-
-- macOS 12.0+ (ARM64 / x86_64 universal binary)
-- X-Plane 12
-- CMake 3.21+
-- Homebrew LLVM (`brew install llvm`)
-- OpenAI API key
-
-## Quick Start
-
-```bash
-# 1. Clone and setup dependencies
-git clone <repo-url>
-cd xp_wellys_atc
-make setup      # Downloads X-Plane SDK, Dear ImGui, nlohmann/json
-
-# 2. Build
-make build      # CMake Release build → build/xp_wellys_atc.xpl
-
-# 3. Install into X-Plane
-make install    # Code-sign + deploy to X-Plane plugins directory
+```sh
+uname -m   # must print "arm64"
 ```
 
-## OpenAI API Key
+## Software Requirements
 
-This plugin requires an OpenAI API key for speech recognition (Whisper), intent classification (GPT-4o-mini), and voice synthesis (TTS). You can create an API key at [platform.openai.com](https://platform.openai.com).
+| Item | Requirement |
+|---|---|
+| macOS | **13.3 or later** (onnxruntime 1.22.0 requires this; lower versions show a linker warning at build time and may crash at runtime) |
+| X-Plane | X-Plane 12 (12.0 or later) |
+| For building from source | CMake 3.26+, Homebrew LLVM (`brew install llvm`), Xcode Command Line Tools |
 
-**Cost estimate:** A single traffic pattern circuit (taxi, takeoff, pattern, landing) uses roughly 8–10 API calls and costs approximately **$0.02–0.05 USD**. A touch-and-go session with multiple circuits costs proportionally more. These are rough estimates — actual costs depend on transmission length and how often the GPT fallback is triggered.
+## Quick Start (pre-built release)
 
-**Security:** The API key is stored exclusively in the macOS Keychain. It is never written to disk, never logged, and never visible within the plugin. It is only used for HTTPS requests to the OpenAI API.
+1. Download `xp_wellys_atc-vX.Y.Z-arm64.zip` from the GitHub Releases page.
+2. Extract into `X-Plane 12/Resources/plugins/`. Result:
+   ```
+   X-Plane 12/Resources/plugins/xp_wellys_atc/
+     ├── mac_x64/
+     │     ├── xp_wellys_atc.xpl
+     │     ├── libpiper.dylib
+     │     ├── libonnxruntime.1.22.0.dylib
+     │     └── libonnxruntime.dylib
+     ├── Resources/
+     │     └── espeak-ng-data/   (~19 MB, ships with the plugin)
+     └── data/
+           └── (templates, region rules, etc.)
+   ```
+3. Launch X-Plane. Open the plugin window via *Plugins → Welly's ATC*.
+4. **First launch only**: the **Models** tab shows three rows in red. Click
+   **Download all missing** — the plugin pulls ~2.0 GB from HuggingFace
+   over HTTPS. Resumable; cancellable; SHA256-verified after each file.
+5. Once all three rows show **Ready** (green), the PTT-disabled banner on
+   the Status tab disappears and you can fly.
+
+## Build From Source
+
+```sh
+git clone --recurse-submodules <repo-url>
+cd xp_welly_llm_atc
+make setup      # X-Plane SDK, Dear ImGui, nlohmann/json, Catch2
+make build      # CMake Release build → build/xp_wellys_atc.xpl
+                # builds whisper.cpp + llama.cpp + Piper from the spike
+                # submodules; the first build is slow (~2 min on M4)
+make install    # Code-sign + install to X-Plane plugins directory
+```
+
+The build downloads onnxruntime's prebuilt arm64 dylib (≈ 33 MB) into
+`spikes/spike_piper/third_party/piper1-gpl/libpiper/lib/` on first
+configure. After that everything is local.
+
+## Local Inference Models
+
+The plugin ships **without** the model files (~2.0 GB combined). They live
+under `<plugin>/Resources/models/` and are downloaded on first launch via
+the **Models** tab. Each download is HTTPS, resumable (`Range` header),
+streamed directly to the install volume (no temp roundtrip via the system
+disk — important for users running X-Plane on an external SSD), and
+SHA256-verified before being renamed from `<file>.part` to its final
+filename.
+
+### Manual fallback (restrictive networks)
+
+If the in-plugin downloader cannot reach HuggingFace (corporate proxy,
+captive portal, etc.), download these files manually and drop them into
+`<plugin>/Resources/models/`. The plugin re-verifies on the next launch
+and loads them automatically if the hashes match.
+
+| Model | Size | SHA256 | URL |
+|---|---:|---|---|
+| `ggml-small.en-q5_1.bin` | 181 MB | `bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30` | [`huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en-q5_1.bin`](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en-q5_1.bin) |
+| `Llama-3.2-3B-Instruct-Q4_K_M.gguf` | 1.88 GB | `6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff` | [`huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf`](https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf) |
+| `en_US-lessac-medium.onnx` | 60 MB | `5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f` | [`huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx`](https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx) |
+| `en_US-lessac-medium.onnx.json` | 4.9 KB | `efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0` | [`huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json`](https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json) |
+
+After dropping the files in, reopen the plugin window — the Models tab
+runs SHA256 verification in the background and flips the rows to **Ready**
+once each hash matches.
+
+### Expected first-run download time
+
+5–30 minutes on typical home internet; the bottleneck is HuggingFace's
+upstream throughput, not the plugin. The downloader resumes via HTTP
+`Range` if your link drops, so a Wi-Fi blip mid-Llama does not restart
+the 1.88 GB pull from scratch.
 
 ## Configuration
 
-On first launch, open the plugin menu in X-Plane and enter your OpenAI API key in the settings tab.
-
-Settings are stored in `data/settings.json`:
+Settings live in `<plugin>/data/settings.json`. The local-inference
+build ships with a slim schema — no API keys, no model selectors:
 
 | Setting | Default | Description |
 |---|---|---|
-| `tts_voice_tower` | `onyx` | OpenAI TTS voice for Tower |
-| `tts_voice_ground` | `echo` | OpenAI TTS voice for Ground |
-| `tts_voice_atis` | `nova` | OpenAI TTS voice for ATIS |
-| `tts_model` | `tts-1` | OpenAI TTS model |
-| `whisper_model` | `whisper-1` | OpenAI Whisper model |
-| `gpt_model` | `gpt-4o-mini` | OpenAI GPT model for fallback |
-| `pilot_callsign` | *(empty)* | Your callsign (set in plugin settings) |
+| `pilot_callsign` | *(empty)* | Phonetic callsign (set in plugin settings, written from the registration via ICAO conversion) |
 | `active_com` | `1` | Active COM radio (1 or 2) |
 | `volume` | `1.0` | Playback volume (0.0–1.0) |
-| `gpt_fallback_enabled` | `true` | Use GPT when intent confidence is low |
 | `pattern_direction` | `left` | Default traffic pattern direction (left/right) — overridden per airport/runway by `airport_vrps.json` |
 | `disable_default_atc` | `false` | Suppress X-Plane's built-in default ATC |
 | `skip_radio_power_check` | `false` | Bypass radio power detection (workaround for exotic aircraft) |
 | `show_phraseology_hints` | `true` | Show phraseology cheat sheet in ATC panel |
 | `auto_correction_factor` | `1.0` | ATC recovery time multiplier (0.5 = faster, 2.0 = slower) |
+| `flow_region` | `EU` | `EU` (ICAO/QNH/hPa) or `US` (FAA-TC/altimeter/inHg) phraseology |
 | `debug_logging` | `false` | Enable verbose debug output |
 
-ATC response templates are defined in `data/regions/{eu,us}/atc_templates.json` (towered and uncontrolled airports, one file per region). Flight phase detection thresholds, ATC precondition guards, frequency guards, and auto-correction rules are configured in `data/regions/{eu,us}/flight_rules.json`. Switching the Region setting hot-reloads both files. All data files can be edited without rebuilding the plugin.
+ATC response templates are defined in `data/regions/{eu,us}/atc_templates.json`.
+Flight phase detection thresholds, ATC precondition guards, frequency guards,
+and auto-correction rules are in `data/regions/{eu,us}/flight_rules.json`.
+Switching the Region setting hot-reloads both files. All data files can be
+edited without rebuilding the plugin.
 
 ### Airport Database (`data/airport_vrps.json`)
 
-Per-airport configuration for Visual Reporting Points (VRPs) and traffic pattern directions. The plugin ships with pre-configured data for common Swiss and German VFR airports.
-
-**VRPs** are used to recognize VRP names in pilot transmissions and issue realistic arrival instructions (e.g., *"cleared to enter control zone via November"*).
-
-**Pattern direction** can be configured globally in `settings.json` (`pattern_direction`) or per airport/runway in `airport_vrps.json`. The airport-specific value takes precedence over the global setting. This supports airports where the pattern direction differs by runway (e.g., Grenchen LSZG: right traffic for runway 07, left traffic for runway 25).
-
-```json
-{
-  "LSZG": {
-    "name": "Grenchen",
-    "pattern_direction": {
-      "07": "right",
-      "25": "left"
-    },
-    "vrps": [
-      { "name": "Tango", "lat": 47.175, "lon": 7.410, "alt_ft": 3000 }
-    ],
-    "arrival_routes": {
-      "07": ["Golf", "Tango"],
-      "25": ["Mike", "Tango"]
-    }
-  }
-}
-```
-
-`pattern_direction` can be a simple string (`"left"`) to apply to all runways, or an object with per-runway entries. Lookup order: exact runway match → base runway (strip L/R/C suffix) → airport default → global `settings.json` fallback.
+Per-airport configuration for Visual Reporting Points (VRPs) and traffic
+pattern directions. Pre-populated for common Swiss and German VFR airports.
+See the upstream `xp_welly_atc` README for the schema; nothing changed in
+this fork.
 
 ### ATC Response Templates (`data/regions/{eu,us}/atc_templates.json`)
 
-Defines the ATC response text for every combination of airport type, ATC state, and pilot intent. The file is split into two top-level sections:
-
-- **`towered`** — full ATC flow (Ground → Tower → Pattern → Landing)
-- **`uncontrolled`** — CTAF/UNICOM self-announce (no clearances, acknowledgement only)
-
-Each entry contains:
-
-| Field | Description |
-|---|---|
-| `response` | Template text with `{variable}` placeholders (e.g., `{callsign}`, `{runway}`, `{wind}`) |
-| `next_state` | ATC state machine transition after this response |
-| `requires_readback` | Whether the pilot must read back the clearance |
-
-The special key `_INVALID` is the fallback response when no matching intent exists for the current state (e.g., *"say again your request"*). Variables are substituted at runtime from `XPlaneContext` data. The file can be edited without rebuilding the plugin.
+Defines the ATC response text for every combination of airport type, ATC
+state, and pilot intent. `towered` (full ATC flow) and `uncontrolled`
+(CTAF/UNICOM self-announce) sections; each entry has `response`,
+`next_state`, `requires_readback`. The special key `_INVALID` is the
+fallback ("say again your request"). Variables are substituted from
+`XPlaneContext` at runtime.
 
 ### Flight Rules (`data/regions/{eu,us}/flight_rules.json`)
 
-Controls flight phase detection, ATC state guards, and automatic state corrections. Contains six sections:
+Six sections — `phase_thresholds`, `hysteresis`, `intent_preconditions`,
+`auto_corrections`, `intent_frequency`, `pilot_phraseology`. Same schema
+as upstream.
 
-| Section | Purpose |
-|---|---|
-| `phase_thresholds` | Sensor values for `FlightPhase` transitions (e.g., taxi above 5 kt GS, pattern below 3000 ft AGL) |
-| `hysteresis` | Time delays (seconds) to prevent phase jitter during transitions |
-| `intent_preconditions` | Guards that block invalid intents based on current flight phase — e.g., a taxi request while airborne returns a rejection message |
-| `auto_corrections` | Fixes state/phase mismatches after a configurable delay — e.g., pilot is airborne but state is still `DEPARTURE_CLEARED` → auto-transition to `PATTERN_ENTRY` after 5 seconds |
-| `intent_frequency` | Frequency guard enforced by the ATC state machine. Each intent has `{ "allowed": [...], "rejection": "..." }`; valid frequency types are `GROUND`, `TOWER`, `APPROACH`, `UNICOM`, `CTAF`. `allowed: []` rejects the intent on every frequency — used e.g. for `REQUEST_FLIGHT_FOLLOWING` in the EU region, where flight following is not offered |
-| `pilot_phraseology` | Example phrases per intent, used for UI display |
+### LLM Prompt Templates (`data/atc_prompt_templates.json`)
 
-### GPT Prompt Templates (`data/atc_prompt_templates.json`)
-
-Contains the prompts sent to OpenAI APIs:
+Prompts the engine sends to the local Llama 3.2 3B model:
 
 | Key | Purpose |
 |---|---|
-| `whisper_prompt` | Static context hint sent to the Whisper API to bias transcription toward aviation vocabulary and NATO phonetic alphabet |
-| `gpt_classify_prompt` | System prompt for GPT-4o-mini intent classification, used when the local keyword parser returns low confidence (< 0.7) or `UNKNOWN`. Variables: `{state}`, `{valid_intents}`, `{transcript}`, `{frequency_type}`, `{on_ground}`, `{altitude_ft}`, `{groundspeed_kts}`, `{airport}` |
-| `gpt_fallback_prompt` | Emergency fallback system prompt that generates a full ATC response via GPT when both the local parser and intent classification fail. Variables: `{airport}`, `{callsign}`, `{on_ground}` |
+| `whisper_prompt` | Initial-prompt hint for whisper.cpp to bias transcription toward aviation vocabulary and the NATO phonetic alphabet |
+| `gpt_classify_prompt` | System prompt for low-confidence intent classification (variables: `{state}`, `{valid_intents}`, `{transcript}`, `{frequency_type}`, `{on_ground}`, `{altitude_ft}`, `{groundspeed_kts}`, `{airport}`) |
 
-All prompt templates can be customized without rebuilding the plugin.
+The historical key name is `gpt_*` because the upstream cloud version
+called the same prompt; the local pipeline uses Llama 3.2 with this
+exact text.
 
-**Push-to-Talk** is configured via X-Plane's keyboard or joystick settings. The plugin registers the command `xp_wellys_atc/ptt` which can be bound to any key or joystick button in X-Plane.
+**Push-to-Talk** is configured via X-Plane's keyboard or joystick settings.
+The plugin registers the command `xp_wellys_atc/ptt` which can be bound to
+any key or joystick button.
 
 ## Usage
 
-1. Tune COM1/COM2 to the appropriate frequency in X-Plane (or click a frequency in the ATC panel to set it as standby, then flip-flop)
-2. Hold the PTT key and speak your radio call — the **Phraseology Hints** panel shows you what to say (hover for full ICAO phraseology)
-3. Release PTT — the plugin transcribes, processes, and plays back the ATC response
-4. Check the ImGui overlay for transcript history and current ATC state
-5. If you get stuck in a loop, click the **Disregard** button to reset and start over
+1. Tune COM1/COM2 to the appropriate frequency in X-Plane (or click a
+   frequency in the ATC panel to set it as standby, then flip-flop).
+2. Hold the PTT key and speak your radio call — the **Phraseology Hints**
+   panel shows you what to say (hover for full ICAO phraseology).
+3. Release PTT — the plugin transcribes locally, processes through the
+   state machine, and plays back the ATC response.
+4. Check the ImGui overlay for transcript history and current ATC state.
+5. If you get stuck in a loop, click the **Disregard** button to reset.
 
-## Other Make Targets
+## Make Targets
 
-```bash
+```sh
 make all        # clean + format + build + lint + test (full local CI)
-make test       # Build and run unit + scenario tests
-make format     # Run clang-format on all source files
-make lint       # Run clang-tidy
-make clean      # Remove build artifacts
+make build      # build only
+make test       # unit tests + scenario tests
+make install    # code-sign + install to X-Plane
+make repl       # build the headless atc_repl tool
+make format     # clang-format
+make lint       # clang-tidy (some rules promoted to errors)
+make clean      # remove build/
+make distclean  # also remove sdk/, vendor/
 ```
 
 ## Known Limitations
 
 | Limitation | Impact | Effort |
 |---|---|---|
-| **"via Alpha" hardcoded** — taxiway name is always "Alpha" regardless of airport | Unrealistic at airports with different taxiway layouts | High — would need taxiway data from apt.dat or WED |
-| **EU/ICAO and US/Canada only** — two phraseology sets (EU and US) ship out of the box; other regional variants (UK CAA-specific wording, Australian AIP, etc.) fall back to ICAO defaults | Non-EU/US wording is not modelled | Medium — would require additional region template sets |
+| **Apple Silicon only** | Intel Macs cannot run the plugin | High — onnxruntime, Metal kernels, and pipeline budget all assume ARM64 |
+| **English only** | non-English ATC not supported | Medium — would need different whisper / Llama / Piper voice |
+| **Single-voice TTS** | All ATC speakers (Tower, Ground, ATIS) use the same Piper voice; ATIS speaks slower via `length_scale=1.18` | Low — could ship more voices and add a per-frequency selector |
+| **"via Alpha" hardcoded** — taxiway name is always Alpha | Unrealistic at airports with different taxiway layouts | High — would need taxiway data from apt.dat or WED |
 | **No traffic** — always "number one", no sequencing | Unrealistic at busy airports | Very high — would require traffic awareness |
-| **No callsign validation** — ATC accepts any callsign without checking against configured one | In real ATC, unknown callsigns get "station calling, say again" | Low — but low priority for single-player |
-
-## Roadmap
-
-- Improved ATIS with real-world NOTAMs and airport-specific information
-- Additional airports with VRPs and pattern directions
-- **IFR Support** — IFR introduces significantly more complexity (clearances, holds, approach procedures, etc.) and will be tackled in a later phase. Stay tuned!
+| **No callsign validation** | ATC accepts any callsign | Low priority for single-player |
 
 ## Project Structure
-
-`src/` is organised by concern, with one subdirectory per area of responsibility. Includes are subdir-prefixed (e.g. `#include "openai/gpt_client.hpp"`) so dependencies are visible at the call site.
 
 ```
 src/
 ├── main.cpp                # XPlugin* entry points, menu, flight loop
-├── atc/                    # Session coordinator, state machine, intent parser,
-│                           #   templates, ATIS, flight phase, GPT/STT engine
-├── audio/                  # Push-to-talk, mic capture, MP3 playback,
-│                           #   macOS mic permission
+├── atc/                    # Session coordinator, state machine, intent
+│                           #   parser, templates, ATIS, flight phase, engine
+├── audio/                  # Push-to-talk, mic capture, PCM playback
+│                           #   on the X-Plane radio bus, mic permission
+├── backends/               # Strategy interfaces + concrete WhisperStt /
+│                           #   LlamaLm / PiperTts + manager (async
+│                           #   dispatch) + loader (verify + load) +
+│                           #   downloader (libcurl + resume + SHA256)
 ├── core/                   # Logging, XPlaneContext (SDK-free struct +
-│                           #   SDK-coupled DataRef reader runtime)
+│                           #   SDK-coupled DataRef reader)
 ├── data/                   # Airport VRPs, apt.dat-derived airspace index
-├── openai/                 # Whisper, GPT-4o-mini, TTS clients (SDK-free)
-├── persistence/            # settings.json + macOS Keychain API key
-└── ui/                     # Dear ImGui ATC panel
+├── persistence/            # settings.json, model_paths, model_manifest
+└── ui/                     # Dear ImGui ATC panel + Models tab
 ```
 
-The `xp_atc_engine` CMake OBJECT library compiles all SDK-free translation units (`atc/`, `core/logging`, `core/xplane_context`, `data/`, `openai/`) and is reused by both the X-Plane plugin module and the headless `atc_repl` tool used for scenario tests. The plugin target adds the SDK-coupled units (`main.cpp`, `audio/`, `core/xplane_context_runtime.cpp`, `persistence/`, `ui/`).
+The `xp_atc_engine` CMake OBJECT library compiles the SDK-free translation
+units (`atc/`, `core/logging`, `core/xplane_context` struct, `data/`,
+`backends/manager.cpp`, `persistence/model_manifest`). Both the plugin
+module and the headless `atc_repl` tool reuse it. The plugin module adds
+the SDK-coupled units (`main.cpp`, `audio/`, `core/xplane_context_runtime.cpp`,
+`backends/{whisper_stt,llama_lm,piper_tts,loader,downloader}.cpp`,
+`persistence/{settings,model_paths}.cpp`, `ui/atc_ui.cpp`) plus statically
+linked `whisper`, `llama`, `common`, and a shared `libpiper.dylib` that
+links to `libonnxruntime.1.22.0.dylib` — both dylibs co-located inside the
+plugin bundle alongside the `.xpl` and resolved through `@loader_path`
+rpath.
+
+## Third-Party Dependencies
+
+See [`THIRD_PARTY.md`](THIRD_PARTY.md) for the full list of bundled or
+linked libraries, their licenses, and how they are vendored.
 
 ## Development Workflow
 
 ### CI Pipeline
 
-The GitHub Actions pipeline (`.github/workflows/build.yml`) runs in two situations only:
+The GitHub Actions pipeline runs in two situations only:
 
 - **Pull Request against `main`** — validates the change (build + scenario tests) before it can be merged
 - **Push of a version tag `v*`** — builds the release artifact and publishes a GitHub Release with the packaged ZIP
 
-Direct pushes to `main` no longer trigger a build. All code changes must go through a Pull Request.
+Direct pushes to `main` no longer trigger a build. All code changes must go
+through a Pull Request.
 
 ### Merging to `main`
 
-To keep `main` stable and guarantee that every commit on `main` has passed CI, the branch is protected by the following rules:
+Branch protection requires:
 
-1. **Pull Request required** — no direct pushes to `main`
-2. **Required status check: `build-macos`** — the PR can only be merged if the CI build and all scenario tests (`make test`) pass successfully
-3. **Branch must be up to date** — the PR branch must include the latest `main` before merging, so the passing build reflects the actual merge result
-
+1. PR (no direct pushes)
+2. Status check `build-macos` passing (`make all` succeeds)
+3. PR branch up to date with main
 
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.html).
+The local-inference fork inherits GPLv3 from the upstream `xp_welly_atc`
+project. Compatible with all bundled third-party libraries; see
+[`THIRD_PARTY.md`](THIRD_PARTY.md) for the per-dependency breakdown
+(notably espeak-ng, which is GPLv3 itself).

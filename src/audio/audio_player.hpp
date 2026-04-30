@@ -30,10 +30,15 @@ void stop();
 // Play a short PTT click on the X-Plane radio bus (routes to Radio Device)
 void play_ptt_click();
 
-// Play MP3 data on the X-Plane radio bus at given volume (0.0–1.0)
-void play(const std::vector<uint8_t> &mp3_data, float volume);
+// Play raw int16 PCM samples on the X-Plane radio bus at given volume
+// (0.0–1.0). This is the path used for ATC TTS responses (Piper output)
+// and for ATIS playback.
+void play_pcm(std::vector<int16_t> pcm16, uint32_t sample_rate_hz, int channels,
+              float volume);
 
-// Play WAV data on the X-Plane radio bus at given volume (0.0–1.0)
+// Play WAV data on the X-Plane radio bus at given volume (0.0–1.0).
+// Kept for the audio-self-test feature in the UI which records mic →
+// playback to validate the device chain.
 void play_wav(const std::vector<uint8_t> &wav_data, float volume);
 
 // Returns true while audio is being played back

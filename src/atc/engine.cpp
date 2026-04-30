@@ -12,21 +12,21 @@
 
 #include "atc/atc_state_machine.hpp"
 #include "atc/atc_templates.hpp"
+#include "backends/manager.hpp"
 #include "core/logging.hpp"
-#include "openai/gpt_client.hpp"
 #include "persistence/settings.hpp"
 
 namespace engine {
 
 static int profanity_warnings_ = 0;
-static int gpt_api_calls_ = 0;
+static int lm_inferences_ = 0;
 
 void reset() {
   profanity_warnings_ = 0;
-  gpt_api_calls_ = 0;
+  lm_inferences_ = 0;
 }
 
-int gpt_api_calls() { return gpt_api_calls_; }
+int lm_inferences() { return lm_inferences_; }
 
 static std::string build_say_again(const std::string &callsign) {
   return callsign.empty() ? "Say again." : callsign + ", say again.";
@@ -103,12 +103,12 @@ void process_transcript(Input in, Done done) {
   // Sub-variant disambiguation: rule-based parser matches parent
   // intents via keywords, but semantic sub-variants (pattern vs
   // cross-country departure) are better resolved by the LLM. If the
-  // parsed intent has a sharper variant AND GPT is enabled, ask the
-  // LLM to pick between them.
+  // parsed intent has a sharper variant AND the local LM is loaded,
+  // ask it to pick between them.
   using PI = intent_parser::PilotIntent;
   bool is_departure_variant = parsed.intent == PI::READY_FOR_DEPARTURE ||
                               parsed.intent == PI::READY_FOR_DEPARTURE_VFR;
-  if (is_departure_variant && in.gpt_fallback_enabled) {
+  if (is_departure_variant && backends::lm_ready()) {
     std::string prompt =
         "You are an ATC intent classifier. A VFR pilot at a towered "
         "airport just said they are ready for departure. Classify "
@@ -129,8 +129,8 @@ void process_transcript(Input in, Done done) {
         "Respond with ONLY the intent name. Nothing else.";
     std::string transcript = in.transcript;
     xplane_context::XPlaneContext ctx_snapshot = ctx;
-    ++gpt_api_calls_;
-    gpt_client::classify_intent_async(
+    ++lm_inferences_;
+    backends::lm::classify_intent_async(
         transcript, prompt,
         // NOLINTNEXTLINE(bugprone-exception-escape)
         [parsed, ctx_snapshot, done = std::move(done)](
@@ -141,18 +141,18 @@ void process_transcript(Input in, Done done) {
             bool valid = new_intent == PI::READY_FOR_DEPARTURE ||
                          new_intent == PI::READY_FOR_DEPARTURE_VFR;
             if (valid && new_intent != msg.intent) {
-              logging::info("Intent disambiguation: %s -> %s (via GPT)",
+              logging::info("Intent disambiguation: %s -> %s (via local LM)",
                             intent_parser::intent_name(msg.intent),
                             intent_parser::intent_name(new_intent));
               msg.intent = new_intent;
             } else if (!valid) {
               logging::info(
-                  "GPT disambig inconclusive (returned \"%s\"), keeping "
+                  "LM disambig inconclusive (returned \"%s\"), keeping "
                   "rule-based: %s",
                   result.c_str(), intent_parser::intent_name(msg.intent));
             }
           } else {
-            logging::info("GPT disambig failed, keeping rule-based result");
+            logging::info("LM disambig failed, keeping rule-based result");
           }
           done(run_state_machine(msg, ctx_snapshot));
         });
@@ -160,17 +160,18 @@ void process_transcript(Input in, Done done) {
   }
 
   // Two-stage intent resolution
-  bool needs_gpt = parsed.confidence < 0.7f ||
-                   parsed.intent == intent_parser::PilotIntent::UNKNOWN;
+  bool needs_lm = parsed.confidence < 0.7f ||
+                  parsed.intent == intent_parser::PilotIntent::UNKNOWN;
 
-  if (!needs_gpt) {
+  if (!needs_lm) {
     // High confidence: process through state machine directly
     done(run_state_machine(parsed, ctx));
     return;
   }
 
-  if (!in.gpt_fallback_enabled) {
-    // GPT disabled — use state machine with _INVALID fallback
+  if (!backends::lm_ready()) {
+    // LM not loaded (headless tools, model still downloading) — use
+    // state machine with _INVALID fallback.
     auto atc_resp = atc_state_machine::process(parsed, ctx);
     std::string response = atc_resp.text;
     if (response.empty()) {
@@ -186,7 +187,7 @@ void process_transcript(Input in, Done done) {
     return;
   }
 
-  // GPT intent classification
+  // LM intent classification
   using FT = xplane_context::FrequencyType;
   bool is_towered = ctx.is_towered_airport &&
                     ctx.frequency_type != FT::UNICOM &&
@@ -224,30 +225,30 @@ void process_transcript(Input in, Done done) {
         std::to_string(static_cast<int>(ctx.groundspeed_kts))},
        {"airport", ctx.nearest_airport_id}});
 
-  logging::info("Routing to GPT intent classification");
+  logging::info("Routing to local LM intent classification");
 
   // Snapshot ctx so the async callback sees the state at the moment the
-  // pilot spoke, not whatever ctx contains when GPT responds.
+  // pilot spoke, not whatever ctx contains when the LM responds.
   xplane_context::XPlaneContext ctx_snapshot = ctx;
-  ++gpt_api_calls_;
-  gpt_client::classify_intent_async(
+  ++lm_inferences_;
+  backends::lm::classify_intent_async(
       in.transcript, sys_prompt,
       // NOLINTNEXTLINE(bugprone-exception-escape)
       [parsed, ctx_snapshot, done = std::move(done)](std::string intent_key,
-                                                     bool gpt_success) mutable {
-        if (!gpt_success)
+                                                     bool lm_success) mutable {
+        if (!lm_success)
           intent_key = "_INVALID";
 
         if (settings::debug_logging())
-          logging::debug("GPT classified intent: %s", intent_key.c_str());
+          logging::debug("LM classified intent: %s", intent_key.c_str());
 
-        // Build a PilotMessage with GPT-classified intent and route
+        // Build a PilotMessage with LM-classified intent and route
         // through the state machine for full frequency validation.
-        auto gpt_msg = parsed;
-        gpt_msg.intent = intent_parser::intent_from_key(intent_key);
-        gpt_msg.confidence = 0.85f;
+        auto lm_msg = parsed;
+        lm_msg.intent = intent_parser::intent_from_key(intent_key);
+        lm_msg.confidence = 0.85f;
 
-        auto atc_resp = atc_state_machine::process(gpt_msg, ctx_snapshot);
+        auto atc_resp = atc_state_machine::process(lm_msg, ctx_snapshot);
 
         if (settings::debug_logging())
           logging::debug("ATC response text: %s", atc_resp.text.empty()
@@ -255,7 +256,7 @@ void process_transcript(Input in, Done done) {
                                                       : atc_resp.text.c_str());
 
         Output out;
-        out.parsed = gpt_msg;
+        out.parsed = lm_msg;
         out.response_text = atc_resp.text;
         done(std::move(out));
       });

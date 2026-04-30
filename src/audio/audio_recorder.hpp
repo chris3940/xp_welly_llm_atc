@@ -31,6 +31,15 @@ void stop();
 void start_recording();
 void stop_recording();
 
+// Move the captured PCM out of the recorder into the caller. The
+// returned buffer is mono, signed 16-bit, at sample_rate_hz(). Used by
+// the local STT backend instead of the historical encode_wav() path.
+std::vector<int16_t> take_pcm();
+
+// Native capture sample rate (HALOutput chooses the device default;
+// observed values are usually 44100 or 48000).
+unsigned sample_rate_hz();
+
 std::vector<uint8_t> encode_wav();
 float duration_seconds();
 size_t buffer_samples();

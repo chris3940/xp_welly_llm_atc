@@ -378,7 +378,6 @@ RunResult run(const Scenario &scn) {
         /*quality=*/step.quality.value_or(1.0f),
         /*ctx=*/&ctx,
         /*pilot_callsign=*/scn.pilot_callsign,
-        /*gpt_fallback_enabled=*/false,
     };
 
     std::string response;

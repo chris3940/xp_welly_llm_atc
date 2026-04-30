@@ -27,27 +27,13 @@ void init();
 void stop();
 void save();
 
-// Keychain operations
-bool save_api_key(const std::string &key);
-std::string load_api_key();
-void delete_api_key();
-std::string get_api_key();
-
-// Data directory path
+// Data directory path (plugin-relative <plugin>/data)
 std::string get_data_dir();
 
 // Region-scoped data directory (e.g. <data>/regions/eu or <data>/regions/us)
 std::string region_data_dir();
 
 // Getters
-bool api_key_saved();
-std::string tts_voice_atis();
-std::string tts_voice_tower();
-std::string tts_voice_ground();
-std::string tts_model();
-std::string whisper_model();
-std::string gpt_model();
-bool gpt_fallback_enabled();
 std::string pilot_callsign();
 int active_com();
 float volume();
@@ -60,14 +46,10 @@ float auto_correction_factor();
 std::string flow_region(); // "EU" or "US"
 
 // Setters
-void set_tts_voice_atis(const std::string &v);
-void set_tts_voice_tower(const std::string &v);
-void set_tts_voice_ground(const std::string &v);
 std::string pilot_callsign_raw();
 void set_pilot_callsign_raw(const std::string &raw);
 std::string to_icao_phonetic(const std::string &raw);
 void set_volume(float v);
-void set_gpt_fallback_enabled(bool v);
 void set_debug_logging(bool v);
 void set_active_com(int com);
 void set_pattern_direction(const std::string &v);

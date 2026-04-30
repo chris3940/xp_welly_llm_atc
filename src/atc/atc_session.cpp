@@ -24,10 +24,9 @@
 #include "atc/intent_parser.hpp"
 #include "audio/audio_player.hpp"
 #include "audio/audio_recorder.hpp"
+#include "backends/manager.hpp"
 #include "core/logging.hpp"
 #include "core/xplane_context.hpp"
-#include "openai/tts_client.hpp"
-#include "openai/whisper_client.hpp"
 #include "persistence/settings.hpp"
 
 #include <XPLMProcessing.h>
@@ -47,7 +46,7 @@ static size_t last_wav_bytes_ = 0;
 static std::vector<TranscriptEntry> transcript_;
 static intent_parser::PilotMessage last_pilot_message_;
 static int total_transcriptions_ = 0;
-static int total_api_calls_ = 0;
+static int total_inferences_ = 0;
 static constexpr float kMinRecordingDuration = 0.5f;
 
 // ATIS playback state
@@ -57,40 +56,31 @@ static constexpr float kAtisCooldownSec = 30.0f;
 static float atis_tuned_timer_ = 0.0f;           // how long tuned to ATIS freq
 static constexpr float kAtisTuneDelaySec = 2.0f; // wait before playing
 
-// Determine TTS voice based on frequency type
-static std::string voice_for_freq(xplane_context::FrequencyType ft) {
-  using FT = xplane_context::FrequencyType;
-  if (ft == FT::GROUND)
-    return settings::tts_voice_ground();
-  return settings::tts_voice_tower();
-}
-
-// Speak ATC response via TTS, then transition to PLAYING → IDLE
-static void speak_response(const std::string &text, float speed = 1.0f,
-                           const std::string &voice = "") {
+// Speak ATC response via local TTS, then transition to PLAYING → IDLE.
+// `length_scale` > 1.0 makes Piper speak slower (used for ATIS).
+static void speak_response(const std::string &text, float length_scale = 1.0f) {
   state_ = PTTState::PLAYING;
-  ++total_api_calls_; // TTS call
+  ++total_inferences_; // TTS inference
 
-  tts_client::speak_async(
-      text,
-      [](const std::vector<uint8_t> &mp3_data, bool success) {
-        if (success && !mp3_data.empty()) {
+  backends::tts::synthesize_async(
+      text, length_scale, [](backends::tts::Audio audio, bool success) {
+        if (success && !audio.pcm16.empty()) {
           if (settings::debug_logging()) {
-            char dbg[128];
-            std::snprintf(
-                dbg, sizeof(dbg),
-                "[xp_wellys_atc][DEBUG] TTS response: %zu bytes MP3\n",
-                mp3_data.size());
+            char dbg[160];
+            std::snprintf(dbg, sizeof(dbg),
+                          "[xp_wellys_atc][DEBUG] TTS produced %zu samples "
+                          "@ %u Hz\n",
+                          audio.pcm16.size(), audio.sample_rate_hz);
             XPLMDebugString(dbg);
           }
-          audio_player::play(mp3_data, settings::volume());
+          audio_player::play_pcm(std::move(audio.pcm16), audio.sample_rate_hz,
+                                 audio.channels, settings::volume());
         } else {
           XPLMDebugString(
               "[xp_wellys_atc][ERROR] TTS failed, skipping playback\n");
           state_ = PTTState::IDLE;
         }
-      },
-      speed, voice);
+      });
 }
 
 void init() {
@@ -101,7 +91,7 @@ void init() {
   transcript_.clear();
   last_pilot_message_ = {};
   total_transcriptions_ = 0;
-  total_api_calls_ = 0;
+  total_inferences_ = 0;
   engine::reset();
   atis_playing_ = false;
   atis_cooldown_ = 0.0f;
@@ -127,10 +117,15 @@ void on_ptt_pressed() {
     return;
   }
 
-  // API key required
-  if (settings::get_api_key().empty()) {
-    XPLMDebugString(
-        "[xp_wellys_atc][ERROR] PTT blocked — no API key configured\n");
+  // Backends must be loaded — without STT we cannot transcribe and
+  // without LM we cannot reliably resolve low-confidence transcripts.
+  // The plugin's startup path surfaces the model-download dialog when
+  // anything is missing; this gate prevents PTT from doing nothing
+  // visible.
+  if (!backends::stt_ready() || !backends::lm_ready() ||
+      !backends::tts_ready()) {
+    XPLMDebugString("[xp_wellys_atc][ERROR] PTT blocked — local models not "
+                    "loaded (open the plugin window to download)\n");
     return;
   }
 
@@ -161,37 +156,33 @@ void on_ptt_released() {
     return;
   }
 
-  auto wav = audio_recorder::encode_wav();
-  last_wav_bytes_ = wav.size();
+  std::vector<int16_t> pcm = audio_recorder::take_pcm();
+  unsigned src_rate = audio_recorder::sample_rate_hz();
+  last_wav_bytes_ = pcm.size() * sizeof(int16_t);
 
   if (settings::debug_logging()) {
     char buf[256];
     std::snprintf(buf, sizeof(buf),
                   "[xp_wellys_atc][DEBUG] Recording stopped: %.1fs, %zu "
-                  "samples\n",
-                  last_duration_, last_samples_);
-    XPLMDebugString(buf);
-    std::snprintf(buf, sizeof(buf),
-                  "[xp_wellys_atc][DEBUG] WAV encoded: %zu bytes\n",
-                  last_wav_bytes_);
+                  "samples @ %u Hz\n",
+                  last_duration_, last_samples_, src_rate);
     XPLMDebugString(buf);
   }
 
   state_ = PTTState::PROCESSING;
 
-  // Build airport context for Whisper prompt (improves transcription of
-  // airport names like "Grenchen" that Whisper might otherwise misinterpret)
+  // Build airport context for the Whisper initial prompt — biases
+  // transcription of local proper nouns ("Grenchen", "Speck", etc.).
   const auto &ctx_for_whisper = xplane_context::get();
   std::string airport_ctx = ctx_for_whisper.nearest_airport_id;
   if (!ctx_for_whisper.nearest_airport_name.empty())
     airport_ctx += " " + ctx_for_whisper.nearest_airport_name;
 
-  whisper_client::transcribe_async(
-      std::move(wav),
-      [](const whisper_client::TranscriptResult &wr) {
+  backends::stt::transcribe_async(
+      std::move(pcm), src_rate,
+      [](const backends::stt::TranscriptResult &wr) {
         if (!wr.success) {
-          logging::error("Whisper error: %s", wr.text.c_str());
-          // Show error in transcript
+          logging::error("STT error: %s", wr.text.c_str());
           transcript_.push_back(TranscriptEntry{
               static_cast<double>(XPLMGetElapsedTime()),
               false,
@@ -203,7 +194,7 @@ void on_ptt_released() {
         }
 
         ++total_transcriptions_;
-        ++total_api_calls_;
+        ++total_inferences_;
 
         const auto &ctx = xplane_context::get();
         float active_freq =
@@ -211,9 +202,9 @@ void on_ptt_released() {
         char freq_str[16];
         std::snprintf(freq_str, sizeof(freq_str), "%.3f", active_freq);
 
-        // Transcript + voice are UI concerns, done here before handing off
-        // to the engine. Low-quality transcripts skip the pilot-row and go
-        // straight to a "say again" response (engine produces it).
+        // Transcript writing is a UI concern, done here before handing
+        // off to the engine. Low-quality transcripts skip the pilot row
+        // and go straight to a "say again" response from the engine.
         bool is_pilot_row_written = false;
         if (wr.quality >= 0.3f) {
           transcript_.push_back(TranscriptEntry{
@@ -226,26 +217,25 @@ void on_ptt_released() {
         }
 
         std::string freq_str_copy = freq_str;
-        std::string voice_copy = voice_for_freq(ctx.frequency_type);
 
         engine::Input in{
             wr.text,
             wr.quality,
             &ctx,
             settings::pilot_callsign(),
-            settings::gpt_fallback_enabled(),
         };
 
         engine::process_transcript(
-            std::move(in), [freq_str_copy, voice_copy,
-                            is_pilot_row_written](const engine::Output &out) {
+            std::move(in),
+            [freq_str_copy, is_pilot_row_written](const engine::Output &out) {
               last_pilot_message_ = out.parsed;
               if (out.response_text.empty()) {
                 state_ = PTTState::IDLE;
                 return;
               }
-              // Quality-rejection path didn't write a pilot row — the ATC
-              // "say again" still deserves a transcript entry with freq.
+              // Quality-rejection path didn't write a pilot row — the
+              // ATC "say again" still deserves a transcript entry with
+              // the active frequency.
               std::string freq_for_atc =
                   is_pilot_row_written ? freq_str_copy : std::string();
               transcript_.push_back(TranscriptEntry{
@@ -254,7 +244,7 @@ void on_ptt_released() {
                   out.response_text,
                   freq_for_atc,
               });
-              speak_response(out.response_text, 1.0f, voice_copy);
+              speak_response(out.response_text, 1.0f);
             });
       },
       airport_ctx);
@@ -298,8 +288,11 @@ void update() {
 
   bool atc_idle =
       atc_state_machine::get_state() == atc_state_machine::ATCState::IDLE;
+  // ATIS also needs the TTS backend ready, otherwise we'd silently
+  // fail.
   if (state_ == PTTState::IDLE && atis_cooldown_ <= 0.0f && tuned &&
-      atis_tuned_timer_ >= kAtisTuneDelaySec && atc_idle) {
+      atis_tuned_timer_ >= kAtisTuneDelaySec && atc_idle &&
+      backends::tts_ready()) {
     std::string atis_text = atis_generator::generate_atis_text(ctx);
 
     if (settings::debug_logging())
@@ -321,7 +314,10 @@ void update() {
 
     atis_playing_ = true;
     atis_cooldown_ = kAtisCooldownSec;
-    speak_response(atis_text, 0.85f, settings::tts_voice_atis());
+    // ATIS reads slower than tower/ground — Piper length_scale > 1
+    // produces the slower rate the OpenAI path used to get from
+    // speed=0.85.
+    speak_response(atis_text, 1.18f);
   }
 }
 
@@ -362,6 +358,6 @@ std::string last_atc_response() {
 }
 
 int total_transcriptions() { return total_transcriptions_; }
-int total_api_calls() { return total_api_calls_ + engine::gpt_api_calls(); }
+int total_api_calls() { return total_inferences_ + engine::lm_inferences(); }
 
 } // namespace atc_session

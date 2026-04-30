@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.26)
 project(xp_wellys_atc CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -10,11 +10,22 @@ option(BUILD_TESTS "Build Catch2 unit tests" ON)
 file(READ "${CMAKE_SOURCE_DIR}/VERSION.txt" VERSION_STRING)
 string(STRIP "${VERSION_STRING}" VERSION_STRING)
 
+# ARM64-only: whisper.cpp / llama.cpp Metal backends ship Apple Silicon
+# Metal kernels, and Piper's onnxruntime build is ARM-targeted in the
+# spike. An x86_64 build would not meet the < 3 s end-to-end target on
+# Intel Macs (CPU-only inference), so we drop the universal-binary
+# requirement here. Document this in README.md / RELEASE.md.
 if(APPLE)
     if(NOT CMAKE_OSX_ARCHITECTURES)
-        set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
+        set(CMAKE_OSX_ARCHITECTURES "arm64")
     endif()
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0")
+    # onnxruntime 1.22.0's prebuilt arm64 dylib is built against the
+    # macOS 13.3 SDK; setting the deployment target lower triggers a
+    # "newer version 13.3" linker warning and risks runtime crashes on
+    # macOS 12. X-Plane 12 itself supports macOS 11+, but this fork's
+    # local-inference path requires macOS 13.3 due to onnxruntime —
+    # document in README.
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3")
 endif()
 
 # ── Dear ImGui ────────────────────────────────────────────────────────────────
@@ -27,12 +38,81 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_opengl2.cpp
 )
 
+# libcurl is only needed by the plugin module (model downloader). The
+# headless atc_repl tool no longer pulls it in.
 find_package(CURL REQUIRED)
+
+# ── Local inference backends (whisper.cpp, llama.cpp, Piper) ─────────────────
+#
+# We reuse the submodules that already live under spikes/spike_*/third_party/
+# (initialised by `make setup` per the spike Makefiles) instead of pulling
+# fresh copies under vendor/ — same git revisions, no extra disk + bandwidth,
+# and the spikes stay buildable from the same source tree.
+#
+# Order matters: llama.cpp is added FIRST because both whisper.cpp and
+# llama.cpp vendor `ggml` and short-circuit when the target already exists.
+# Adding llama first locks in llama's pinned ggml; whisper then reuses that
+# target instead of pulling in a second (potentially incompatible) copy.
+# This dance is lifted from spike_e2e/CMakeLists.txt where it was validated.
+
+set(SPIKES_DIR "${CMAKE_SOURCE_DIR}/spikes")
+
+# --- shared ggml / metal options (apply to whichever subdir wins the ggml
+# add_subdirectory race) ---
+set(BUILD_SHARED_LIBS           OFF CACHE BOOL "" FORCE)
+set(GGML_METAL                  ON  CACHE BOOL "" FORCE)
+set(GGML_METAL_EMBED_LIBRARY    ON  CACHE BOOL "" FORCE)
+set(GGML_ACCELERATE             ON  CACHE BOOL "" FORCE)
+set(GGML_BLAS                   OFF CACHE BOOL "" FORCE)
+
+# --- llama.cpp (provides `ggml`, `llama`, `common`) ---
+set(LLAMA_BUILD_COMMON       ON  CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TOOLS        OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES     OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER       OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TESTS        OFF CACHE BOOL "" FORCE)
+set(LLAMA_CURL               OFF CACHE BOOL "" FORCE)
+add_subdirectory(${SPIKES_DIR}/spike_llama/third_party/llama.cpp
+                 ${CMAKE_BINARY_DIR}/llama.cpp EXCLUDE_FROM_ALL)
+
+# --- whisper.cpp (provides `whisper`; reuses llama's ggml target) ---
+set(WHISPER_BUILD_EXAMPLES      OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_TESTS         OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER        OFF CACHE BOOL "" FORCE)
+add_subdirectory(${SPIKES_DIR}/spike_whisper/third_party/whisper.cpp
+                 ${CMAKE_BINARY_DIR}/whisper.cpp EXCLUDE_FROM_ALL)
+
+# --- piper (provides `piper`; pulls in espeak-ng (static) + onnxruntime
+# (prebuilt dylib)) ---
+add_subdirectory(${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper
+                 ${CMAKE_BINARY_DIR}/libpiper EXCLUDE_FROM_ALL)
+
+# espeak-ng-data is installed by libpiper's ExternalProject under the build
+# dir. The plugin needs to find this dir at runtime; phase 4 (model loader)
+# resolves it relative to the .xpl bundle, but until then we bake the build
+# path so dev runs work.
+set(XP_WELLYS_ATC_ESPEAKNG_DATA_DIR
+    "${CMAKE_BINARY_DIR}/espeak_ng-install/share/espeak-ng-data"
+    CACHE PATH "Path to espeak-ng-data used at runtime (dev fallback)")
+
+# Path to onnxruntime prebuilt — we copy the dylib next to the .xpl so it
+# resolves through @loader_path with no DYLD_LIBRARY_PATH gymnastics.
+# libpiper's CMake extracts the prebuilt archive into its own source tree
+# (CMAKE_CURRENT_LIST_DIR/lib), not the build dir.
+set(ONNXRUNTIME_LIB_DIR
+    "${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/lib/onnxruntime-osx-arm64-1.22.0/lib"
+    CACHE PATH "Directory holding libonnxruntime.<ver>.dylib")
 
 # ── Engine OBJECT library (X-Plane SDK-frei) ─────────────────────────────────
 # Must compile and link without any XPLM / XPWidgets symbols.
 # The intentional absence of -DXPLM200 etc. is a guardrail: any engine
 # translation unit that pulls in <XPLM*.h> will fail to compile here.
+#
+# `backends/manager.cpp` lives here because it touches only std::thread
+# + the abstract interfaces. The concrete WhisperStt / LlamaLm /
+# PiperTts translation units live in the plugin module so the engine
+# library does not pull whisper.h / llama.h / piper.h headers (and thus
+# their static-lib link requirements) into the headless atc_repl tool.
 add_library(xp_atc_engine OBJECT
     src/core/logging.cpp
     src/atc/engine.cpp
@@ -41,12 +121,14 @@ add_library(xp_atc_engine OBJECT
     src/atc/atc_templates.cpp
     src/atc/flight_phase.cpp
     src/atc/atis_generator.cpp
-    src/openai/gpt_client.cpp
-    src/openai/whisper_client.cpp
-    src/openai/tts_client.cpp
+    src/backends/manager.cpp
     src/data/airport_vrps.cpp
     src/data/airspace_db.cpp
     src/core/xplane_context.cpp
+    # Model manifest is SDK-free (data + SHA256 via CommonCrypto),
+    # so it lives here and the headless atc_repl tool can use it
+    # too if it ever needs to verify a local model.
+    src/persistence/model_manifest.cpp
 )
 target_include_directories(xp_atc_engine PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor
@@ -61,7 +143,6 @@ if(APPLE)
         -fvisibility=hidden
     )
 endif()
-target_link_libraries(xp_atc_engine PRIVATE CURL::libcurl)
 
 # ── Plugin MODULE (Engine + X-Plane-spezifisch) ──────────────────────────────
 add_library(xp_wellys_atc MODULE
@@ -73,6 +154,21 @@ add_library(xp_wellys_atc MODULE
     src/audio/audio_recorder.cpp
     src/audio/audio_player.cpp
     src/audio/mic_permission.mm
+    # Concrete inference backends — pull whisper.h / llama.h /
+    # piper.h transitively. Static libs come from the spike
+    # submodules added above.
+    src/backends/whisper_stt.cpp
+    src/backends/llama_lm.cpp
+    src/backends/piper_tts.cpp
+    # Loader orchestrates verification + concrete backend load on a
+    # worker thread; uses XPLMGetPluginInfo (via model_paths) so it
+    # has to live in the plugin module, not the engine library.
+    src/backends/loader.cpp
+    # Downloader: libcurl + std::filesystem on a worker thread.
+    # Plugin-only because it depends on libcurl + plugin-relative
+    # paths via model_paths.
+    src/backends/downloader.cpp
+    src/persistence/model_paths.cpp
     src/persistence/settings.cpp
     src/ui/atc_ui.cpp
     ${IMGUI_SOURCES}
@@ -86,6 +182,12 @@ target_include_directories(xp_wellys_atc PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
+    # Local inference backends — headers from the spike submodules.
+    ${SPIKES_DIR}/spike_whisper/third_party/whisper.cpp/include
+    ${SPIKES_DIR}/spike_llama/third_party/llama.cpp/include
+    ${SPIKES_DIR}/spike_llama/third_party/llama.cpp/ggml/include
+    ${SPIKES_DIR}/spike_llama/third_party/llama.cpp/common
+    ${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/include
 )
 
 set_target_properties(xp_wellys_atc PROPERTIES
@@ -120,9 +222,55 @@ if(APPLE)
         "-framework AudioUnit"
         "-framework CoreAudio"
         "-framework AVFoundation"
-        "-framework Security"
         "-framework CoreFoundation"
+        # libcurl is now used solely for the in-plugin model
+        # downloader (HTTPS GET with Range resume to HuggingFace);
+        # OpenAI HTTP traffic is gone.
         CURL::libcurl
+        # Local inference: whisper.cpp + llama.cpp build static and
+        # link in directly. Piper is shared (libpiper.dylib) and is
+        # resolved at runtime via @loader_path — see rpath setup
+        # below.
+        whisper
+        common
+        llama
+        piper
+    )
+
+    # rpath: dev builds find dylibs in build/ and build/lib/<ort>; the
+    # installed bundle finds them via @loader_path (Makefile install
+    # target copies libpiper.dylib + libonnxruntime.<ver>.dylib next to
+    # the .xpl).
+    set_target_properties(xp_wellys_atc PROPERTIES
+        BUILD_WITH_INSTALL_RPATH FALSE
+        BUILD_RPATH "${CMAKE_BINARY_DIR};${ONNXRUNTIME_LIB_DIR}"
+        INSTALL_RPATH "@loader_path"
+    )
+
+    # Stage the runtime dependencies next to the built .xpl so a fresh
+    # `cmake --build` produces a directory the install step can copy
+    # verbatim. We do this on a separate `stage_dylibs` target chained
+    # to the plugin's POST_BUILD so it runs after `libpiper` and
+    # `libonnxruntime` exist.
+    add_custom_command(TARGET xp_wellys_atc POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:piper>"
+            "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:piper>"
+        COMMAND ${CMAKE_COMMAND} -E echo
+            "Staged libpiper next to xp_wellys_atc.xpl"
+        COMMENT "Staging libpiper.dylib alongside xp_wellys_atc.xpl"
+    )
+    # Copy only the actual onnxruntime dylibs (not pkgconfig + dSYM).
+    # The versioned + unversioned (symlink-style) names both need to be
+    # present so libpiper's @rpath/libonnxruntime.1.22.0.dylib resolves.
+    add_custom_command(TARGET xp_wellys_atc POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ONNXRUNTIME_LIB_DIR}/libonnxruntime.1.22.0.dylib"
+            "${CMAKE_BINARY_DIR}/libonnxruntime.1.22.0.dylib"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ONNXRUNTIME_LIB_DIR}/libonnxruntime.dylib"
+            "${CMAKE_BINARY_DIR}/libonnxruntime.dylib"
+        COMMENT "Staging libonnxruntime dylibs alongside xp_wellys_atc.xpl"
     )
 endif()
 
@@ -140,7 +288,6 @@ target_include_directories(atc_repl PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/vendor
 )
-target_link_libraries(atc_repl PRIVATE CURL::libcurl)
 if(APPLE)
     target_compile_options(atc_repl PRIVATE
         -Wall -Wextra -Wno-unused-parameter

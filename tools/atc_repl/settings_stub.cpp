@@ -1,10 +1,11 @@
 /*
  * xp_wellys_atc - headless CLI
  *
- * Minimal settings::* implementations so the engine OBJECT library links
- * in the CLI without pulling in the plugin-only settings.cpp (Keychain,
- * XPLMGetPluginInfo, etc.). Only the getters engine code actually calls
- * are defined here; setters and other entry points are omitted.
+ * Minimal settings::* implementations so the engine OBJECT library
+ * links in the CLI without pulling in the plugin-only settings.cpp
+ * (which depends on XPLMGetPluginInfo to resolve the data dir). Only
+ * the getters engine code actually calls are defined here; setters
+ * and other entry points are omitted.
  */
 
 #include "persistence/settings.hpp"
@@ -61,12 +62,6 @@ std::string region_data_dir() {
     lower = "eu";
   return get_data_dir() + "/regions/" + lower;
 }
-
-std::string tts_voice_tower() { return "onyx"; }
-std::string tts_model() { return "tts-1"; }
-std::string gpt_model() { return "gpt-4o-mini"; }
-
-std::string get_api_key() { return env_or("OPENAI_API_KEY", ""); }
 
 // Unused-by-engine but referenced elsewhere during link: defined just in
 // case they creep into the engine OBJECT library from a transitive include.
