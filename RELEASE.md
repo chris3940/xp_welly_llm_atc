@@ -138,8 +138,7 @@ There is no in-sim error. Verify your Mac's architecture before installing:
 uname -m   # must print "arm64"
 ```
 
-If you need cloud-backed ATC on Intel hardware, use the upstream
-[`rwellinger/xp_welly_atc`](https://github.com/rwellinger/xp_welly_atc) project.
+Intel Macs are not supported by this plugin.
 
 
 ### Known Limitations
@@ -170,9 +169,10 @@ If you need cloud-backed ATC on Intel hardware, use the upstream
   - IFR Support — clearances, holds, approach procedures (later phase)
 
 
-### Migration From OpenAI Build
+### Migration From the Earlier Cloud Build
 
-If you are upgrading from the upstream `xp_welly_atc` (cloud) build:
+If you are upgrading from a previous OpenAI/cloud-based `xp_wellys_atc`
+install:
 
   - The OpenAI API key in your macOS Keychain is no longer used. The
     plugin no longer reads, writes, or removes it. You can delete it

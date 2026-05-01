@@ -80,7 +80,7 @@ espeak-ng system-wide.
 Microsoft's neural-network inference runtime. Used by Piper. We ship
 the **prebuilt arm64 macOS dylib** released by Microsoft on GitHub —
 building onnxruntime from source is a multi-day undertaking and not
-realistic for a fork like this. The dylib (`libonnxruntime.1.22.0.dylib`,
+realistic for this project. The dylib (`libonnxruntime.1.22.0.dylib`,
 ~33 MB) is downloaded once during build by libpiper's CMake, then
 copied alongside the `.xpl` so it resolves through `@loader_path`
 rpath at runtime.
@@ -116,15 +116,10 @@ redistributable as part of plugins per
 
 ## Why GPL-3.0 for the plugin?
 
-The plugin inherits GPL-3.0-or-later from the upstream
-[`rwellinger/xp_welly_atc`](https://github.com/rwellinger/xp_welly_atc)
-project. The local-inference fork keeps the same license because:
-
-1. espeak-ng is GPL-3.0 and is linked into `libpiper.dylib` we ship.
-   Linking GPLv3 code into a non-GPLv3 binary would conflict; staying
-   on GPLv3 sidesteps that.
-2. Forks are expected to mirror upstream's terms unless a
-   re-licensing process is started.
+The plugin is licensed under GPL-3.0-or-later because espeak-ng
+(GPL-3.0-or-later) is statically linked into the `libpiper.dylib` we
+ship. Linking GPLv3 code into a non-GPLv3 binary would conflict, so the
+plugin itself adopts GPLv3 to stay compatible.
 
 All other bundled / linked components above are GPLv3-compatible (MIT,
 BSD-style, BSL-1.0, freely redistributable SDK).
@@ -137,7 +132,7 @@ binary releases include or link to the source repository in the
 release notes.
 
 For the bundled third-party static libraries (whisper.cpp, llama.cpp,
-Piper, espeak-ng), the source is publicly available at the upstream
+Piper, espeak-ng), the source is publicly available at the project
 URLs listed in the table above; the plugin links them at fixed
 git revisions which are recorded in `.gitmodules` and visible in the
 spike directories.

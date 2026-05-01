@@ -1,11 +1,8 @@
 # xp_welly_llm_atc
 
-> **Local-inference fork of [`rwellinger/xp_welly_atc`](https://github.com/rwellinger/xp_welly_atc).**
-> The cloud-based STT / LLM / TTS stack is replaced with **fully local inference**
-> on Apple Silicon: `whisper.cpp` (Metal) + `llama.cpp` (Metal) + Piper TTS,
-> bundled with the plugin. **No daemons, no helper apps, no cloud, no API keys.**
-> The ATC state machine, intent parser, ATIS generator, and UI structure are
-> unchanged from the upstream project — only the inference backend differs.
+> **Fully local-inference X-Plane 12 ATC plugin for Apple Silicon.**
+> `whisper.cpp` (Metal) + `llama.cpp` (Metal) + Piper TTS, bundled with the
+> plugin. **No daemons, no helper apps, no cloud, no API keys.**
 >
 > Active milestones live in [`.claude/tasks/`](.claude/tasks/README.md). The
 > spike phase (milestones 01–05) is documented in
@@ -150,7 +147,7 @@ once each hash matches.
 ### Expected first-run download time
 
 5–30 minutes on typical home internet; the bottleneck is HuggingFace's
-upstream throughput, not the plugin. The downloader resumes via HTTP
+download throughput, not the plugin. The downloader resumes via HTTP
 `Range` if your link drops, so a Wi-Fi blip mid-Llama does not restart
 the 1.88 GB pull from scratch.
 
@@ -182,8 +179,15 @@ edited without rebuilding the plugin.
 
 Per-airport configuration for Visual Reporting Points (VRPs) and traffic
 pattern directions. Pre-populated for common Swiss and German VFR airports.
-See the upstream `xp_welly_atc` README for the schema; nothing changed in
-this fork.
+Each top-level key is an ICAO code with optional fields:
+
+- `name` — display name
+- `pattern_direction` — per-runway `"left"` / `"right"` (overrides the
+  global `pattern_direction` setting)
+- `vrps` — array of `{ name, lat, lon, alt_ft }`; `name` is the phonetic
+  spelling (e.g. `"November"`) so Whisper and Piper handle it cleanly
+- `arrival_routes` — per-runway ordered list of VRP names used for
+  inbound routing
 
 ### ATC Response Templates (`data/regions/{eu,us}/atc_templates.json`)
 
@@ -197,8 +201,7 @@ fallback ("say again your request"). Variables are substituted from
 ### Flight Rules (`data/regions/{eu,us}/flight_rules.json`)
 
 Six sections — `phase_thresholds`, `hysteresis`, `intent_preconditions`,
-`auto_corrections`, `intent_frequency`, `pilot_phraseology`. Same schema
-as upstream.
+`auto_corrections`, `intent_frequency`, `pilot_phraseology`.
 
 ### LLM Prompt Templates (`data/atc_prompt_templates.json`)
 
@@ -209,9 +212,9 @@ Prompts the engine sends to the local Llama 3.2 3B model:
 | `whisper_prompt` | Initial-prompt hint for whisper.cpp to bias transcription toward aviation vocabulary and the NATO phonetic alphabet |
 | `gpt_classify_prompt` | System prompt for low-confidence intent classification (variables: `{state}`, `{valid_intents}`, `{transcript}`, `{frequency_type}`, `{on_ground}`, `{altitude_ft}`, `{groundspeed_kts}`, `{airport}`) |
 
-The historical key name is `gpt_*` because the upstream cloud version
-called the same prompt; the local pipeline uses Llama 3.2 with this
-exact text.
+The key name keeps the `gpt_*` prefix for backwards compatibility with
+existing `atc_prompt_templates.json` files; the local pipeline feeds
+this prompt to Llama 3.2 unchanged.
 
 **Push-to-Talk** is configured via X-Plane's keyboard or joystick settings.
 The plugin registers the command `xp_wellys_atc/ptt` which can be bound to
@@ -313,7 +316,7 @@ Branch protection requires:
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.html).
-The local-inference fork inherits GPLv3 from the upstream `xp_welly_atc`
-project. Compatible with all bundled third-party libraries; see
-[`THIRD_PARTY.md`](THIRD_PARTY.md) for the per-dependency breakdown
-(notably espeak-ng, which is GPLv3 itself).
+GPLv3 is required because espeak-ng (GPL-3.0-or-later) is statically
+linked into the bundled `libpiper.dylib`. Compatible with all other
+bundled third-party libraries; see [`THIRD_PARTY.md`](THIRD_PARTY.md)
+for the per-dependency breakdown.

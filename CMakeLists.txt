@@ -56,7 +56,7 @@ if(APPLE)
     # onnxruntime 1.22.0's prebuilt arm64 dylib is built against the
     # macOS 13.3 SDK; setting the deployment target lower triggers a
     # "newer version 13.3" linker warning and risks runtime crashes on
-    # macOS 12. X-Plane 12 itself supports macOS 11+, but this fork's
+    # macOS 12. X-Plane 12 itself supports macOS 11+, but this plugin's
     # local-inference path requires macOS 13.3 due to onnxruntime —
     # document in README.
     set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3")

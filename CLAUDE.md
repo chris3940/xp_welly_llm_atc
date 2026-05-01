@@ -11,9 +11,7 @@ Read this file completely before doing anything else.
 **Apple Silicon macOS (ARM64 only)** that provides AI-powered ATC voice
 communication for VFR flight simulation.
 
-This is the **local-inference fork** of the upstream `rwellinger/xp_welly_atc`
-project. The cloud-based STT / LLM / TTS stack is replaced with **fully local
-inference**:
+The plugin runs **fully local inference** on Apple Silicon:
 
 - **STT:** whisper.cpp (`small.en-q5_1`, Metal-accelerated)
 - **LLM:** llama.cpp (Llama 3.2 3B Instruct Q4_K_M, Metal) — used only for
@@ -25,10 +23,8 @@ Models (~2.0 GB combined) are **not bundled**. The plugin downloads them via
 an in-sim ImGui dialog from HuggingFace on first launch (HTTPS, resumable,
 SHA256-verified) into `<plugin>/Resources/models/`.
 
-The ATC state machine, intent parser, ATIS generator, and UI structure are
-unchanged from the upstream cloud project — only the inference backend differs.
-
-License: **GPL-3.0-or-later** (inherited from upstream + required by espeak-ng).
+License: **GPL-3.0-or-later** (required by espeak-ng, which is statically
+linked into the bundled `libpiper.dylib`).
 
 ---
 
@@ -186,8 +182,8 @@ incrementing on significant changes (active runway, wind dir >30°,
 QNH >1 hPa, visibility category change). Auto-plays via TTS when pilot's
 COM matches the airport's ATIS frequency within ~60 NM, with cooldown.
 
-**`settings`** — Loads/saves `data/settings.json`. **No API keys** in this
-fork — the local-inference build has no cloud credentials to manage.
+**`settings`** — Loads/saves `data/settings.json`. **No API keys** — the
+local-inference build has no cloud credentials to manage.
 
 **`ptt_input`** — Detects PTT activation via the X-Plane command
 `xp_wellys_atc/ptt`. Notifies `atc_session` on press/release.
@@ -207,8 +203,8 @@ phonetics. Returns `std::string` transcript.
 **`backends/llama_lm`** — Loads `Llama-3.2-3B-Instruct-Q4_K_M.gguf`.
 Runs Metal-accelerated inference for **low-confidence intent
 classification only** (max_tokens ≈ 20, temperature 0.0). System prompt
-from `gpt_classify_prompt` in `atc_prompt_templates.json`. The historical
-`gpt_*` key name is preserved from the upstream cloud version.
+from `gpt_classify_prompt` in `atc_prompt_templates.json`; the `gpt_*`
+key name is kept for backwards compatibility with existing template files.
 
 **`backends/piper_tts`** — Loads `en_US-lessac-medium.onnx`, synthesizes
 PCM via Piper + onnxruntime + bundled espeak-ng-data. ATIS speaks slower
