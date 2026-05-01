@@ -1,14 +1,12 @@
 # Spike: end-to-end CLI (STT → LLM → TTS)
 
-Milestone 05 of `xp_welly_llm_atc`. Stitches the three previous spikes
-(whisper.cpp, llama.cpp, Piper) into a single CLI that reads a pilot's
-WAV, transcribes, generates an ATC reply through a fixed system prompt,
-synthesizes the reply, and writes a response WAV — all in one process
-with persistent model handles.
+Stitches the three previous spikes (whisper.cpp, llama.cpp, Piper) into a
+single CLI that reads a pilot's WAV, transcribes, generates an ATC reply
+through a fixed system prompt, synthesizes the reply, and writes a response
+WAV — all in one process with persistent model handles.
 
-See [`.claude/tasks/milestone-05-end-to-end-cli.md`](../../.claude/tasks/milestone-05-end-to-end-cli.md)
-for the task definition and [`RESULTS.md`](RESULTS.md) for the latency
-report and milestone-06 recommendation.
+See [`RESULTS.md`](RESULTS.md) for the latency report and the plugin-
+integration recommendation that came out of this spike.
 
 ## Layout
 

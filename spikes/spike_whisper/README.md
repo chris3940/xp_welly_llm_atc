@@ -1,11 +1,8 @@
 # Spike: whisper.cpp standalone CLI
 
-Milestone 02 of `xp_welly_llm_atc`. Proves that whisper.cpp with the Metal
-backend can transcribe a typical ATC clip on the M1 well below the latency
-and memory targets that the plugin will need to hit later (milestone 06).
-
-See [`.claude/tasks/milestone-02-spike-whisper.md`](../../.claude/tasks/milestone-02-spike-whisper.md)
-for the full task definition.
+Proves that whisper.cpp with the Metal backend can transcribe a typical ATC
+clip on the M1 well below the latency and memory targets that the plugin
+needs.
 
 ## Layout
 

@@ -407,12 +407,11 @@ Non-mandatory:
    `Resources/models/<voice>.onnx`. No interface change.
 4. **[DECISION-LICENSE]** — **resolved: keep GPL-3.0**.
    All required local-inference dependencies (whisper.cpp, llama.cpp, Piper core, ONNX
-   Runtime) are MIT and therefore one-way compatible with GPL-3.0. If Milestone 04 ends
-   up linking `espeak-ng` (GPL-3.0), that's still compatible. Plugin source headers and
-   `LICENSE` stay as-is. The "License: MIT" line in `.claude/tasks/README.md` is read as
-   guidance for *dependencies* (avoid copyleft libs that would force a relicense), not for
-   the plugin itself. Re-evaluate only if we discover an unavoidable non-GPL-compatible
-   dep — none expected.
+   Runtime) are MIT and therefore one-way compatible with GPL-3.0. Milestone 04 links
+   `espeak-ng` (GPL-3.0), which is also compatible. Plugin source headers and
+   `LICENSE` stay as-is. The original "License: MIT" goal in early milestone planning
+   was guidance for *dependencies* (avoid copyleft libs that would force a relicense),
+   not for the plugin itself.
 
 ---
 

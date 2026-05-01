@@ -1,12 +1,8 @@
 # Spike: llama.cpp standalone CLI
 
-Milestone 03 of `xp_welly_llm_atc`. Proves that a 3 B-class instruction-tuned
-LLM running on llama.cpp with the Metal backend can produce ATC phraseology on
-the M1 inside the latency, throughput, and memory budgets that the plugin will
-need in milestone 06.
-
-See [`.claude/tasks/milestone-03-spike-llama.md`](../../.claude/tasks/milestone-03-spike-llama.md)
-for the full task definition.
+Proves that a 3 B-class instruction-tuned LLM running on llama.cpp with the
+Metal backend can produce ATC phraseology on the M1 inside the latency,
+throughput, and memory budgets the plugin needs.
 
 ## Layout
 

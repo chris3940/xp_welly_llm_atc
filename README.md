@@ -4,12 +4,11 @@
 > `whisper.cpp` (Metal) + `llama.cpp` (Metal) + Piper TTS, bundled with the
 > plugin. **No daemons, no helper apps, no cloud, no API keys.**
 >
-> Active milestones live in [`.claude/tasks/`](.claude/tasks/README.md). The
-> spike phase (milestones 01–05) is documented in
+> The spike-phase architecture and per-backend measurements are archived in
 > [`docs/architecture-analysis.md`](docs/architecture-analysis.md) and
 > [`spikes/spike_e2e/RESULTS.md`](spikes/spike_e2e/RESULTS.md).
 >
-> **Measured pipeline latency** (warm, M4, milestone 05 spike):
+> **Measured pipeline latency** (warm, M4, end-to-end spike):
 > STT 321 ms · LM 634 ms · TTS 200 ms · **total ≈ 1.16 s per request** —
 > well under the 3 s acceptance target with > 1.8 s of headroom for the
 > M4-vs-M1 generational gap and the plugin's main-thread / Core Audio

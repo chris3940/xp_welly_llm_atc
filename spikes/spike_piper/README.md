@@ -1,12 +1,8 @@
 # Spike: Piper TTS standalone CLI
 
-Milestone 04 of `xp_welly_llm_atc`. Proves that Piper running on the prebuilt
-arm64 onnxruntime can synthesize a typical ATC clearance on the M1 well below
-the latency budget the plugin will need (milestone 06), and lets us A/B the
-two candidate voices.
-
-See [`.claude/tasks/milestone-04-spike-piper.md`](../../.claude/tasks/milestone-04-spike-piper.md)
-for the full task definition.
+Proves that Piper running on the prebuilt arm64 onnxruntime can synthesize a
+typical ATC clearance on the M1 well below the plugin's latency budget, and
+lets us A/B the two candidate voices.
 
 ## Layout
 
