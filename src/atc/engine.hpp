@@ -65,6 +65,20 @@ int lm_inferences();
 // plugin's callback drain).
 void process_transcript(Input in, Done done);
 
+// Per-tick traffic-advisory poll. SDK-free: takes the current
+// XPlaneContext, reads traffic_context::current() for the live
+// snapshot, and runs traffic_advisor::evaluate(). On a positive
+// decision, dispatches the advisory through
+// atc_state_machine::emit_traffic_advisory() and returns the rendered
+// text via `out`. Returns true iff an advisory was emitted (caller is
+// responsible for routing the text to TTS / transcript display).
+//
+// `now_secs` is the monotonic clock the cooldown logic compares
+// against. In the plugin this is XPLMGetElapsedTime; in the headless
+// CLI / tests the caller passes a deterministic counter.
+bool poll_traffic_advisory(const xplane_context::XPlaneContext &ctx,
+                           double now_secs, std::string *out_text);
+
 } // namespace engine
 
 #endif

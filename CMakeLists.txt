@@ -155,6 +155,7 @@ add_library(xp_atc_engine OBJECT
     src/atc/atc_templates.cpp
     src/atc/flight_phase.cpp
     src/atc/atis_generator.cpp
+    src/atc/traffic_advisor.cpp
     src/backends/manager.cpp
     src/data/airport_vrps.cpp
     src/data/airspace_db.cpp

@@ -303,6 +303,31 @@ void update() {
   // Flight-phase auto-correction of ATC state
   atc_state_machine::check_auto_correction(flight_phase::get(), dt);
 
+  // Phase-2 traffic advisory poll. SDK-free engine helper consumes the
+  // live traffic_context snapshot + state-machine state and may emit a
+  // synthetic advisory transition. Only run while idle so a controller
+  // utterance never overlaps with a pilot-driven exchange.
+  if (state_ == PTTState::IDLE && backends::tts_ready()) {
+    const auto &ctx_now = xplane_context::get();
+    std::string advisory_text;
+    double now_secs = static_cast<double>(XPLMGetElapsedTime());
+    if (engine::poll_traffic_advisory(ctx_now, now_secs, &advisory_text) &&
+        !advisory_text.empty()) {
+      float active_freq = (ctx_now.active_com == 1) ? ctx_now.com1_freq_mhz
+                                                    : ctx_now.com2_freq_mhz;
+      char freq_str[16];
+      std::snprintf(freq_str, sizeof(freq_str), "%.3f", active_freq);
+      transcript_.push_back(TranscriptEntry{
+          static_cast<double>(XPLMGetElapsedTime()),
+          false,
+          advisory_text,
+          freq_str,
+      });
+      auto role = role_for_current_state(ctx_now.tower_only);
+      speak_response(advisory_text, role, 1.0f);
+    }
+  }
+
   // Airport-change detection lives in atc_state_machine::process now —
   // it fires off the next pilot transmission. No per-frame loop here.
 

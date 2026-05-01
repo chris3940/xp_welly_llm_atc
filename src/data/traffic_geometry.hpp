@@ -19,6 +19,8 @@
 #ifndef TRAFFIC_GEOMETRY_HPP
 #define TRAFFIC_GEOMETRY_HPP
 
+#include <string>
+
 namespace traffic_geometry {
 
 // Initial bearing from (lat1,lon1) to (lat2,lon2) in degrees true,
@@ -33,6 +35,32 @@ double distance_nm(double lat1, double lon1, double lat2, double lon2);
 // 6.0, abeam left 9.0. The result is rounded to the nearest hour clock
 // position so callers can use it as a phraseology token directly.
 double clock_position(double user_heading_deg, double target_bearing_deg);
+
+// Classify the relative track of a target vs. the user, returning the
+// EU phraseology phrase ("opposite direction", "same direction",
+// "crossing left to right", "crossing right to left", "converging").
+// Inputs are tracks in degrees true; clock_pos is the target's clock
+// position as seen from the user (used to disambiguate left- vs.
+// right-crossing).
+//
+// Angular ranges (signed diff, target_track - user_track normalised to
+// [0, 360)):
+//   - opposite direction: 150° <= diff <= 210°
+//   - same direction:     diff <= 30° or diff >= 330°
+//   - crossing L->R:      60° <= diff <= 120° AND clock_pos in (6, 12]
+//   - crossing R->L:      240° <= diff <= 300° AND clock_pos in (0, 6)
+//   - converging:         fallback when none of the above match
+std::string classify_relative_track(double user_track_deg,
+                                    double target_track_deg, double clock_pos);
+
+// Render the EU "altitude info" phraseology fragment.
+//   - has_mode_c true:                  "indicating <alt> feet"
+//                                       (alt rounded to nearest 100)
+//   - else if |diff| < 2000 ft:         "<n> feet above" / "<n> feet below"
+//                                       (n rounded to nearest 100)
+//   - else:                             "altitude unknown"
+std::string format_altitude_info(double target_alt_msl_ft,
+                                 double user_alt_msl_ft, bool has_mode_c);
 
 } // namespace traffic_geometry
 

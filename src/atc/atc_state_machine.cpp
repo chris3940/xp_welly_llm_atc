@@ -22,9 +22,11 @@
 #include "atc/flight_phase.hpp"
 #include "core/logging.hpp"
 #include "data/airport_vrps.hpp"
+#include "data/traffic_context.hpp"
 #include "persistence/settings.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
@@ -41,6 +43,14 @@ static DepartureType departure_type_ = DepartureType::PATTERN;
 // tower's conversation has ended — reset to IDLE so the new airport's
 // first radio call transitions cleanly.
 static std::string last_airport_id_;
+
+// Phase-2 traffic advisory — stack-of-one. previous_state_ is the
+// ATCState we were in before the synthetic advisory transition;
+// pending_advisory_target_id_ is the modeS_id of the target the advisory
+// referred to, used so a NEGATIVE_CONTACT/LOOKING reply can re-issue
+// with updated geometry from traffic_context::current().
+static ATCState previous_state_ = ATCState::IDLE;
+static uint32_t pending_advisory_target_id_ = 0;
 
 static const char *departure_type_name(DepartureType t) {
   return t == DepartureType::CROSS_COUNTRY ? "CROSS_COUNTRY" : "PATTERN";
@@ -136,6 +146,8 @@ void init() {
   readback_pending_ = false;
   assigned_runway_.clear();
   departure_type_ = DepartureType::PATTERN;
+  previous_state_ = ATCState::IDLE;
+  pending_advisory_target_id_ = 0;
 }
 
 void stop() {
@@ -143,6 +155,8 @@ void stop() {
   readback_pending_ = false;
   assigned_runway_.clear();
   departure_type_ = DepartureType::PATTERN;
+  previous_state_ = ATCState::IDLE;
+  pending_advisory_target_id_ = 0;
 }
 
 void reset() {
@@ -151,6 +165,8 @@ void reset() {
   assigned_runway_.clear();
   departure_type_ = DepartureType::PATTERN;
   last_airport_id_.clear();
+  previous_state_ = ATCState::IDLE;
+  pending_advisory_target_id_ = 0;
   logging::info("ATC state machine reset to IDLE");
 }
 
@@ -186,6 +202,8 @@ const char *state_name(ATCState state) {
     return "EN_ROUTE";
   case ATCState::APPROACH_CONTACT:
     return "APPROACH_CONTACT";
+  case ATCState::TRAFFIC_ADVISORY_PENDING:
+    return "TRAFFIC_ADVISORY_PENDING";
   }
   return "UNKNOWN";
 }
@@ -203,7 +221,13 @@ ATCState state_from_name(const std::string &name) {
       {"UNICOM_ACTIVE", ATCState::UNICOM_ACTIVE},
       {"EN_ROUTE", ATCState::EN_ROUTE},
       {"APPROACH_CONTACT", ATCState::APPROACH_CONTACT},
+      {"TRAFFIC_ADVISORY_PENDING", ATCState::TRAFFIC_ADVISORY_PENDING},
   };
+  // __PREVIOUS__ sentinel: resolve to whatever previous_state_ was when
+  // emit_traffic_advisory() saved it. Used by template entries that exit
+  // TRAFFIC_ADVISORY_PENDING.
+  if (name == "__PREVIOUS__")
+    return previous_state_;
   auto it = kMap.find(name);
   return it != kMap.end() ? it->second : ATCState::IDLE;
 }
@@ -305,6 +329,14 @@ build_vars(const intent_parser::PilotMessage &msg,
        }()},
       {"entry_vrp", msg.vrp_name},
       {"position_remark", position_remark},
+      // Traffic-advisory placeholders. Empty for normal pilot-driven
+      // intents — populated by emit_traffic_advisory() and the
+      // re-issue path in process() before template fill().
+      {"clock", ""},
+      {"distance", ""},
+      {"direction", ""},
+      {"altitude_info", ""},
+      {"type", ""},
   };
 }
 
@@ -353,6 +385,80 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
     departure_type_ = DepartureType::PATTERN;
   }
   last_airport_id_ = ctx.nearest_airport_id;
+
+  // Traffic-advisory peer state. Intercept BEFORE frequency-validation +
+  // unicom_flow because those would otherwise demote state_ to IDLE
+  // (TRAFFIC_ADVISORY_PENDING is not in any of the accept-lists by
+  // design — it's a synthetic peer of GROUND/TOWER/etc).
+  using PIT = intent_parser::PilotIntent;
+  if (state_ == ATCState::TRAFFIC_ADVISORY_PENDING) {
+    auto vars = build_vars(msg, ctx);
+    auto restore_previous_and_clear = [&]() {
+      ATCState restored = previous_state_;
+      logging::info("ATC state: TRAFFIC_ADVISORY_PENDING -> %s (restored)",
+                    state_name(restored));
+      state_ = restored;
+      previous_state_ = ATCState::IDLE;
+      pending_advisory_target_id_ = 0;
+    };
+
+    if (msg.intent == PIT::TRAFFIC_IN_SIGHT) {
+      auto tmpl = atc_templates::lookup(true, "TRAFFIC_ADVISORY_PENDING",
+                                        "TRAFFIC_IN_SIGHT");
+      resp.text = atc_templates::fill(tmpl.response_template, vars);
+      restore_previous_and_clear();
+      resp.next_state = state_;
+      return resp;
+    }
+
+    if (msg.intent == PIT::TRAFFIC_NEGATIVE_CONTACT ||
+        msg.intent == PIT::TRAFFIC_LOOKING) {
+      // Re-issue once with updated clock + distance from the live
+      // traffic snapshot. If the target has dropped out of range we
+      // skip the re-issue and just acknowledge.
+      const auto &snap = traffic_context::current();
+      const traffic_context::TrafficTarget *target = nullptr;
+      for (const auto &t : snap.targets) {
+        if (t.modeS_id == pending_advisory_target_id_) {
+          target = &t;
+          break;
+        }
+      }
+
+      if (target) {
+        char clock_buf[8];
+        char dist_buf[16];
+        std::snprintf(clock_buf, sizeof(clock_buf), "%.0f",
+                      target->clock_position);
+        std::snprintf(dist_buf, sizeof(dist_buf), "%.0f",
+                      target->distance_to_user_nm);
+        vars["clock"] = clock_buf;
+        vars["distance"] = dist_buf;
+      } else {
+        // Target gone — fall back to neutral acknowledgement.
+        vars["clock"] = "12";
+        vars["distance"] = "0";
+      }
+
+      const char *intent_key = (msg.intent == PIT::TRAFFIC_LOOKING)
+                                   ? "TRAFFIC_LOOKING"
+                                   : "TRAFFIC_NEGATIVE_CONTACT";
+      auto tmpl =
+          atc_templates::lookup(true, "TRAFFIC_ADVISORY_PENDING", intent_key);
+      resp.text = atc_templates::fill(tmpl.response_template, vars);
+      restore_previous_and_clear();
+      resp.next_state = state_;
+      return resp;
+    }
+
+    // Any other intent while waiting on the advisory ack — fall back to
+    // the _INVALID template for that state so the pilot gets a nudge.
+    auto tmpl =
+        atc_templates::lookup(true, "TRAFFIC_ADVISORY_PENDING", "_INVALID");
+    resp.text = atc_templates::fill(tmpl.response_template, vars);
+    resp.next_state = state_;
+    return resp;
+  }
 
   // Pilot correction — revert state one step back so the pilot can
   // re-issue the request. Does not require frequency validation.
@@ -702,6 +808,37 @@ void check_auto_correction(flight_phase::FlightPhase phase, float dt) {
   // No matching condition — reset timer
   active_correction_key_.clear();
   correction_timer_ = 0.0f;
+}
+
+std::string
+emit_traffic_advisory(uint32_t target_modeS_id,
+                      const std::map<std::string, std::string> &advisory_vars,
+                      const xplane_context::XPlaneContext &ctx) {
+  // Save the state we'll restore on pilot acknowledgement. Only stash
+  // the previous state if we aren't already inside an advisory — back-
+  // to-back triggers are blocked by the advisor's cooldowns, but be
+  // defensive.
+  if (state_ != ATCState::TRAFFIC_ADVISORY_PENDING) {
+    previous_state_ = state_;
+  }
+  pending_advisory_target_id_ = target_modeS_id;
+  state_ = ATCState::TRAFFIC_ADVISORY_PENDING;
+
+  // Build base vars (callsign, airport, etc.) and merge in the
+  // advisor-supplied advisory placeholders.
+  intent_parser::PilotMessage synthetic_msg;
+  auto vars = build_vars(synthetic_msg, ctx);
+  for (const auto &[k, v] : advisory_vars)
+    vars[k] = v;
+
+  auto tmpl = atc_templates::lookup(true, "TRAFFIC_ADVISORY_PENDING",
+                                    "traffic_advisory");
+  std::string text = atc_templates::fill(tmpl.response_template, vars);
+
+  logging::info("ATC traffic advisory issued: %s -> TRAFFIC_ADVISORY_PENDING "
+                "(target_id=%u)",
+                state_name(previous_state_), target_modeS_id);
+  return text;
 }
 
 } // namespace atc_state_machine

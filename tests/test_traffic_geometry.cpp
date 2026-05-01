@@ -85,3 +85,111 @@ TEST_CASE("traffic_geometry::clock_position: result is always in (0, 12]",
         }
     }
 }
+
+// ── classify_relative_track ─────────────────────────────────────────────────
+
+TEST_CASE("classify_relative_track: opposite direction band",
+          "[traffic][geometry][classifier]") {
+    // user_track = 0; target_track in [150, 210] -> opposite direction.
+    // 12 o'clock keeps the result in the "opposite" branch (ahead of user).
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 150.0, 12.0) ==
+            "opposite direction");
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 180.0, 12.0) ==
+            "opposite direction");
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 210.0, 12.0) ==
+            "opposite direction");
+    // Just outside the lower bound (149°) drops to "converging".
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 149.0, 12.0) ==
+            "converging");
+    // Just outside the upper bound (211°) drops to "converging".
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 211.0, 12.0) ==
+            "converging");
+}
+
+TEST_CASE("classify_relative_track: same direction band",
+          "[traffic][geometry][classifier]") {
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 0.0, 12.0) ==
+            "same direction");
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 30.0, 12.0) ==
+            "same direction");
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 330.0, 12.0) ==
+            "same direction");
+    // Just outside the upper bound (31°) leaves the same-direction zone.
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 31.0, 12.0) !=
+            "same direction");
+    // Just outside the lower bound (329°) likewise.
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 329.0, 12.0) !=
+            "same direction");
+}
+
+TEST_CASE("classify_relative_track: crossing left to right",
+          "[traffic][geometry][classifier]") {
+    // user_track = 0, target_track = 90 (perpendicular crossing) AND
+    // target on the user's left side (clock 9, 10, 11) -> L->R.
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 90.0, 10.0) ==
+            "crossing left to right");
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 60.0, 11.0) ==
+            "crossing left to right");
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 120.0, 9.5) ==
+            "crossing left to right");
+    // Same diff but target on the right side -> classifier rejects the
+    // L->R label and falls through to "converging".
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 90.0, 3.0) !=
+            "crossing left to right");
+}
+
+TEST_CASE("classify_relative_track: crossing right to left",
+          "[traffic][geometry][classifier]") {
+    // user_track = 0, target_track = 270 -> diff = 270 (in [240, 300]) AND
+    // target on the user's right side (clock 1, 2, 3) -> R->L.
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 270.0, 2.0) ==
+            "crossing right to left");
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 240.0, 3.0) ==
+            "crossing right to left");
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 300.0, 1.0) ==
+            "crossing right to left");
+    // Same diff but target on the left -> falls through.
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 270.0, 9.0) !=
+            "crossing right to left");
+}
+
+TEST_CASE("classify_relative_track: fallback converging",
+          "[traffic][geometry][classifier]") {
+    // 45° track diff, target at 12 o'clock — neither perpendicular nor
+    // a same/opposite case.
+    REQUIRE(traffic_geometry::classify_relative_track(0.0, 45.0, 12.0) ==
+            "converging");
+}
+
+// ── format_altitude_info ────────────────────────────────────────────────────
+
+TEST_CASE("format_altitude_info: mode-c rounds to nearest 100 ft",
+          "[traffic][geometry][altitude]") {
+    REQUIRE(traffic_geometry::format_altitude_info(4530.0, 1500.0, true) ==
+            "indicating 4500 feet");
+    REQUIRE(traffic_geometry::format_altitude_info(4571.0, 1500.0, true) ==
+            "indicating 4600 feet");
+    REQUIRE(traffic_geometry::format_altitude_info(0.0, 1500.0, true) ==
+            "indicating 0 feet");
+}
+
+TEST_CASE("format_altitude_info: relative within 2000 ft",
+          "[traffic][geometry][altitude]") {
+    // Target above by 1000 ft.
+    REQUIRE(traffic_geometry::format_altitude_info(2500.0, 1500.0, false) ==
+            "1000 feet above");
+    // Target below by 1000 ft.
+    REQUIRE(traffic_geometry::format_altitude_info(500.0, 1500.0, false) ==
+            "1000 feet below");
+    // Rounding to nearest 100 ft.
+    REQUIRE(traffic_geometry::format_altitude_info(2530.0, 1500.0, false) ==
+            "1000 feet above");
+}
+
+TEST_CASE("format_altitude_info: unknown when far apart and no mode-c",
+          "[traffic][geometry][altitude]") {
+    REQUIRE(traffic_geometry::format_altitude_info(5000.0, 1500.0, false) ==
+            "altitude unknown");
+    REQUIRE(traffic_geometry::format_altitude_info(1500.0, 5000.0, false) ==
+            "altitude unknown");
+}

@@ -12,18 +12,22 @@
 
 #include "atc/atc_state_machine.hpp"
 #include "atc/atc_templates.hpp"
+#include "atc/traffic_advisor.hpp"
 #include "backends/manager.hpp"
 #include "core/logging.hpp"
+#include "data/traffic_context.hpp"
 #include "persistence/settings.hpp"
 
 namespace engine {
 
 static int profanity_warnings_ = 0;
 static int lm_inferences_ = 0;
+static traffic_advisor::AdvisoryHistory advisory_history_;
 
 void reset() {
   profanity_warnings_ = 0;
   lm_inferences_ = 0;
+  advisory_history_ = traffic_advisor::AdvisoryHistory{};
 }
 
 int lm_inferences() { return lm_inferences_; }
@@ -260,6 +264,45 @@ void process_transcript(Input in, Done done) {
         out.response_text = atc_resp.text;
         done(std::move(out));
       });
+}
+
+bool poll_traffic_advisory(const xplane_context::XPlaneContext &ctx,
+                           double now_secs, std::string *out_text) {
+  using FT = xplane_context::FrequencyType;
+
+  traffic_advisor::UserState user;
+  user.atc_state = atc_state_machine::get_state();
+  user.on_active_atc_freq = ctx.frequency_type == FT::TOWER ||
+                            ctx.frequency_type == FT::GROUND ||
+                            ctx.frequency_type == FT::APPROACH;
+  user.lat = ctx.latitude;
+  user.lon = ctx.longitude;
+  user.alt_msl_ft = static_cast<double>(ctx.altitude_ft_msl);
+  user.heading_deg = static_cast<double>(ctx.heading_true);
+  // Ground track == heading_true is a small simplification (no wind
+  // crab) but matches the precision the advisory geometry needs (clock
+  // positions are rounded to the hour).
+  user.track_deg = static_cast<double>(ctx.heading_true);
+  user.groundspeed_kts = static_cast<double>(ctx.groundspeed_kts);
+  user.target_has_mode_c_default = true;
+
+  const auto &traffic = traffic_context::current();
+
+  auto adv =
+      traffic_advisor::evaluate(traffic, user, advisory_history_, now_secs);
+  if (!adv.has_value())
+    return false;
+
+  std::string text =
+      atc_state_machine::emit_traffic_advisory(adv->modeS_id, adv->vars, ctx);
+  traffic_advisor::mark_emitted(advisory_history_, adv->modeS_id, now_secs);
+
+  if (out_text)
+    *out_text = std::move(text);
+
+  logging::info("Engine emitted traffic advisory (target_id=%u)",
+                adv->modeS_id);
+  return true;
 }
 
 } // namespace engine

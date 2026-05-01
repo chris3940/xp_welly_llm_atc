@@ -359,6 +359,10 @@ static bool match_inappropriate_language(const std::string &t) {
 static bool match_negative_correction(const std::string &t) {
   // Explicit correction phrases. Intentionally narrow to avoid false positives
   // with "negative contact", "disregard previous" mid-readback etc.
+  // "Negative contact" is the EU traffic-advisory reply, owned by
+  // TRAFFIC_NEGATIVE_CONTACT — must not be claimed here.
+  if (contains(t, "negative contact") || contains(t, "no contact"))
+    return false;
   if (starts_with(t, "negative") || contains(t, ", negative"))
     return true;
   if (starts_with(t, "correction") || contains(t, ", correction"))
@@ -379,6 +383,27 @@ static bool match_negative_correction(const std::string &t) {
 }
 
 static bool match_unable(const std::string &t) { return contains(t, "unable"); }
+
+// EU traffic-advisory pilot responses. "Traffic in sight" / "Negative
+// contact" / "Looking" all reply to a controller-issued advisory while
+// in the TRAFFIC_ADVISORY_PENDING peer state. Matched before
+// SELF_ANNOUNCE so the literal word "traffic" in the pilot's reply
+// doesn't get classified as a CTAF announcement.
+static bool match_traffic_in_sight(const std::string &t) {
+  return contains(t, "traffic in sight") || contains(t, "in sight");
+}
+
+static bool match_traffic_negative_contact(const std::string &t) {
+  return contains(t, "negative contact") || contains(t, "no contact");
+}
+
+static bool match_traffic_looking(const std::string &t) {
+  // "Looking" is a single keyword and ambiguous (could appear in "looking
+  // for the runway" etc.). Match it conservatively — the rule order in
+  // kRules below puts higher-confidence intents first, so this only fires
+  // when nothing else claims the transcript.
+  return contains(t, "looking");
+}
 
 static bool match_self_announce(const std::string &t) {
   return contains(t, "traffic");
@@ -608,6 +633,14 @@ static const std::vector<IntentRule> kRules = {
     {PilotIntent::RADIO_CHECK, 0.95f, match_radio_check},
     {PilotIntent::GO_AROUND, 0.95f, match_go_around},
     {PilotIntent::LEAVING_FREQUENCY, 0.85f, match_leaving_frequency},
+    // Traffic-advisory pilot responses must come BEFORE SELF_ANNOUNCE —
+    // "Traffic in sight" / "Negative contact" both contain words that
+    // SELF_ANNOUNCE/NEGATIVE_CORRECTION could otherwise claim, but only
+    // NEGATIVE_CORRECTION outranks these (it's matched earlier above with
+    // narrower keywords like "negative on", "correction").
+    {PilotIntent::TRAFFIC_IN_SIGHT, 0.92f, match_traffic_in_sight},
+    {PilotIntent::TRAFFIC_NEGATIVE_CONTACT, 0.92f,
+     match_traffic_negative_contact},
     {PilotIntent::SELF_ANNOUNCE, 0.90f, match_self_announce},
     {PilotIntent::READBACK, 0.90f, match_readback},
     {PilotIntent::READY_FOR_DEPARTURE_VFR, 0.92f,
@@ -633,6 +666,9 @@ static const std::vector<IntentRule> kRules = {
     {PilotIntent::INITIAL_CALL_INBOUND, 0.85f, match_initial_call_inbound},
     {PilotIntent::INITIAL_CALL_TOWER, 0.85f, match_initial_call_tower},
     {PilotIntent::INITIAL_CALL, 0.80f, match_initial_call},
+    // Last-resort: standalone "Looking" reply to a traffic advisory.
+    // Confidence kept low so any more specific intent above wins first.
+    {PilotIntent::TRAFFIC_LOOKING, 0.70f, match_traffic_looking},
 };
 
 // ---------------------------------------------------------------------------
@@ -697,6 +733,12 @@ const char *intent_name(PilotIntent intent) {
     return "INAPPROPRIATE_LANGUAGE";
   case PilotIntent::NEGATIVE_CORRECTION:
     return "NEGATIVE_CORRECTION";
+  case PilotIntent::TRAFFIC_IN_SIGHT:
+    return "TRAFFIC_IN_SIGHT";
+  case PilotIntent::TRAFFIC_NEGATIVE_CONTACT:
+    return "TRAFFIC_NEGATIVE_CONTACT";
+  case PilotIntent::TRAFFIC_LOOKING:
+    return "TRAFFIC_LOOKING";
   }
   return "UNKNOWN";
 }
@@ -742,6 +784,9 @@ PilotIntent intent_from_key(const std::string &key) {
       {"REQUEST_FLIGHT_FOLLOWING", PilotIntent::REQUEST_FLIGHT_FOLLOWING},
       {"INAPPROPRIATE_LANGUAGE", PilotIntent::INAPPROPRIATE_LANGUAGE},
       {"NEGATIVE_CORRECTION", PilotIntent::NEGATIVE_CORRECTION},
+      {"TRAFFIC_IN_SIGHT", PilotIntent::TRAFFIC_IN_SIGHT},
+      {"TRAFFIC_NEGATIVE_CONTACT", PilotIntent::TRAFFIC_NEGATIVE_CONTACT},
+      {"TRAFFIC_LOOKING", PilotIntent::TRAFFIC_LOOKING},
   };
   auto it = kMap.find(key);
   return it != kMap.end() ? it->second : PilotIntent::UNKNOWN;

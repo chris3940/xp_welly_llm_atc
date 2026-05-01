@@ -23,6 +23,7 @@
 #include "atc/intent_parser.hpp"
 #include "core/xplane_context.hpp"
 
+#include <cstdint>
 #include <map>
 #include <string>
 
@@ -40,6 +41,11 @@ enum class ATCState {
   UNICOM_ACTIVE,
   EN_ROUTE,
   APPROACH_CONTACT,
+  // Phase-2 peer state. Entered when the controller issues a traffic
+  // advisory (synthetic, not pilot-driven). On pilot acknowledgement
+  // (TRAFFIC_IN_SIGHT / TRAFFIC_NEGATIVE_CONTACT / TRAFFIC_LOOKING) the
+  // state restores `previous_state_`. See traffic_advisor.hpp.
+  TRAFFIC_ADVISORY_PENDING,
 };
 
 struct ATCResponse {
@@ -73,6 +79,17 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
 // Check and apply auto-corrections based on flight phase mismatches.
 // Call every frame from atc_session::update(). Uses dt for delay timers.
 void check_auto_correction(flight_phase::FlightPhase phase, float dt);
+
+// Synthetic dispatch: enter TRAFFIC_ADVISORY_PENDING and render the
+// initial advisory text. Used by the per-tick advisor to push an
+// advisory through the same template/render path a pilot intent would
+// take, but without going through intent_parser. `target_modeS_id` is
+// stashed so a later TRAFFIC_NEGATIVE_CONTACT / TRAFFIC_LOOKING reply
+// can re-issue with updated geometry. Returns the rendered text.
+std::string
+emit_traffic_advisory(uint32_t target_modeS_id,
+                      const std::map<std::string, std::string> &advisory_vars,
+                      const xplane_context::XPlaneContext &ctx);
 
 } // namespace atc_state_machine
 

@@ -15,6 +15,7 @@ add_executable(xp_wellys_atc_tests
     test_intent_parser.cpp
     test_traffic_geometry.cpp
     test_traffic_context.cpp
+    test_traffic_advisor.cpp
 )
 
 target_include_directories(xp_wellys_atc_tests PRIVATE
