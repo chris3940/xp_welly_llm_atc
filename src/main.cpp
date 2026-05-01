@@ -38,6 +38,7 @@
 #include "core/xplane_context.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/airspace_db.hpp"
+#include "data/traffic_context.hpp"
 #include "persistence/model_paths.hpp"
 #include "persistence/settings.hpp"
 #include "ui/atc_ui.hpp"
@@ -64,6 +65,7 @@ static int atc_panel_cmd_handler(XPLMCommandRef, XPLMCommandPhase phase,
 }
 
 static int atis_check_counter_ = 0;
+static int traffic_check_counter_ = 0;
 static float last_elapsed_ = 0.0f;
 
 static XPLMDataRef dr_atc_verbose_ = nullptr;
@@ -85,6 +87,13 @@ static float flight_loop_cb(float, float, int, void *) {
     // Check ATIS for updates ~1/s (every 60 frames)
     if (++atis_check_counter_ % 60 == 0)
       atis_generator::check_for_update(xplane_context::get());
+    // Refresh traffic snapshot at ~2 Hz (every 30 frames at 60 FPS).
+    // Reading 8 TCAS arrays + computing distance/bearing for up to 63
+    // slots is cheap, but doing it per-frame is wasted work — UI is
+    // gated behind debug_traffic and the engine doesn't consume the
+    // snapshot at frame rate.
+    if (++traffic_check_counter_ % 30 == 0)
+      traffic_context::update();
     ptt_input::update();
     backends::drain_callback_queue();
     atc_session::update();
@@ -144,6 +153,7 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
     airspace_db::init(sys + "Custom Data/1200 atc data/Earth nav data/atc.dat");
   }
   xplane_context::init();
+  traffic_context::init();
   flight_phase::init();
   atis_generator::init();
   audio_recorder::init();
@@ -206,6 +216,7 @@ PLUGIN_API void XPluginStop() {
   audio_recorder::stop();
   atis_generator::stop();
   flight_phase::stop();
+  traffic_context::stop();
   xplane_context::stop();
   airspace_db::stop();
   airport_vrps::stop();

@@ -31,6 +31,7 @@
 #include "core/xplane_context.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/airspace_db.hpp"
+#include "data/traffic_context.hpp"
 #include "persistence/model_manifest.hpp"
 #include "persistence/settings.hpp"
 
@@ -1523,6 +1524,89 @@ static void draw_enroute_tab(const xplane_context::XPlaneContext &ctx) {
   draw_pilot_actions(ctx);
 }
 
+// ── Traffic tab content (debug, gated on settings::debug_traffic) ───
+
+static const char *traffic_phase_label(traffic_context::TrafficPhase p) {
+  using P = traffic_context::TrafficPhase;
+  switch (p) {
+  case P::OnGround:
+    return "Ground";
+  case P::Taxi:
+    return "Taxi";
+  case P::Takeoff:
+    return "Takeoff";
+  case P::Climb:
+    return "Climb";
+  case P::Cruise:
+    return "Cruise";
+  case P::Descend:
+    return "Descend";
+  case P::Final:
+    return "Final";
+  case P::Pattern:
+    return "Pattern";
+  case P::Landed:
+    return "Landed";
+  case P::Unknown:
+  default:
+    return "?";
+  }
+}
+
+static void draw_traffic_tab() {
+  const auto &snap = traffic_context::current();
+
+  ImGui::Text("%zu target%s within 40 NM", snap.targets.size(),
+              snap.targets.size() == 1 ? "" : "s");
+  if (snap.last_update_secs > 0.0) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("(t=%.1fs)", snap.last_update_secs);
+  }
+
+  if (snap.targets.empty()) {
+    ImGui::TextDisabled("(no traffic — check that an injection plugin is "
+                        "active and aircraft are nearby)");
+    return;
+  }
+
+  ImGuiTableFlags flags = ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_BordersInnerV |
+                          ImGuiTableFlags_SizingFixedFit;
+  if (!ImGui::BeginTable("traffic_table", 7, flags))
+    return;
+
+  ImGui::TableSetupColumn("Callsign");
+  ImGui::TableSetupColumn("Bearing");
+  ImGui::TableSetupColumn("Clock");
+  ImGui::TableSetupColumn("Dist (NM)");
+  ImGui::TableSetupColumn("Alt diff (ft)");
+  ImGui::TableSetupColumn("GS (kts)");
+  ImGui::TableSetupColumn("Phase");
+  ImGui::TableHeadersRow();
+
+  const std::size_t row_count = std::min<std::size_t>(snap.targets.size(), 10);
+  for (std::size_t i = 0; i < row_count; ++i) {
+    const auto &t = snap.targets[i];
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextUnformatted(t.callsign.empty() ? "(no id)" : t.callsign.c_str());
+    ImGui::TableSetColumnIndex(1);
+    ImGui::Text("%03.0f", t.bearing_from_user_deg);
+    ImGui::TableSetColumnIndex(2);
+    ImGui::Text("%2.0f", t.clock_position);
+    ImGui::TableSetColumnIndex(3);
+    ImGui::Text("%5.1f", t.distance_to_user_nm);
+    ImGui::TableSetColumnIndex(4);
+    ImGui::Text("%+5.0f", t.altitude_diff_ft);
+    ImGui::TableSetColumnIndex(5);
+    ImGui::Text("%3.0f", t.groundspeed_kts);
+    ImGui::TableSetColumnIndex(6);
+    ImGui::TextUnformatted(traffic_phase_label(t.phase));
+  }
+
+  ImGui::EndTable();
+}
+
 // ── ATC Commands Panel (tabbed) ─────────────────────────────────
 
 static void draw_atc_panel() {
@@ -1629,6 +1713,12 @@ static void draw_atc_panel() {
       }
       if (hint_colored)
         ImGui::PopStyleColor();
+
+      // Traffic tab — debug-only. Hidden unless `debug_traffic` is set.
+      if (settings::debug_traffic() && ImGui::BeginTabItem("Traffic")) {
+        draw_traffic_tab();
+        ImGui::EndTabItem();
+      }
 
       ImGui::EndTabBar();
     }
