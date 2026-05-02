@@ -1243,6 +1243,36 @@ static void draw_pilot_actions(const xplane_context::XPlaneContext &ctx,
                 ctx.on_ground && ctx.airport_freqs.has_ground() &&
                 !ctx.tower_only)
               reason = "tune_ground_first";
+            // Tower-only airports: hide INITIAL_CALL_GROUND. The single
+            // controller is addressed as "Tower" — REQUEST_TAXI on the
+            // Tower freq is the right opening call. Showing both confuses
+            // the pilot ("which one do I use?").
+            if (!reason && ctx.tower_only && key == "INITIAL_CALL_GROUND")
+              reason = "tower_only_no_ground";
+            // RUNWAY_VACATED: only meaningful right after a landing.
+            // The IDLE-state template still accepts a late call (after
+            // auto-correction reset state to IDLE while the pilot was
+            // still rolling out / taxiing clear), but at PARKED it's pure
+            // noise. Hide unless we're in a landing-related state OR the
+            // pilot just rolled out (TAXI/LANDING_ROLL phase).
+            if (!reason && key == "RUNWAY_VACATED") {
+              bool active_landing =
+                  atc_state == atc_state_machine::ATCState::LANDING_CLEARED ||
+                  atc_state == atc_state_machine::ATCState::PATTERN_ENTRY ||
+                  atc_state ==
+                      atc_state_machine::ATCState::TOUCH_AND_GO_CLEARED;
+              bool just_landed =
+                  phase == flight_phase::FlightPhase::LANDING_ROLL ||
+                  (phase == flight_phase::FlightPhase::TAXI && active_landing);
+              if (!active_landing && !just_landed)
+                reason = "no_landing_in_progress";
+            }
+            // READBACK: only when ATC actually expects one. The state
+            // machine flag drives the readback override below; here we
+            // suppress the standalone hint to keep the panel honest.
+            if (!reason && key == "READBACK" &&
+                !atc_state_machine::is_readback_pending())
+              reason = "no_readback_pending";
             if (reason) {
               filtered.emplace_back(key, reason);
               return true;
