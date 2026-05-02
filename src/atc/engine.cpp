@@ -69,10 +69,9 @@ static bool has_recognisable_elements(const intent_parser::PilotMessage &msg) {
     return true;
   std::string t = to_lower_copy(msg.raw_transcript);
   static const char *kKeywords[] = {
-      "tower",   "ground",   "approach", "runway",   "request",
-      "ready",   "downwind", "base",     "final",    "holding",
-      "qnh",     "wilco",    "roger",    "departure", "information",
-      "inbound", "vacated",
+      "tower",    "ground",    "approach",    "runway",  "request", "ready",
+      "downwind", "base",      "final",       "holding", "qnh",     "wilco",
+      "roger",    "departure", "information", "inbound", "vacated",
   };
   for (const char *kw : kKeywords) {
     if (t.find(kw) != std::string::npos)
@@ -87,8 +86,9 @@ static bool has_recognisable_elements(const intent_parser::PilotMessage &msg) {
 //   - elements recognised        -> "garbled, say again"
 //   - nothing recognised         -> "say again"
 //   - 2nd unclear in a row       -> "say again, use standard phraseology"
-static std::string build_unclear_response(const intent_parser::PilotMessage &msg,
-                                          const std::string &fallback_cs) {
+static std::string
+build_unclear_response(const intent_parser::PilotMessage &msg,
+                       const std::string &fallback_cs) {
   ++unclear_streak_;
   std::string cs = msg.callsign.empty() ? fallback_cs : msg.callsign;
   std::string prefix = cs.empty() ? std::string{} : cs + ", ";
@@ -382,9 +382,8 @@ void process_transcript(Input in, Done done) {
   backends::lm::classify_intent_async(
       in.transcript, sys_prompt,
       // NOLINTNEXTLINE(bugprone-exception-escape)
-      [parsed, ctx_snapshot, now_secs, fallback_cs,
-       done = std::move(done)](std::string intent_key,
-                               bool lm_success) mutable {
+      [parsed, ctx_snapshot, now_secs, fallback_cs, done = std::move(done)](
+          std::string intent_key, bool lm_success) mutable {
         if (!lm_success)
           intent_key = "_INVALID";
 

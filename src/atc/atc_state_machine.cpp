@@ -392,22 +392,10 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
 
   using FT = xplane_context::FrequencyType;
 
-  // Airport change while EN_ROUTE: the previous tower's conversation is
-  // over, the pilot is now in a new airport's airspace. Drop to IDLE so
-  // the first call at the new airport (e.g. "Bern Tower, HB-LUK,
-  // inbound") transitions cleanly from IDLE, not from EN_ROUTE (whose
-  // template only handles INITIAL_CALL_APPROACH + REQUEST_FLIGHT_FOLLOWING).
-  // Only triggers on airport change while already EN_ROUTE; assigned_runway_
-  // is also released since it referred to the previous airport.
-  if (!last_airport_id_.empty() && ctx.nearest_airport_id != last_airport_id_ &&
-      state_ == ATCState::EN_ROUTE) {
-    logging::info("ATC: airport changed %s -> %s while EN_ROUTE, resetting",
-                  last_airport_id_.c_str(), ctx.nearest_airport_id.c_str());
-    state_ = ATCState::IDLE;
-    assigned_runway_.clear();
-    departure_type_ = DepartureType::PATTERN;
-  }
-  last_airport_id_ = ctx.nearest_airport_id;
+  // Airport-change reset is now per-frame in check_airport_change().
+  // Keep the in-process call as a safety net in case the per-frame path
+  // hasn't fired yet for the current ctx.
+  check_airport_change(ctx);
 
   // Pilot correction — revert state one step back so the pilot can
   // re-issue the request. Does not require frequency validation.
@@ -682,6 +670,39 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
   }
 
   return resp;
+}
+
+void check_airport_change(const xplane_context::XPlaneContext &ctx) {
+  // Per-frame airport tracker. While not EN_ROUTE, just shadow the
+  // current nearest airport so the moment the pilot enters EN_ROUTE we
+  // have a valid baseline. While EN_ROUTE and the airport changes, drop
+  // to IDLE so the UI hint pipeline (and the next pilot call) treat
+  // this as a fresh inbound contact for the new airport. This unlocks
+  // INITIAL_CALL_INBOUND hints as soon as the airport lock changes —
+  // important for VFR arrivals at small airports without an Approach
+  // controller (e.g. LSZG), where staying EN_ROUTE silences the hints.
+  if (ctx.nearest_airport_id.empty())
+    return;
+
+  if (state_ != ATCState::EN_ROUTE) {
+    last_airport_id_ = ctx.nearest_airport_id;
+    return;
+  }
+
+  if (last_airport_id_.empty()) {
+    last_airport_id_ = ctx.nearest_airport_id;
+    return;
+  }
+
+  if (ctx.nearest_airport_id == last_airport_id_)
+    return;
+
+  logging::info("ATC: airport changed %s -> %s while EN_ROUTE, resetting",
+                last_airport_id_.c_str(), ctx.nearest_airport_id.c_str());
+  state_ = ATCState::IDLE;
+  assigned_runway_.clear();
+  departure_type_ = DepartureType::PATTERN;
+  last_airport_id_ = ctx.nearest_airport_id;
 }
 
 // ── Auto-correction state ────────────────────────────────────────

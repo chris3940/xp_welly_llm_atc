@@ -141,8 +141,10 @@ struct NearbyAirport {
   std::string icao;
   std::string name;
   double distance_nm = 0.0;
-  bool has_tower = false;
   bool has_atis = false;
+  bool has_ground = false;
+  bool has_tower = false;
+  bool has_approach = false;
 };
 
 // Return up to `max_count` airports within `max_nm` of the aircraft,

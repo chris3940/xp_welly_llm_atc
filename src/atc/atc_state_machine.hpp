@@ -83,6 +83,13 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
 // Call every frame from atc_session::update(). Uses dt for delay timers.
 void check_auto_correction(flight_phase::FlightPhase phase, float dt);
 
+// Per-frame airport-change reset. When the pilot is EN_ROUTE and the
+// nearest airport changes (e.g. crossing into a new control zone), drop
+// to IDLE so the UI hint pipeline reflects the new airport's options
+// (INITIAL_CALL_INBOUND etc.) instead of remaining silent on EN_ROUTE.
+// Call from atc_session::update() after check_auto_correction().
+void check_airport_change(const xplane_context::XPlaneContext &ctx);
+
 // Render a controller-issued traffic advisory through the standard
 // template path WITHOUT changing ATCState. The traffic dialog runs
 // parallel to the main flow (see traffic_dialog.hpp). Returns the

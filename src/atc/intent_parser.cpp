@@ -537,8 +537,22 @@ static bool match_leaving_frequency(const std::string &t) {
 
 static bool has_facility_keyword(const std::string &t,
                                  const std::string &facility) {
-  return starts_with(t, facility) || contains(t, " " + facility + ",") ||
-         contains(t, " " + facility + " ") || ends_with(t, " " + facility);
+  // Match the facility as a standalone word, regardless of surrounding
+  // punctuation. Whisper occasionally emits leading dashes ("-Tower, ...")
+  // or other punctuation that breaks naive prefix/contains checks; we
+  // normalize non-alnum chars to spaces and look for a padded match.
+  std::string norm;
+  norm.reserve(t.size() + 2);
+  norm += ' ';
+  for (char c : t) {
+    if (std::isalnum(static_cast<unsigned char>(c)))
+      norm += c;
+    else
+      norm += ' ';
+  }
+  norm += ' ';
+  std::string padded = " " + facility + " ";
+  return norm.find(padded) != std::string::npos;
 }
 
 static bool match_initial_call_approach(const std::string &t) {
