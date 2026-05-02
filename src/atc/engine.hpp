@@ -58,6 +58,12 @@ void reset();
 // maintain an aggregate inference counter (STT + TTS + LM) add this in.
 int lm_inferences();
 
+// Count of consecutive unintelligible pilot transmissions since the
+// last successful intent. Reset by reset() and by any clear pilot
+// reply. Exposed for tests / instrumentation; the engine drives the
+// "say again, use standard phraseology" escalation off this internally.
+int unclear_streak();
+
 // Process a pilot transcript end-to-end:
 //   - quality check (low quality -> say again)
 //   - rule-based intent parse

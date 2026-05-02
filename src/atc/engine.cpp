@@ -19,24 +19,101 @@
 #include "data/traffic_context.hpp"
 #include "persistence/settings.hpp"
 
+#include <algorithm>
+#include <cctype>
+
 namespace engine {
 
 static int profanity_warnings_ = 0;
 static int lm_inferences_ = 0;
 static traffic_advisor::AdvisoryHistory advisory_history_;
+// Counts back-to-back unintelligible transmissions. Reset whenever the
+// pilot lands a valid intent. Drives the escalation from "garbled" to
+// "use standard phraseology" so a controller-style nudge follows the
+// pilot's repeated unclear calls.
+static int unclear_streak_ = 0;
 
 void reset() {
   profanity_warnings_ = 0;
   lm_inferences_ = 0;
+  unclear_streak_ = 0;
   advisory_history_ = traffic_advisor::AdvisoryHistory{};
   traffic_dialog::reset();
 }
 
+int unclear_streak() { return unclear_streak_; }
+
 int lm_inferences() { return lm_inferences_; }
 
-static std::string build_say_again(const std::string &callsign) {
-  return callsign.empty() ? "Say again." : callsign + ", say again.";
+// Lower-case copy used for keyword scanning. ASCII only — Whisper
+// transcripts don't contain anything else.
+static std::string to_lower_copy(const std::string &s) {
+  std::string out = s;
+  std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return out;
 }
+
+// True if the transcript carries at least one identifiable ATC element
+// (callsign extracted, runway extracted, or any of a handful of
+// unambiguous EU/ICAO keywords). Used to distinguish a partially-
+// understood transmission ("Tower ... runway 14 ...") from total
+// noise. The set is deliberately small: words common across pilot
+// requests AND readbacks, picked so a single match means the pilot
+// was using radio phraseology even if Whisper killed a key word.
+static bool has_recognisable_elements(const intent_parser::PilotMessage &msg) {
+  if (!msg.callsign.empty())
+    return true;
+  if (!msg.runway.empty())
+    return true;
+  std::string t = to_lower_copy(msg.raw_transcript);
+  static const char *kKeywords[] = {
+      "tower",   "ground",   "approach", "runway",   "request",
+      "ready",   "downwind", "base",     "final",    "holding",
+      "qnh",     "wilco",    "roger",    "departure", "information",
+      "inbound", "vacated",
+  };
+  for (const char *kw : kKeywords) {
+    if (t.find(kw) != std::string::npos)
+      return true;
+  }
+  return false;
+}
+
+// Three-tier "I didn't get that" response. Increments unclear_streak_;
+// the caller resets it when a valid intent finally lands. EU/ICAO
+// phraseology (Doc 4444 / EU 2020/469):
+//   - elements recognised        -> "garbled, say again"
+//   - nothing recognised         -> "say again"
+//   - 2nd unclear in a row       -> "say again, use standard phraseology"
+static std::string build_unclear_response(const intent_parser::PilotMessage &msg,
+                                          const std::string &fallback_cs) {
+  ++unclear_streak_;
+  std::string cs = msg.callsign.empty() ? fallback_cs : msg.callsign;
+  std::string prefix = cs.empty() ? std::string{} : cs + ", ";
+
+  if (unclear_streak_ >= 2)
+    return prefix + "say again, use standard phraseology.";
+  if (has_recognisable_elements(msg))
+    return prefix + "your transmission was garbled, say again.";
+  return prefix + "say again.";
+}
+
+// Convenience for the quality-rejection path which has no parsed
+// PilotMessage yet — only the raw transcript and a probably-empty
+// callsign hint from the cockpit settings.
+static std::string build_unclear_response_raw(const std::string &transcript,
+                                              const std::string &fallback_cs) {
+  intent_parser::PilotMessage stub;
+  stub.raw_transcript = transcript;
+  return build_unclear_response(stub, fallback_cs);
+}
+
+// Reset the back-to-back unclear counter. Called whenever a meaningful
+// reply (template-rendered, traffic dialog, profanity etc.) is about to
+// be returned to the pilot.
+static void mark_clear() { unclear_streak_ = 0; }
 
 static std::string build_profanity_response(int warning_number,
                                             const std::string &callsign) {
@@ -78,6 +155,9 @@ static bool try_traffic_dialog(const intent_parser::PilotMessage &msg,
                    reply.text.empty() ? "(silent)" : reply.text.c_str());
   out.parsed = msg;
   out.response_text = std::move(reply.text);
+  // Pilot landed an intelligible TRAFFIC_* reply — break any in-flight
+  // "say again" escalation.
+  mark_clear();
   return true;
 }
 
@@ -87,6 +167,13 @@ static Output run_state_machine(const intent_parser::PilotMessage &msg,
   if (settings::debug_logging())
     logging::debug("ATC response text: %s",
                    atc_resp.text.empty() ? "(silent)" : atc_resp.text.c_str());
+  // A landed intent (rule parser or LM both produce non-UNKNOWN) means
+  // the pilot was understood — even if the state machine subsequently
+  // rejected the request via _INVALID/phase guard. Break the streak so
+  // the next garbled call still starts at the friendly "garbled, say
+  // again" tier rather than the escalation.
+  if (msg.intent != intent_parser::PilotIntent::UNKNOWN)
+    mark_clear();
   Output out;
   out.parsed = msg;
   out.response_text = atc_resp.text;
@@ -98,11 +185,16 @@ void process_transcript(Input in, Done done) {
     logging::debug("Whisper response (quality=%.2f): \"%s\"", in.quality,
                    in.transcript.c_str());
 
-  // Poor transcript quality — likely noise or engine sounds
+  // Poor transcript quality — likely noise or engine sounds. Even at
+  // very low quality the transcript may still contain a recognised
+  // ATC keyword, so route via the unclear-response builder instead of
+  // the fixed "say again". Never the moment to land a valid intent,
+  // so the streak counter advances normally.
   if (in.quality < 0.3f) {
     logging::info("Transcript quality too low, requesting say again");
     Output out;
-    out.response_text = build_say_again(in.pilot_callsign);
+    out.response_text =
+        build_unclear_response_raw(in.transcript, in.pilot_callsign);
     done(std::move(out));
     return;
   }
@@ -145,6 +237,8 @@ void process_transcript(Input in, Done done) {
     out.parsed = parsed;
     out.response_text = build_profanity_response(profanity_warnings_, cs);
     out.is_warning = true;
+    // Coherent (if rude) utterance — no "say again" loop carries over.
+    mark_clear();
     done(std::move(out));
     return;
   }
@@ -219,20 +313,23 @@ void process_transcript(Input in, Done done) {
   }
 
   if (!backends::lm_ready()) {
-    // LM not loaded (headless tools, model still downloading) — use
-    // state machine with _INVALID fallback.
-    auto atc_resp = atc_state_machine::process(parsed, ctx);
-    std::string response = atc_resp.text;
-    if (response.empty()) {
-      std::string cs =
-          parsed.callsign.empty() ? in.pilot_callsign : parsed.callsign;
-      response = "Say again, " + cs + ".";
+    // LM not loaded (headless tools, model still downloading). If the
+    // rule parser at least guessed an intent (low confidence), let the
+    // state machine handle it so phase / frequency guards can deliver
+    // their tailored "you appear to be on the ground" / "still be
+    // airborne" replies. Only fall back to the unclear-tier helper
+    // when the parser hit UNKNOWN — there's literally nothing for the
+    // state machine to act on then.
+    if (parsed.intent == intent_parser::PilotIntent::UNKNOWN) {
+      Output out;
+      out.parsed = parsed;
+      out.response_text = build_unclear_response(parsed, in.pilot_callsign);
+      logging::info("ATC (LM unavailable, UNKNOWN): %s",
+                    out.response_text.c_str());
+      done(std::move(out));
+      return;
     }
-    logging::info("ATC (fallback): %s", response.c_str());
-    Output out;
-    out.parsed = parsed;
-    out.response_text = response;
-    done(std::move(out));
+    done(run_state_machine(parsed, ctx));
     return;
   }
 
@@ -281,16 +378,31 @@ void process_transcript(Input in, Done done) {
   xplane_context::XPlaneContext ctx_snapshot = ctx;
   double now_secs = in.now_secs;
   ++lm_inferences_;
+  std::string fallback_cs = in.pilot_callsign;
   backends::lm::classify_intent_async(
       in.transcript, sys_prompt,
       // NOLINTNEXTLINE(bugprone-exception-escape)
-      [parsed, ctx_snapshot, now_secs, done = std::move(done)](
-          std::string intent_key, bool lm_success) mutable {
+      [parsed, ctx_snapshot, now_secs, fallback_cs,
+       done = std::move(done)](std::string intent_key,
+                               bool lm_success) mutable {
         if (!lm_success)
           intent_key = "_INVALID";
 
         if (settings::debug_logging())
           logging::debug("LM classified intent: %s", intent_key.c_str());
+
+        // LM declined to guess. The rule parser already failed (we
+        // wouldn't be in this callback otherwise) so the controller
+        // asks the pilot to say again. Tier picks itself based on
+        // whether anything in the transcript was recognisable.
+        if (intent_key == "_INVALID") {
+          Output out;
+          out.parsed = parsed;
+          out.response_text = build_unclear_response(parsed, fallback_cs);
+          logging::info("ATC (LM _INVALID): %s", out.response_text.c_str());
+          done(std::move(out));
+          return;
+        }
 
         // Build a PilotMessage with LM-classified intent.
         auto lm_msg = parsed;
@@ -313,6 +425,10 @@ void process_transcript(Input in, Done done) {
                                                       ? "(silent)"
                                                       : atc_resp.text.c_str());
 
+        // LM produced a concrete intent — pilot was understood, even
+        // if the state machine subsequently rejected the request.
+        if (lm_msg.intent != intent_parser::PilotIntent::UNKNOWN)
+          mark_clear();
         out.parsed = lm_msg;
         out.response_text = atc_resp.text;
         done(std::move(out));
