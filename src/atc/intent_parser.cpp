@@ -597,10 +597,21 @@ static bool match_readback(const std::string &t) {
   // " via " is more ambiguous on its own — keep the taxi gate.
   if (contains(t, "taxi") && contains(t, " via "))
     return true;
-  // Common takeoff/landing readback patterns
-  if (contains(t, "cleared") &&
+  // Common takeoff/landing readback patterns. Whisper occasionally drops
+  // the past-tense "-ed" on "cleared" (especially for the takeoff phrase),
+  // so accept "clear for takeoff" too.
+  if ((contains(t, "cleared") || contains(t, "clear for") ||
+       contains(t, "clear to")) &&
       (contains(t, "takeoff") || contains(t, "take off") ||
        contains(t, "land")))
+    return true;
+  // VFR cross-country departure clearance contains "on course approved"
+  // and "frequency change approved" — readback echoes one or both.
+  if (contains(t, "on course") &&
+      (contains(t, "approved") || contains(t, "approve")))
+    return true;
+  if ((contains(t, "frequency change") || contains(t, "change frequency")) &&
+      (contains(t, "approved") || contains(t, "when airborne")))
     return true;
   // Readback of clearance with reporting instruction
   // e.g. "Takeoff runway 06, report downwind" or "Cleared to land, runway 06"

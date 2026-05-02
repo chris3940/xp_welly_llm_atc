@@ -326,6 +326,11 @@ build_vars(const intent_parser::PilotMessage &msg,
                                         sizeof(kPositionRemarks[0]))];
   }
 
+  // Controller name for taxi/ground intents — at tower-only airports the
+  // tower controller handles taxi clearances on the tower frequency, so
+  // the spoken callsign should be "Tower" not "Ground".
+  std::string taxi_controller = ctx.tower_only ? "Tower" : "Ground";
+
   return {
       {"callsign", get_callsign(msg)},
       {"airport", airport_name(ctx)},
@@ -337,6 +342,7 @@ build_vars(const intent_parser::PilotMessage &msg,
       {"frequency", format_freq(ground_freq)},
       {"tower_frequency", format_freq(tower_freq)},
       {"ground_frequency", format_freq(ground_freq)},
+      {"taxi_controller", taxi_controller},
       {"position", extract_position(msg, ctx)},
       {"pattern_direction",
        [&]() {

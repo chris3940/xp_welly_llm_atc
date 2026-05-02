@@ -358,13 +358,12 @@ void update() {
     atis_tuned_timer_ = 0.0f;
   }
 
-  bool atc_idle =
-      atc_state_machine::get_state() == atc_state_machine::ATCState::IDLE;
-  // ATIS also needs the TTS backend ready, otherwise we'd silently
-  // fail.
+  // ATIS is a side-channel like Traffic — independent of ATCState.
+  // Pilot can re-tune ATIS at any point (e.g. holding point) to refresh
+  // the broadcast. Only PTT state and TTS readiness gate playback so we
+  // never overlap an active pilot/controller exchange.
   if (state_ == PTTState::IDLE && atis_cooldown_ <= 0.0f && tuned &&
-      atis_tuned_timer_ >= kAtisTuneDelaySec && atc_idle &&
-      backends::tts_ready()) {
+      atis_tuned_timer_ >= kAtisTuneDelaySec && backends::tts_ready()) {
     std::string atis_text = atis_generator::generate_atis_text(ctx);
 
     if (settings::debug_logging())

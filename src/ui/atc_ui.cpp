@@ -1230,12 +1230,16 @@ static void draw_pilot_actions(const xplane_context::XPlaneContext &ctx,
     valid.push_back("READBACK");
   }
 
-  // Button category for grouping
+  // Button category for grouping. At tower-only airports the same
+  // controller handles taxi clearances on the tower frequency, so collapse
+  // ground-ops hints into the Tower category to avoid showing two
+  // categories that route to the same controller.
   enum class BtnCat { GROUND_OPS, TOWER_OPS, PATTERN, GENERAL };
-  auto intent_category = [](const std::string &key) -> BtnCat {
+  bool collapse_ground = ctx.tower_only;
+  auto intent_category = [collapse_ground](const std::string &key) -> BtnCat {
     if (key == "INITIAL_CALL_GROUND" || key == "REQUEST_TAXI" ||
         key == "REQUEST_TAXI_PARKING")
-      return BtnCat::GROUND_OPS;
+      return collapse_ground ? BtnCat::TOWER_OPS : BtnCat::GROUND_OPS;
     if (key == "INITIAL_CALL_TOWER" || key == "READY_FOR_DEPARTURE" ||
         key == "RUNWAY_VACATED")
       return BtnCat::TOWER_OPS;
