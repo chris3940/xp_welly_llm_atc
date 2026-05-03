@@ -55,6 +55,48 @@ static std::string to_lower_copy(const std::string &s) {
   return out;
 }
 
+// Extract the multiset of digits-only tokens from a transcript. Used by
+// the LM-repair validator below: a 3B model occasionally invents runway
+// numbers / frequencies / altitudes that were never in the pilot's input
+// (the example pattern in the prompt has been observed leaking into
+// inputs that contain no number at all). If the repair carries a
+// numeric token that the original lacks, we discard the repair and fall
+// back to the raw Whisper transcript. Letters and "9er" → "9" mappings
+// are deliberately ignored — only contiguous digit runs are compared.
+static std::vector<std::string> extract_digit_tokens(const std::string &s) {
+  std::vector<std::string> out;
+  std::string cur;
+  for (char c : s) {
+    if (std::isdigit(static_cast<unsigned char>(c))) {
+      cur += c;
+    } else if (!cur.empty()) {
+      out.push_back(cur);
+      cur.clear();
+    }
+  }
+  if (!cur.empty())
+    out.push_back(cur);
+  return out;
+}
+
+// True when `repaired` contains a digit token that is absent from
+// `original`. The check is multiset-based so a repeated runway is fine
+// as long as both sides have it. Catches the canonical hallucination:
+//   original: "Clear for takeoff Delta Chari Hotel"  (no digits)
+//   repaired: "Cleared for takeoff runway 06, ..."   (introduces "06")
+static bool repair_invents_digits(const std::string &original,
+                                  const std::string &repaired) {
+  auto orig_digits = extract_digit_tokens(original);
+  auto rep_digits = extract_digit_tokens(repaired);
+  for (const auto &d : rep_digits) {
+    auto it = std::find(orig_digits.begin(), orig_digits.end(), d);
+    if (it == orig_digits.end())
+      return true;
+    orig_digits.erase(it);
+  }
+  return false;
+}
+
 // True if the transcript carries at least one identifiable ATC element
 // (callsign extracted, runway extracted, or any of a handful of
 // unambiguous EU/ICAO keywords). Used to distinguish a partially-
@@ -270,7 +312,8 @@ void process_transcript(Input in, Done done) {
   // worse by second-guessing them:
   //   0.99 — INAPPROPRIATE_LANGUAGE, NEGATIVE_CORRECTION
   //   0.95 — UNABLE, RADIO_CHECK, GO_AROUND
-  //   0.92 — TRAFFIC_IN_SIGHT, TRAFFIC_NEGATIVE_CONTACT, READY_FOR_DEPARTURE_VFR
+  //   0.92 — TRAFFIC_IN_SIGHT, TRAFFIC_NEGATIVE_CONTACT,
+  //   READY_FOR_DEPARTURE_VFR
   // READY_FOR_DEPARTURE_VFR specifically requires both "ready for
   // departure" AND a cross-country marker ("on course", "northbound",
   // etc.) — when the rule parser claims it at 0.92, Whisper would have
@@ -388,28 +431,53 @@ void process_transcript(Input in, Done done) {
                         parsed.confidence, intent_key.c_str());
         }
 
-        // Readback safety net: when the controller is waiting for a
-        // readback and the rule parser already classified the pilot's
-        // reply as READBACK, trust the rule parser even if the LM
-        // hallucinates a different intent (e.g. TRAFFIC_IN_SIGHT for a
-        // taxi readback whose Whisper transcription was garbled). The
-        // alternative — letting the LM's misclassification fall through
-        // to the state's _INVALID template — produces noisy, wrong ATC
-        // chatter ("continue taxi to holding point") at exactly the
-        // moment ICAO requires silence. The rule parser's READBACK
-        // matchers are well-tested and keyword-anchored, so this
-        // override is safe.
-        if (atc_state_machine::is_readback_pending() &&
-            rule_intent == intent_parser::PilotIntent::READBACK &&
+        // Readback safety net: trust rule=READBACK whenever the rule
+        // parser is confident (>=0.90), regardless of whether
+        // readback_pending is currently armed. Two cases this catches:
+        //   1) Mid-clearance readbacks where readback_pending=true.
+        //      LM occasionally hallucinates TRAFFIC_IN_SIGHT or
+        //      READY_FOR_DEPARTURE for a taxi readback whose Whisper
+        //      transcription was garbled.
+        //   2) Closing readbacks AFTER state→IDLE has already cleared
+        //      readback_pending (e.g. post-landing "general aviation
+        //      parking via Alpha, good day"). Without this widened
+        //      check, LM=REQUEST_TAXI wins and triggers a brand-new
+        //      departure cycle (TAXI_CLEARED → TOWER_CONTACT auto-
+        //      advance), turning the parking-arrival readback into a
+        //      bogus takeoff briefing.
+        // The rule parser's READBACK matchers are keyword-anchored
+        // (wilco/roger/good day/holding point/cleared+takeoff/qnh/
+        // hold short/runway-suffix endings), so false positives are
+        // rare. Letting the LM override these consistently produces
+        // wrong ATC chatter at moments ICAO requires silence.
+        if (rule_intent == intent_parser::PilotIntent::READBACK &&
+            parsed.confidence >= 0.90f &&
             lm_intent != intent_parser::PilotIntent::READBACK) {
           logging::info("Readback safety net: keeping rule=READBACK over "
-                        "LM=%s (readback_pending=true)",
-                        intent_key.c_str());
+                        "LM=%s (rule_conf=%.2f, readback_pending=%s)",
+                        intent_key.c_str(), parsed.confidence,
+                        atc_state_machine::is_readback_pending() ? "true"
+                                                                 : "false");
           intent_key = "READBACK";
           lm_intent = intent_parser::PilotIntent::READBACK;
         }
 
-        if (result.whisper_fix && !result.repaired_transcript.empty()) {
+        // Validate the repair before letting it influence anything
+        // downstream. If the LM invented digits that weren't in the
+        // original (a runway number, a frequency, an altitude), drop
+        // the repair and keep the raw Whisper text. Logged at info so
+        // the rejection is visible without debug-mode.
+        bool repair_accepted =
+            result.whisper_fix && !result.repaired_transcript.empty();
+        if (repair_accepted &&
+            repair_invents_digits(original_transcript,
+                                  result.repaired_transcript)) {
+          logging::info("Whisper repair rejected (invented digits): "
+                        "\"%s\" -> \"%s\"",
+                        original_transcript.c_str(),
+                        result.repaired_transcript.c_str());
+          repair_accepted = false;
+        } else if (repair_accepted) {
           logging::info("Whisper repair: \"%s\" -> \"%s\"",
                         original_transcript.c_str(),
                         result.repaired_transcript.c_str());
@@ -432,7 +500,7 @@ void process_transcript(Input in, Done done) {
         auto lm_msg = parsed;
         lm_msg.intent = lm_intent;
         lm_msg.confidence = 0.85f;
-        if (result.whisper_fix && !result.repaired_transcript.empty()) {
+        if (repair_accepted) {
           // Replace the raw transcript with the repaired one so the
           // UI history shows what the controller acted on. The
           // confidence stays at 0.85 — repair doesn't make us more

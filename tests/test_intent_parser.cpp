@@ -88,3 +88,23 @@ TEST_CASE("parse: facility keyword is punctuation-tolerant", "[intent][parse]")
     REQUIRE((m.intent == PilotIntent::INITIAL_CALL_GROUND ||
              m.intent == PilotIntent::REQUEST_TAXI));
 }
+
+// Pilot's clearance readback after Approach/Tower issues "cleared into the
+// control zone, runway X, joining instructions ..." must classify as
+// READBACK rather than UNKNOWN. Whisper sometimes drops the leading word
+// (logged as "-Control-Zone runway 32 Delta Charlie Hotel") and without
+// these patterns the rule parser landed on UNKNOWN, letting the LM
+// classify the readback as REPORT_POSITION_DOWNWIND.
+TEST_CASE("parse: control zone clearance readback classifies as READBACK", "[intent][parse][readback]")
+{
+    auto ctx = airborne_ctx();
+
+    auto m1 = parse("Cleared into the control zone runway 32 Delta Charlie Hotel", ctx);
+    REQUIRE(m1.intent == PilotIntent::READBACK);
+
+    auto m2 = parse("-Control-Zone runway 32 Delta Charlie Hotel", ctx);
+    REQUIRE(m2.intent == PilotIntent::READBACK);
+
+    auto m3 = parse("Joining instructions, runway 32, QNH 1013, Delta Charlie Hotel", ctx);
+    REQUIRE(m3.intent == PilotIntent::READBACK);
+}

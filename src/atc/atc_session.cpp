@@ -62,7 +62,14 @@ static constexpr float kMinRecordingDuration = 0.5f;
 // ATIS playback state
 static bool atis_playing_ = false;
 static float atis_cooldown_ = 0.0f;
-static constexpr float kAtisCooldownSec = 30.0f;
+// 120 s cooldown: an inbound VFR pilot at LSZB tunes ATIS, then APP, then
+// TWR within ~30-90 s. With a 30 s cooldown the previous-airport's ATIS
+// re-fires when the pilot retunes ATIS during that sequence — annoying
+// and unrealistic. 120 s is long enough to span a normal arrival
+// sequence but short enough that a pilot who deliberately retunes ATIS
+// minutes later (e.g. checking for a new letter) still gets fresh
+// playback.
+static constexpr float kAtisCooldownSec = 120.0f;
 static float atis_tuned_timer_ = 0.0f;           // how long tuned to ATIS freq
 static constexpr float kAtisTuneDelaySec = 2.0f; // wait before playing
 

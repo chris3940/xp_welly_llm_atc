@@ -523,9 +523,8 @@ void classify_with_repair_async(std::string transcript,
       // acceptable. This is the safety net the grammar would have
       // provided at the token level.
       bool intent_in_enum =
-          intent == "_INVALID" ||
-          std::find(valid_set.begin(), valid_set.end(), intent) !=
-              valid_set.end();
+          intent == "_INVALID" || std::find(valid_set.begin(), valid_set.end(),
+                                            intent) != valid_set.end();
 
       if (!ok_intent || intent.empty() || !intent_in_enum) {
         r.intent_name = "_INVALID";

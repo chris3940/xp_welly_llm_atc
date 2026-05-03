@@ -331,6 +331,17 @@ build_vars(const intent_parser::PilotMessage &msg,
   // the spoken callsign should be "Tower" not "Ground".
   std::string taxi_controller = ctx.tower_only ? "Tower" : "Ground";
 
+  // Tower-handoff suffix for Approach-issued clearances. When the pilot
+  // is already on the Tower frequency (tower-only airport, or pilot
+  // pre-tuned), Approach must NOT instruct "contact Tower on X.XX" —
+  // the pilot is already there. Templates that need a handoff suffix
+  // use {tower_handoff_phrase} which expands to either an empty string
+  // or ", contact Tower on X.XX" depending on the active frequency.
+  std::string tower_handoff_phrase;
+  if (ctx.frequency_type != FT::TOWER && tower_freq >= 100.0f) {
+    tower_handoff_phrase = ", contact Tower on " + format_freq(tower_freq);
+  }
+
   return {
       {"callsign", get_callsign(msg)},
       {"airport", airport_name(ctx)},
@@ -352,6 +363,7 @@ build_vars(const intent_parser::PilotMessage &msg,
        }()},
       {"entry_vrp", msg.vrp_name},
       {"position_remark", position_remark},
+      {"tower_handoff_phrase", tower_handoff_phrase},
       // Traffic-advisory placeholders. Empty for normal pilot-driven
       // intents — populated by render_traffic_advisory() and traffic_dialog
       // before template fill().

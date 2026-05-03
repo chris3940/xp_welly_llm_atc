@@ -610,6 +610,16 @@ static bool match_readback(const std::string &t) {
   if (contains(t, "goodbye") || contains(t, "good bye") ||
       contains(t, "good day") || contains(t, "see you"))
     return true;
+  // Clearance readback phrases — pilot echoes Approach/Tower clearance to
+  // enter a control zone or follow joining instructions. These are
+  // controller-issued phraseology and only ever appear in readbacks, not
+  // requests. Whisper sometimes hyphenates compound nouns ("control-zone"),
+  // so accept both spellings.
+  if (contains(t, "control zone") || contains(t, "control-zone") ||
+      contains(t, "into the zone") || contains(t, "cleared into") ||
+      contains(t, "cleared to enter") || contains(t, "joining instructions") ||
+      contains(t, "joining the"))
+    return true;
   // Taxi/clearance instruction readback (repeating instructions, not
   // requesting). These phrases are ATC-clearance phraseology only — pilots
   // never use them in requests. Match standalone so a Whisper mistranscription
@@ -853,14 +863,12 @@ PilotMessage parse(const std::string &transcript,
     if (corr_pos != std::string::npos) {
       // Trim the prefix before "correction" to check for negation marker.
       std::string prefix = text.substr(0, corr_pos);
-      while (!prefix.empty() &&
-             (prefix.back() == ' ' || prefix.back() == ',' ||
-              prefix.back() == '.' || prefix.back() == '\t'))
+      while (!prefix.empty() && (prefix.back() == ' ' || prefix.back() == ',' ||
+                                 prefix.back() == '.' || prefix.back() == '\t'))
         prefix.pop_back();
-      bool prefix_is_negation = prefix.empty() || prefix == "no" ||
-                                prefix == "negative" ||
-                                ends_with(prefix, " no") ||
-                                ends_with(prefix, " negative");
+      bool prefix_is_negation =
+          prefix.empty() || prefix == "no" || prefix == "negative" ||
+          ends_with(prefix, " no") || ends_with(prefix, " negative");
 
       size_t start = corr_pos + std::string("correction").size();
       while (start < text.size() &&

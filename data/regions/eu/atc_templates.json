@@ -53,9 +53,9 @@
         "requires_readback": false
       },
       "INITIAL_CALL_APPROACH": {
-        "response": "{callsign}, {airport} Approach, pass your message.",
+        "response": "{callsign}, {airport} Approach, radar contact, runway {runway}, QNH {qnh}, report field in sight.",
         "next_state": "APPROACH_CONTACT",
-        "requires_readback": false
+        "requires_readback": true
       },
       "RUNWAY_VACATED": {
         "response": "{callsign}, roger, contact ground on {ground_frequency}, good day.",
@@ -319,9 +319,9 @@
     },
     "EN_ROUTE": {
       "INITIAL_CALL_APPROACH": {
-        "response": "{callsign}, {airport} Approach, pass your message.",
+        "response": "{callsign}, {airport} Approach, radar contact, runway {runway}, QNH {qnh}, report field in sight.",
         "next_state": "APPROACH_CONTACT",
-        "requires_readback": false
+        "requires_readback": true
       },
       "_INVALID": {
         "response": "",
@@ -364,22 +364,22 @@
         "requires_readback": false
       },
       "INITIAL_CALL_INBOUND": {
-        "response": "{callsign}, cleared into {airport} control zone, runway {runway}, QNH {qnh}, contact Tower on {tower_frequency}.",
+        "response": "{callsign}, cleared into {airport} control zone, runway {runway}, QNH {qnh}{tower_handoff_phrase}.",
         "next_state": "PATTERN_ENTRY",
         "requires_readback": true
       },
       "INITIAL_CALL_INBOUND_VRP": {
-        "response": "{callsign}, cleared to enter control zone via {entry_vrp}, runway {runway}, QNH {qnh}, contact Tower on {tower_frequency}.",
+        "response": "{callsign}, cleared to enter control zone via {entry_vrp}, runway {runway}, QNH {qnh}{tower_handoff_phrase}.",
         "next_state": "PATTERN_ENTRY",
         "requires_readback": true
       },
       "INITIAL_CALL_TOWER": {
-        "response": "{callsign}, cleared into {airport} control zone, runway {runway}, QNH {qnh}, contact Tower on {tower_frequency}.",
+        "response": "{callsign}, cleared into {airport} control zone, runway {runway}, QNH {qnh}{tower_handoff_phrase}.",
         "next_state": "PATTERN_ENTRY",
         "requires_readback": true
       },
       "REQUEST_LANDING": {
-        "response": "{callsign}, cleared into {airport} control zone, runway {runway}, QNH {qnh}, contact Tower on {tower_frequency}.",
+        "response": "{callsign}, cleared into {airport} control zone, runway {runway}, QNH {qnh}{tower_handoff_phrase}.",
         "next_state": "PATTERN_ENTRY",
         "requires_readback": true
       },
