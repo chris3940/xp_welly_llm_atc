@@ -23,6 +23,7 @@
 #include "atc/intent_parser.hpp"
 #include "core/xplane_context.hpp"
 
+#include <deque>
 #include <map>
 #include <string>
 
@@ -124,6 +125,39 @@ void check_airport_change(const xplane_context::XPlaneContext &ctx,
 std::string
 render_traffic_advisory(const std::map<std::string, std::string> &advisory_vars,
                         const xplane_context::XPlaneContext &ctx);
+
+// ── State history accessors ─────────────────────────────────────────
+// Read-only views into the bounded history deque maintained by
+// transition_to(). Useful for downstream consumers (LM-classify
+// prompt, hint filter, intent-rule adjustments) that need to
+// disambiguate situations where the current state alone is not
+// enough.
+
+// Most-recent past state. Returns IDLE when the history is empty
+// (e.g. right after init/stop/reset, or before the first transition).
+ATCState previous_state();
+
+// True iff `s` was visited within the last `max_age_secs`. The
+// caller's clock (now_secs) must use the same monotonic source as
+// the timestamps fed to process()/disregard()/check_*. Current state
+// counts: a pilot still mid-LANDING_CLEARED is "recently in"
+// LANDING_CLEARED.
+bool was_recently_in(ATCState s, double max_age_secs, double now_secs);
+
+// Domain-specific convenience helper. True when the pilot recently
+// touched down: LANDING_CLEARED or TOUCH_AND_GO_CLEARED was visited
+// within `window_secs` (default 120 s). Caller must additionally
+// check ctx.on_ground if "still rolling out" matters.
+bool just_landed(double now_secs, double window_secs = 120.0);
+
+// Read-only access to the full history deque (oldest at front).
+// Stable across calls until the next transition.
+const std::deque<StateHistoryEntry> &get_history();
+
+// Comma-separated history of state names for prompt embedding,
+// chronological order. Includes the current state as the last
+// element. Example: "PATTERN_ENTRY,LANDING_CLEARED,IDLE".
+std::string history_csv();
 
 } // namespace atc_state_machine
 

@@ -896,6 +896,46 @@ void check_auto_correction(flight_phase::FlightPhase phase, float dt,
   correction_timer_ = 0.0f;
 }
 
+// ── State history accessors ─────────────────────────────────────────
+
+ATCState previous_state() {
+  if (history_.empty())
+    return ATCState::IDLE;
+  return history_.back().state;
+}
+
+bool was_recently_in(ATCState s, double max_age_secs, double now_secs) {
+  if (state_ == s)
+    return true;
+  for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+    if (now_secs - it->timestamp_secs > max_age_secs)
+      return false; // entries beyond this are even older
+    if (it->state == s)
+      return true;
+  }
+  return false;
+}
+
+bool just_landed(double now_secs, double window_secs) {
+  return was_recently_in(ATCState::LANDING_CLEARED, window_secs, now_secs) ||
+         was_recently_in(ATCState::TOUCH_AND_GO_CLEARED, window_secs, now_secs);
+}
+
+const std::deque<StateHistoryEntry> &get_history() { return history_; }
+
+std::string history_csv() {
+  std::string out;
+  for (const auto &e : history_) {
+    if (!out.empty())
+      out += ',';
+    out += state_name(e.state);
+  }
+  if (!out.empty())
+    out += ',';
+  out += state_name(state_);
+  return out;
+}
+
 std::string
 render_traffic_advisory(const std::map<std::string, std::string> &advisory_vars,
                         const xplane_context::XPlaneContext &ctx) {
