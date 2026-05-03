@@ -264,6 +264,24 @@ void process_transcript(Input in, Done done) {
     return;
   }
 
+  // ── High-confidence rule-based short-circuit ──────────────────────
+  // The rule parser assigns >= 0.95 only to intents whose keywords are
+  // very unambiguous and Whisper-robust (RADIO_CHECK, UNABLE, GO_AROUND,
+  // INAPPROPRIATE_LANGUAGE, NEGATIVE_CORRECTION). Skip the LM call
+  // entirely — saves ~600 ms of latency and avoids the LM round-trip
+  // for cases where the rule parser is essentially never wrong.
+  // Threshold is deliberately above 0.92 so READY_FOR_DEPARTURE_VFR
+  // and traffic-acknowledgement intents still go through the LM for
+  // sub-variant disambiguation and Whisper-repair.
+  if (parsed.confidence >= 0.95f && parsed.intent != PI::UNKNOWN) {
+    if (settings::debug_logging())
+      logging::debug("Rule-based short-circuit: %s (conf=%.2f) — skip LM",
+                     intent_parser::intent_name(parsed.intent),
+                     parsed.confidence);
+    done(run_state_machine(parsed, ctx));
+    return;
+  }
+
   // ── Always-on LM classification with constrained JSON output ──────
   // The LM gets the rule-based parser's intent as a low-priority
   // hint, the valid_intents enum for the current state (grammar-

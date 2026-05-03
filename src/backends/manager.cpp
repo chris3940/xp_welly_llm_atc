@@ -350,7 +350,10 @@ void respond_async(std::string system_prompt, std::string user_text,
 //   "\"READBACK\"" | "\"REQUEST_TAXI\"" | "\"_INVALID\"" repaired ::= "\""
 //   char* "\"" bool   ::= "true" | "false" ws     ::= " "? char   ::= [^"\\] |
 //   "\\" ["\\bfnrt/]
-static std::string
+// Currently unused — grammar-constrained generation is disabled in
+// classify_with_repair_async (see comment there). Kept compiled so
+// re-enablement is one switch in the worker, no code resurrection.
+[[maybe_unused]] static std::string
 build_classify_grammar(const std::vector<std::string> &valid_intents) {
   std::string g;
   g += "root ::= \"{\" ws \"\\\"intent\\\":\" ws intent ws \",\" ws "
@@ -465,11 +468,24 @@ void classify_with_repair_async(std::string transcript,
     return;
   }
 
-  std::string grammar = build_classify_grammar(valid_intents);
+  // Grammar-constrained generation is currently disabled (Nov 2026):
+  // a live X-Plane crash was reported on the first call after enabling
+  // GBNF + top_k + low temp in respond_constrained. Without a stack
+  // trace the most likely cause is the grammar sampler interacting
+  // poorly with top_k filtering when no grammar-allowed tokens remain
+  // in the top_k window. Until that is debugged, we run the prompt
+  // through plain respond() (the proven path used by classify_intent
+  // for months) and rely on the JSON-strict prompt + tolerant parser
+  // + post-hoc enum validation against valid_intents to keep the
+  // model on the rails. The grammar code path remains in
+  // LlamaLm::respond_constrained() for future re-enablement.
+  // Snapshot valid_intents into a set so the worker can validate
+  // the model output without holding any reference to the caller.
+  std::vector<std::string> valid_set = valid_intents;
 
   spawn_worker([transcript = std::move(transcript),
                 system_prompt = std::move(system_prompt),
-                grammar = std::move(grammar),
+                valid_set = std::move(valid_set),
                 cb = std::move(callback)]() mutable {
     std::string raw;
     {
@@ -481,7 +497,7 @@ void classify_with_repair_async(std::string transcript,
       }
       if (lm_ptr) {
         auto t0 = std::chrono::steady_clock::now();
-        raw = lm_ptr->respond_constrained(system_prompt, transcript, grammar);
+        raw = lm_ptr->respond(system_prompt, transcript);
         auto t1 = std::chrono::steady_clock::now();
         g_last_lm_ms = static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)
@@ -501,7 +517,17 @@ void classify_with_repair_async(std::string transcript,
       json_extract_string(raw, "repaired", &repaired);
       json_extract_bool(raw, "whisper_fix", &whisper_fix);
 
-      if (!ok_intent || intent.empty()) {
+      // Without a grammar constraint the model can return anything.
+      // Validate the intent against the supplied enum and downgrade
+      // to _INVALID on any mismatch. _INVALID itself is always
+      // acceptable. This is the safety net the grammar would have
+      // provided at the token level.
+      bool intent_in_enum =
+          intent == "_INVALID" ||
+          std::find(valid_set.begin(), valid_set.end(), intent) !=
+              valid_set.end();
+
+      if (!ok_intent || intent.empty() || !intent_in_enum) {
         r.intent_name = "_INVALID";
         r.success = false;
       } else {
