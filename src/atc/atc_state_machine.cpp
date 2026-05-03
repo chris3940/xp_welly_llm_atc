@@ -625,6 +625,15 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
   else if (resp.requires_readback)
     readback_pending_ = true;
 
+  // Leaving the controller's frequency or resetting drops any stale
+  // readback context. Without this, "frequency change good day" after
+  // an unread-back takeoff clearance keeps readback_pending armed,
+  // and the UI hint pipeline (readback_override in atc_ui) silences
+  // every other hint at the next airport / center freq.
+  if (resp.next_state == ATCState::EN_ROUTE ||
+      resp.next_state == ATCState::IDLE)
+    readback_pending_ = false;
+
   // Lock runway on first clearance that references a runway
   if (assigned_runway_.empty() && resp.next_state != ATCState::IDLE) {
     std::string rwy = get_runway(msg, ctx);
@@ -700,6 +709,11 @@ void check_airport_change(const xplane_context::XPlaneContext &ctx) {
   logging::info("ATC: airport changed %s -> %s while EN_ROUTE, resetting",
                 last_airport_id_.c_str(), ctx.nearest_airport_id.c_str());
   state_ = ATCState::IDLE;
+  // The previous airport's ATC is no longer talking to us — any pending
+  // readback context dies with the handoff. Without this, the UI hint
+  // pipeline keeps showing only READBACK at the new airport because
+  // readback_override stays armed.
+  readback_pending_ = false;
   assigned_runway_.clear();
   departure_type_ = DepartureType::PATTERN;
   last_airport_id_ = ctx.nearest_airport_id;

@@ -66,26 +66,38 @@ static constexpr float kAtisCooldownSec = 30.0f;
 static float atis_tuned_timer_ = 0.0f;           // how long tuned to ATIS freq
 static constexpr float kAtisTuneDelaySec = 2.0f; // wait before playing
 
-// Map the current ATC state + airport type to a logical voice role.
-// Tower-only airports always speak with the Tower voice (in real life
-// the same controller handles taxi clearances on the tower
-// frequency). Cross-country / en-route uses the Center voice — the
-// pilot has switched to a different facility.
-static model_manifest::VoiceRole role_for_current_state(bool tower_only) {
-  using S = atc_state_machine::ATCState;
+// Map the pilot's currently-tuned frequency to a logical voice role.
+// The transmitting controller is whichever one owns the freq the pilot
+// is listening to — *not* the state machine's next_state. Without this,
+// a Ground handoff message ("contact Tower on 120.100") gets spoken
+// with the Tower voice, because the state has already advanced to
+// TOWER_CONTACT by the time speak_response runs.
+//
+// Tower-only airports collapse Ground/Approach onto the Tower voice
+// (one controller handles everything on the tower freq). Unknown /
+// Center / unicom-class freqs fall back to the Center voice — that's
+// the en-route facility a pilot would talk to between airports.
+static model_manifest::VoiceRole
+role_for_frequency(const xplane_context::XPlaneContext &ctx) {
+  using FT = xplane_context::FrequencyType;
   using R = model_manifest::VoiceRole;
-  if (tower_only)
+  if (ctx.tower_only)
     return R::Tower;
-  switch (atc_state_machine::get_state()) {
-  case S::EN_ROUTE:
-    return R::Center;
-  case S::IDLE:
-  case S::GROUND_CONTACT:
-  case S::TAXI_CLEARED:
+  switch (ctx.frequency_type) {
+  case FT::ATIS:
+    return R::Atis;
+  case FT::DELIVERY:
+  case FT::GROUND:
     return R::Ground;
-  default:
+  case FT::TOWER:
     return R::Tower;
+  case FT::APPROACH:
+  case FT::UNICOM:
+  case FT::CTAF:
+  case FT::UNKNOWN:
+    return R::Center;
   }
+  return R::Center;
 }
 
 // Speak ATC response via local TTS, then transition to PLAYING → IDLE.
@@ -285,11 +297,13 @@ void on_ptt_released() {
                   out.response_text,
                   freq_for_atc,
               });
-              // Role chosen at speak time so a state transition that
-              // happened during inference (e.g. TAXI_CLEARED -> TOWER_CONTACT
-              // auto-advance) picks the right voice.
+              // Role follows the frequency the pilot is currently
+              // tuned to — that's the controller actually transmitting.
+              // Tying it to the state machine misroutes handoff
+              // messages (Ground saying "contact Tower" would speak
+              // with Tower's voice).
               const auto &c = xplane_context::get();
-              auto role = role_for_current_state(c.tower_only);
+              auto role = role_for_frequency(c);
               speak_response(out.response_text, role, 1.0f);
             });
       },
@@ -345,7 +359,7 @@ void update() {
           advisory_text,
           freq_str,
       });
-      auto role = role_for_current_state(ctx_now.tower_only);
+      auto role = role_for_frequency(ctx_now);
       speak_response(advisory_text, role, 1.0f);
     }
   }
