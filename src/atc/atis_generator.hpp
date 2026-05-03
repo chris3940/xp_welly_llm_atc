@@ -37,9 +37,17 @@ void check_for_update(const xplane_context::XPlaneContext &ctx);
 // Generate full ATIS text for the nearest airport
 std::string generate_atis_text(const xplane_context::XPlaneContext &ctx);
 
-// Returns true if the active COM frequency matches the ATIS freq of nearest
-// airport
+// Returns true if either COM is tuned to the ATIS freq of the nearest
+// airport (within range and tolerance). Uses which_com_tuned_to_atis()
+// internally — kept for callers that don't care which radio matches.
 bool is_tuned_to_atis(const xplane_context::XPlaneContext &ctx);
+
+// Returns 1 or 2 if that COM is tuned to the nearest airport's ATIS freq
+// within tolerance and within reception range; 0 otherwise. When BOTH
+// COMs are on ATIS, prefers the active COM so the audio routes to the
+// radio the pilot is transmitting on (consistent with single-COM
+// behaviour).
+int which_com_tuned_to_atis(const xplane_context::XPlaneContext &ctx);
 
 } // namespace atis_generator
 

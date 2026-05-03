@@ -31,10 +31,19 @@ void stop();
 void play_ptt_click();
 
 // Play raw int16 PCM samples on the X-Plane radio bus at given volume
-// (0.0–1.0). This is the path used for ATC TTS responses (Piper output)
-// and for ATIS playback.
+// (0.0–1.0). Routes to whichever COM the user has marked active in
+// settings. Used for controller TTS replies — the pilot transmits on
+// the active COM, so the reply plays back there.
 void play_pcm(std::vector<int16_t> pcm16, uint32_t sample_rate_hz, int channels,
               float volume);
+
+// Play raw int16 PCM samples on a specific COM's radio bus (1 or 2). Use
+// this when the playback should not follow the active-COM setting —
+// e.g. ATIS auto-broadcast on the COM that is tuned to ATIS, even when
+// the pilot's active COM is on Tower. Other com values fall back to
+// COM1.
+void play_pcm_on_com(int com, std::vector<int16_t> pcm16,
+                     uint32_t sample_rate_hz, int channels, float volume);
 
 // Play WAV data on the X-Plane radio bus at given volume (0.0–1.0).
 // Kept for the audio-self-test feature in the UI which records mic →
@@ -43,6 +52,13 @@ void play_wav(const std::vector<uint8_t> &wav_data, float volume);
 
 // Returns true while audio is being played back
 bool is_playing();
+
+// Stop the currently-playing audio immediately. Unlike stop() this is
+// intended for in-flight aborts (pilot retunes COM during ATIS playback,
+// disregards a long ATC reply, etc.) — the audio system stays
+// initialized and ready for the next play_pcm() call. Safe to call when
+// nothing is playing.
+void abort_playback();
 
 } // namespace audio_player
 

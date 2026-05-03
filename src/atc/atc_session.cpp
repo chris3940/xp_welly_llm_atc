@@ -61,6 +61,11 @@ static constexpr float kMinRecordingDuration = 0.5f;
 
 // ATIS playback state
 static bool atis_playing_ = false;
+// COM (1 or 2) the active ATIS broadcast started on. Pinned at trigger
+// time so the abort check stays consistent if the pilot rapidly cycles
+// COM2 while COM1 is also on ATIS — we abort the stream that's playing,
+// not whichever COM still happens to be on the ATIS freq.
+static int atis_active_com_ = 0;
 static float atis_cooldown_ = 0.0f;
 // 120 s cooldown: an inbound VFR pilot at LSZB tunes ATIS, then APP, then
 // TWR within ~30-90 s. With a 30 s cooldown the previous-airport's ATIS
@@ -111,13 +116,14 @@ role_for_frequency(const xplane_context::XPlaneContext &ctx) {
 // `length_scale` > 1.0 makes Piper speak slower (used for ATIS).
 static void speak_response(const std::string &text,
                            model_manifest::VoiceRole role,
-                           float length_scale = 1.0f) {
+                           float length_scale = 1.0f, int com_override = 0) {
   state_ = PTTState::PLAYING;
   tts_pending_ = true;
   ++total_inferences_; // TTS inference
 
   backends::tts::synthesize_async(
-      text, role, length_scale, [](backends::tts::Audio audio, bool success) {
+      text, role, length_scale,
+      [com_override](backends::tts::Audio audio, bool success) {
         tts_pending_ = false;
         if (success && !audio.pcm16.empty()) {
           if (settings::debug_logging()) {
@@ -128,8 +134,10 @@ static void speak_response(const std::string &text,
                           audio.pcm16.size(), audio.sample_rate_hz);
             XPLMDebugString(dbg);
           }
-          audio_player::play_pcm(std::move(audio.pcm16), audio.sample_rate_hz,
-                                 audio.channels, settings::volume());
+          int com = com_override > 0 ? com_override : settings::active_com();
+          audio_player::play_pcm_on_com(com, std::move(audio.pcm16),
+                                        audio.sample_rate_hz, audio.channels,
+                                        settings::volume());
         } else {
           XPLMDebugString(
               "[xp_wellys_atc][ERROR] TTS failed, skipping playback\n");
@@ -150,6 +158,7 @@ void init() {
   total_inferences_ = 0;
   engine::reset();
   atis_playing_ = false;
+  atis_active_com_ = 0;
   atis_cooldown_ = 0.0f;
   atis_tuned_timer_ = 0.0f;
 }
@@ -374,14 +383,31 @@ void update() {
   // Airport-change detection lives in atc_state_machine::process now —
   // it fires off the next pilot transmission. No per-frame loop here.
 
-  // ATIS playback trigger — requires COM radio power + tuning delay
+  // ATIS playback trigger — requires COM radio power + tuning delay.
+  // ATIS reception works on EITHER COM1 or COM2: pilots commonly park
+  // ATIS on COM2 (standby) while keeping COM1 on the controller's freq.
   const auto &ctx = xplane_context::get();
-  bool tuned = ctx.com_radio_powered && atis_generator::is_tuned_to_atis(ctx);
+  int atis_com = ctx.com_radio_powered ? atis_generator::which_com_tuned_to_atis(ctx) : 0;
+  bool tuned = atis_com != 0;
 
   if (tuned) {
     atis_tuned_timer_ += dt;
   } else {
     atis_tuned_timer_ = 0.0f;
+  }
+
+  // Pilot retuned (or powered off) the specific COM that's playing ATIS
+  // — abort. Aborts even if the OTHER COM is still on ATIS, because we
+  // can't switch buses mid-broadcast. The cooldown stays intact so re-
+  // tuning ATIS within the cooldown window stays silent (we already
+  // announced this letter).
+  if (atis_playing_ && atis_com != atis_active_com_) {
+    audio_player::abort_playback();
+    atis_playing_ = false;
+    state_ = PTTState::IDLE;
+    if (settings::debug_logging())
+      XPLMDebugString("[xp_wellys_atc][DEBUG] ATIS aborted: pilot retuned "
+                      "the COM that was playing ATIS\n");
   }
 
   // ATIS is a side-channel like Traffic — independent of ATCState.
@@ -392,15 +418,21 @@ void update() {
       atis_tuned_timer_ >= kAtisTuneDelaySec && backends::tts_ready()) {
     std::string atis_text = atis_generator::generate_atis_text(ctx);
 
-    if (settings::debug_logging())
-      XPLMDebugString(
-          ("[xp_wellys_atc][DEBUG] ATIS triggered: " + atis_text + "\n")
-              .c_str());
+    if (settings::debug_logging()) {
+      char dbg[64];
+      std::snprintf(dbg, sizeof(dbg), " (COM%d)", atis_com);
+      XPLMDebugString(("[xp_wellys_atc][DEBUG] ATIS triggered" +
+                       std::string(dbg) + ": " + atis_text + "\n")
+                          .c_str());
+    }
 
-    float active_freq =
-        (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
+    // Log the ATIS broadcast against the COM it actually plays on, not
+    // the active COM — pilot may be on Tower with active=COM1 while
+    // ATIS streams through COM2.
+    float atis_com_freq =
+        (atis_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
     char freq_str[16];
-    std::snprintf(freq_str, sizeof(freq_str), "%.3f", active_freq);
+    std::snprintf(freq_str, sizeof(freq_str), "%.3f", atis_com_freq);
 
     transcript_.push_back(TranscriptEntry{
         static_cast<double>(XPLMGetElapsedTime()),
@@ -410,11 +442,12 @@ void update() {
     });
 
     atis_playing_ = true;
+    atis_active_com_ = atis_com;
     atis_cooldown_ = kAtisCooldownSec;
     // ATIS reads slower than tower/ground — Piper length_scale > 1
     // produces the slower rate the OpenAI path used to get from
     // speed=0.85.
-    speak_response(atis_text, model_manifest::VoiceRole::Atis, 1.18f);
+    speak_response(atis_text, model_manifest::VoiceRole::Atis, 1.18f, atis_com);
   }
 }
 

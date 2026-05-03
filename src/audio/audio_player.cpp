@@ -207,6 +207,17 @@ void stop() {
   active_pcm16_.clear();
 }
 
+void abort_playback() {
+  std::lock_guard<std::mutex> lock(channel_mutex_);
+  if (!active_channel_) {
+    return;
+  }
+  XPLMStopAudio(active_channel_);
+  active_channel_ = nullptr;
+  is_playing_ = false;
+  active_pcm16_.clear();
+}
+
 // ── PTT click ────────────────────────────────────────────────────
 
 void play_ptt_click() {
@@ -240,6 +251,12 @@ void play_ptt_click() {
 
 void play_pcm(std::vector<int16_t> pcm16, uint32_t sample_rate_hz, int channels,
               float volume) {
+  play_pcm_on_com(settings::active_com(), std::move(pcm16), sample_rate_hz,
+                  channels, volume);
+}
+
+void play_pcm_on_com(int com, std::vector<int16_t> pcm16,
+                     uint32_t sample_rate_hz, int channels, float volume) {
   if (pcm16.empty()) {
     XPLMDebugString("[xp_wellys_atc] play_pcm() called with empty buffer\n");
     return;
@@ -250,7 +267,7 @@ void play_pcm(std::vector<int16_t> pcm16, uint32_t sample_rate_hz, int channels,
   }
 
   XPLMAudioBus bus =
-      (settings::active_com() == 2) ? xplm_AudioRadioCom2 : xplm_AudioRadioCom1;
+      (com == 2) ? xplm_AudioRadioCom2 : xplm_AudioRadioCom1;
   play_pcm16(std::move(pcm16), static_cast<int>(sample_rate_hz), channels,
              volume, bus);
 }

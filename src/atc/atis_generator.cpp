@@ -231,28 +231,40 @@ std::string generate_atis_text(const xplane_context::XPlaneContext &ctx) {
   return text;
 }
 
-bool is_tuned_to_atis(const xplane_context::XPlaneContext &ctx) {
-  if (ctx.atis_freq_mhz < 100.0f)
-    return false;
+// Out-of-range check: ~60 NM realistic for ground-level ATIS VHF.
+static bool atis_in_range(const xplane_context::XPlaneContext &ctx) {
+  if (ctx.airport_lat == 0.0 && ctx.airport_lon == 0.0)
+    return true; // unknown airport position — assume in range
+  double dlat = (ctx.latitude - ctx.airport_lat) * 60.0; // 1 deg = 60 NM
+  double dlon = (ctx.longitude - ctx.airport_lon) * 60.0 *
+                std::cos(ctx.latitude * M_PI / 180.0);
+  double dist_nm = std::sqrt(dlat * dlat + dlon * dlon);
+  return dist_nm <= 60.0;
+}
 
-  float active_freq =
-      (ctx.active_com == 1) ? ctx.com1_freq_mhz : ctx.com2_freq_mhz;
-
+static bool freq_matches_atis(float freq, float atis_freq) {
   // Match within 0.005 MHz tolerance (833 kHz spacing rounding)
-  if (std::fabs(active_freq - ctx.atis_freq_mhz) >= 0.005f)
-    return false;
+  return std::fabs(freq - atis_freq) < 0.005f;
+}
 
-  // VHF range check: ~60 NM realistic for ground-level ATIS
-  if (ctx.airport_lat != 0.0 || ctx.airport_lon != 0.0) {
-    double dlat = (ctx.latitude - ctx.airport_lat) * 60.0; // 1 deg = 60 NM
-    double dlon = (ctx.longitude - ctx.airport_lon) * 60.0 *
-                  std::cos(ctx.latitude * M_PI / 180.0);
-    double dist_nm = std::sqrt(dlat * dlat + dlon * dlon);
-    if (dist_nm > 60.0)
-      return false;
-  }
+int which_com_tuned_to_atis(const xplane_context::XPlaneContext &ctx) {
+  if (ctx.atis_freq_mhz < 100.0f)
+    return 0;
+  if (!atis_in_range(ctx))
+    return 0;
 
-  return true;
+  bool com1_match = freq_matches_atis(ctx.com1_freq_mhz, ctx.atis_freq_mhz);
+  bool com2_match = freq_matches_atis(ctx.com2_freq_mhz, ctx.atis_freq_mhz);
+
+  if (!com1_match && !com2_match)
+    return 0;
+  if (com1_match && com2_match)
+    return ctx.active_com == 2 ? 2 : 1;
+  return com1_match ? 1 : 2;
+}
+
+bool is_tuned_to_atis(const xplane_context::XPlaneContext &ctx) {
+  return which_com_tuned_to_atis(ctx) != 0;
 }
 
 } // namespace atis_generator
