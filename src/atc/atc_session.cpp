@@ -241,10 +241,15 @@ void on_ptt_released() {
 
   // Build airport context for the Whisper initial prompt — biases
   // transcription of local proper nouns ("Grenchen", "Speck", etc.).
+  // While a runway is locked by ATC clearance, append it so Whisper
+  // doesn't drift to the new wind-active runway after a wind shift.
   const auto &ctx_for_whisper = xplane_context::get();
   std::string airport_ctx = ctx_for_whisper.nearest_airport_id;
   if (!ctx_for_whisper.nearest_airport_name.empty())
     airport_ctx += " " + ctx_for_whisper.nearest_airport_name;
+  const std::string &locked_rwy = atc_state_machine::assigned_runway();
+  if (!locked_rwy.empty())
+    airport_ctx += " runway " + locked_rwy;
 
   backends::stt::transcribe_async(
       std::move(pcm), src_rate,
@@ -387,7 +392,8 @@ void update() {
   // ATIS reception works on EITHER COM1 or COM2: pilots commonly park
   // ATIS on COM2 (standby) while keeping COM1 on the controller's freq.
   const auto &ctx = xplane_context::get();
-  int atis_com = ctx.com_radio_powered ? atis_generator::which_com_tuned_to_atis(ctx) : 0;
+  int atis_com =
+      ctx.com_radio_powered ? atis_generator::which_com_tuned_to_atis(ctx) : 0;
   bool tuned = atis_com != 0;
 
   if (tuned) {

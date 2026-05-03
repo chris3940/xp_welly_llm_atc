@@ -1409,7 +1409,7 @@ static void draw_pilot_actions(const xplane_context::XPlaneContext &ctx,
 
     // Build two var sets: short (display) and spoken (tooltip)
     intent_parser::PilotMessage dummy_msg{};
-    dummy_msg.runway = ctx.active_runway;
+    dummy_msg.runway = atc_state_machine::effective_runway(ctx);
 
     // Display version: short callsign (e.g. "HBAKA")
     dummy_msg.callsign = settings::pilot_callsign_raw();

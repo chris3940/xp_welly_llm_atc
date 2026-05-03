@@ -72,6 +72,15 @@ const char *get_departure_type_name();
 ATCState state_from_name(const std::string &name);
 void set_state(ATCState state);
 
+// Returns the runway that ATC has cleared the pilot for (set on first
+// clearance, held until the dialog returns to IDLE). Empty otherwise.
+const std::string &assigned_runway();
+
+// Returns assigned_runway() if non-empty, else ctx.active_runway. Use this
+// for any "what runway are we operating to" question outside the spoken
+// ATC response itself (UI hints, ATIS, STT bias, phase detection).
+std::string effective_runway(const xplane_context::XPlaneContext &ctx);
+
 std::map<std::string, std::string>
 build_vars(const intent_parser::PilotMessage &msg,
            const xplane_context::XPlaneContext &ctx);

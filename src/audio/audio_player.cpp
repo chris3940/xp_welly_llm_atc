@@ -266,8 +266,7 @@ void play_pcm_on_com(int com, std::vector<int16_t> pcm16,
     return;
   }
 
-  XPLMAudioBus bus =
-      (com == 2) ? xplm_AudioRadioCom2 : xplm_AudioRadioCom1;
+  XPLMAudioBus bus = (com == 2) ? xplm_AudioRadioCom2 : xplm_AudioRadioCom1;
   play_pcm16(std::move(pcm16), static_cast<int>(sample_rate_hz), channels,
              volume, bus);
 }

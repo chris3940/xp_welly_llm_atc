@@ -259,6 +259,12 @@ void set_state(ATCState state) {
   }
 }
 
+const std::string &assigned_runway() { return assigned_runway_; }
+
+std::string effective_runway(const xplane_context::XPlaneContext &ctx) {
+  return assigned_runway_.empty() ? ctx.active_runway : assigned_runway_;
+}
+
 static std::string extract_position(const intent_parser::PilotMessage &msg,
                                     const xplane_context::XPlaneContext &ctx) {
   std::string rwy = get_runway(msg, ctx);

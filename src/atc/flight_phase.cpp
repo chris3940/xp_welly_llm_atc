@@ -17,6 +17,7 @@
  */
 
 #include "atc/flight_phase.hpp"
+#include "atc/atc_state_machine.hpp"
 #include "core/logging.hpp"
 #include "persistence/settings.hpp"
 
@@ -83,10 +84,14 @@ static double haversine_distance_nm(double lat1, double lon1, double lat2,
 }
 
 static float active_runway_heading(const xplane_context::XPlaneContext &ctx) {
+  // Prefer the ATC-locked runway over the wind-determined active one so
+  // FINAL_APPROACH alignment stays stable when the wind shifts after the
+  // pilot has already been cleared to land on a specific runway.
+  std::string rwy_num = atc_state_machine::effective_runway(ctx);
   for (const auto &rwy : ctx.runways) {
-    if (rwy.end1.number == ctx.active_runway)
+    if (rwy.end1.number == rwy_num)
       return rwy.end1.heading_deg;
-    if (rwy.end2.number == ctx.active_runway)
+    if (rwy.end2.number == rwy_num)
       return rwy.end2.heading_deg;
   }
   return -1.0f;

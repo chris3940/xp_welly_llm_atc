@@ -17,6 +17,7 @@
  */
 
 #include "atc/atis_generator.hpp"
+#include "atc/atc_state_machine.hpp"
 #include "core/logging.hpp"
 #include "persistence/settings.hpp"
 
@@ -145,6 +146,13 @@ void stop() {
 char current_letter() { return letter_; }
 
 void check_for_update(const xplane_context::XPlaneContext &ctx) {
+  // While ATC has cleared the pilot for a specific runway, freeze the
+  // ATIS letter. Real-world ATIS does not update mid-approach; once the
+  // dialog returns to IDLE (lock released), the next frame can resume
+  // change tracking against the current wind/runway.
+  if (!atc_state_machine::assigned_runway().empty())
+    return;
+
   int vis_cat = visibility_category(ctx.visibility_m);
 
   // First valid sample: seed the baseline without incrementing the letter.
@@ -208,8 +216,8 @@ std::string generate_atis_text(const xplane_context::XPlaneContext &ctx) {
           : (!ctx.nearest_airport_id.empty() ? ctx.nearest_airport_id
                                              : "Airport");
   const char *letter_name = kLetterNames[letter_ - 'A'];
-  std::string runway =
-      ctx.active_runway.empty() ? "unknown" : ctx.active_runway;
+  std::string eff = atc_state_machine::effective_runway(ctx);
+  std::string runway = eff.empty() ? "unknown" : eff;
 
   std::string text;
   text += airport + " Information " + letter_name + ". ";

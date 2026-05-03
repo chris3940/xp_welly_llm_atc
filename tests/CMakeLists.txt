@@ -13,6 +13,7 @@ add_executable(xp_wellys_atc_tests
     ${CATCH2_DIR}/catch_amalgamated.cpp
     test_smoke.cpp
     test_intent_parser.cpp
+    test_runway_lock.cpp
     test_traffic_geometry.cpp
     test_traffic_context.cpp
     test_traffic_advisor.cpp
