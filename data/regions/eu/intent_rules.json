@@ -211,7 +211,7 @@
     },
     {
       "intent": "REPORT_POSITION_FINAL",
-      "confidence": 0.90,
+      "confidence": 0.93,
       "all": ["final"],
       "none": ["full stop"]
     },
@@ -224,7 +224,7 @@
     {
       "_note": "Inbound/landing request, but only when no facility keyword (Tower/Approach) is present — those route to INITIAL_CALL_INBOUND/APPROACH instead.",
       "intent": "REQUEST_LANDING",
-      "confidence": 0.85,
+      "confidence": 0.93,
       "any": ["inbound", "landing", "full stop"],
       "none": [
         "touch and go",

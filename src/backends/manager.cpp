@@ -10,6 +10,7 @@
 #include "persistence/settings.hpp"
 
 #include <curl/curl.h>
+#include <pthread/qos.h>
 
 #include <atomic>
 #include <chrono>
@@ -68,9 +69,16 @@ void enqueue_callback(std::function<void()> fn) {
 
 // Spawn a detached worker. The atomic counter tracks lifetime so
 // stop() can wait for them; we don't keep std::thread handles around.
+//
+// Workers run at QOS_CLASS_UTILITY so the macOS scheduler deprioritizes
+// them against X-Plane's renderer thread. Whisper STT and Llama LM both
+// hit the Metal command queue — without QoS hints they compete equally
+// with X-Plane and FPS drops during landing-phase ATC calls. TTS is
+// CPU-only so the QoS hint is harmless there.
 template <class Fn> void spawn_worker(Fn &&fn) {
   g_active_workers.fetch_add(1, std::memory_order_relaxed);
   std::thread t([fn = std::forward<Fn>(fn)]() mutable {
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
     fn();
     g_active_workers.fetch_sub(1, std::memory_order_relaxed);
   });

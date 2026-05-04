@@ -113,8 +113,14 @@ bool LlamaLm::open(const std::string &model_path) {
   // process — observed crash UUID 935e8d56 from May 2026.
   cparams.n_batch = 2048;
   cparams.n_ubatch = 2048;
-  cparams.n_threads = 4;
+  // Token-by-token decode is GPU-bound on Metal — two CPU threads are
+  // enough and free cores for the X-Plane main thread + physics. The
+  // batch path (initial prompt eval) keeps the larger thread pool.
+  cparams.n_threads = 2;
   cparams.n_threads_batch = 4;
+  // Flash attention cuts attention memory bandwidth roughly in half on
+  // Metal for the ~1k-token classify prompts; sampling unchanged.
+  cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
   cparams.no_perf = true;
 
   ctx_ = llama_init_from_model(model_, cparams);
