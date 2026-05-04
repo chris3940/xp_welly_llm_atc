@@ -333,27 +333,23 @@ void process_transcript(Input in, Done done) {
     return;
   }
 
-  // ── High-confidence rule-based short-circuit ──────────────────────
-  // 0.92 covers the cluster of intents whose keyword matches are so
-  // specific that the local LM (Llama 3.2 3B) can only make things
-  // worse by second-guessing them:
-  //   0.99 — INAPPROPRIATE_LANGUAGE, NEGATIVE_CORRECTION
-  //   0.95 — UNABLE, RADIO_CHECK, GO_AROUND
-  //   0.92 — TRAFFIC_IN_SIGHT, TRAFFIC_NEGATIVE_CONTACT,
-  //   READY_FOR_DEPARTURE_VFR
-  // READY_FOR_DEPARTURE_VFR specifically requires both "ready for
-  // departure" AND a cross-country marker ("on course", "northbound",
-  // etc.) — when the rule parser claims it at 0.92, Whisper would have
-  // had to mis-hear in two coordinated places to be wrong. The 3B LM
-  // was observed picking READY_FOR_DEPARTURE (pattern) over the rule
-  // parser's correct READY_FOR_DEPARTURE_VFR for "on course" inputs;
-  // short-circuiting at 0.92 stops that regression.
-  // 0.90 (REQUEST_TAXI, READBACK, RUNWAY_VACATED, ...) still goes
-  // through LM — that's where Whisper artifacts like "take of"
-  // and "Doxy" need the LM's broader context awareness.
-  if (parsed.confidence >= 0.92f && parsed.intent != PI::UNKNOWN) {
+  // ── LM as fallback only ───────────────────────────────────────────
+  // The rule-based parser (data-driven matchers in intent_rules.json
+  // + state-history-aware adjustments such as just_landed) is
+  // authoritative. The local LM only fires when the rule parser is
+  // genuinely unsure (UNKNOWN or confidence < 0.7).
+  //
+  // Field measurement on Apple Silicon: even with Metal flash-
+  // attention and QOS_UTILITY workers, every Llama 3.2 3B classify
+  // call costs visible FPS in X-Plane. At conf >= 0.7 the rule
+  // parser was empirically right in nearly every observed case
+  // (see LSZG circuit log 2026-05-04: REQUEST_TAXI / READBACK /
+  // RUNWAY_VACATED / REPORT_POSITION_* all classified correctly at
+  // 0.90, while the LM frequently disagreed wrongly or returned
+  // _INVALID and was overridden by safety nets).
+  if (parsed.confidence >= 0.7f && parsed.intent != PI::UNKNOWN) {
     if (settings::debug_logging())
-      logging::debug("Rule-based short-circuit: %s (conf=%.2f) — skip LM",
+      logging::debug("Rule-based path: %s (conf=%.2f) — skip LM",
                      intent_parser::intent_name(parsed.intent),
                      parsed.confidence);
     done(run_state_machine(parsed, ctx, in.now_secs));
