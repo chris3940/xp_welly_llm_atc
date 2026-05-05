@@ -23,6 +23,7 @@
 #include "atc/atis_generator.hpp"
 #include "atc/flight_phase.hpp"
 #include "atc/intent_parser.hpp"
+#include "atc/phraseology_hints.hpp"
 #include "audio/audio_player.hpp"
 #include "audio/audio_recorder.hpp"
 #include "backends/downloader.hpp"
@@ -83,6 +84,15 @@ static const char *flow_region_names[] = {"EU", "US"};
 static int flow_region_selection = 0; // default: EU
 static float region_feedback_timer = 0.0f;
 static char region_feedback_msg[128] = {0};
+
+// Cockpit start mode — drives the initial ATCState the state machine
+// adopts at plugin boot. Display labels are user-friendly; the keys
+// stored in settings.json are snake_case (cold_and_dark, etc.).
+static const char *start_mode_keys[] = {"cold_and_dark", "engines_running",
+                                        "ready_for_takeoff"};
+static const char *start_mode_labels[] = {"Cold and Dark", "Engines Running",
+                                          "Ready for Takeoff"};
+static int start_mode_selection = 1; // default: engines_running
 
 // ── Helpers: format bytes, resident memory, model state strings ──
 
@@ -918,6 +928,15 @@ static void draw_settings_tab() {
     pattern_dir_selection = (pdir == "right") ? 1 : 0;
     std::string region = settings::flow_region();
     flow_region_selection = (region == "US") ? 1 : 0;
+    std::string sm = settings::start_mode();
+    start_mode_selection = 1; // engines_running default
+    for (size_t i = 0; i < sizeof(start_mode_keys) / sizeof(start_mode_keys[0]);
+         ++i) {
+      if (sm == start_mode_keys[i]) {
+        start_mode_selection = static_cast<int>(i);
+        break;
+      }
+    }
     buffers_initialized = true;
   }
 
@@ -954,6 +973,7 @@ static void draw_settings_tab() {
     settings::save();
     atc_templates::reload();
     flight_phase::reload();
+    phraseology_hints::reload();
     airport_vrps::reload();
     std::snprintf(region_feedback_msg, sizeof(region_feedback_msg),
                   "Region changed to %s - templates reloaded",
@@ -971,6 +991,19 @@ static void draw_settings_tab() {
     ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s",
                        region_feedback_msg);
     region_feedback_timer -= ImGui::GetIO().DeltaTime;
+  }
+
+  // Cockpit start mode — applies on next plugin enable / sim start.
+  if (ImGui::Combo("Start Mode", &start_mode_selection, start_mode_labels, 3)) {
+    settings::set_start_mode(start_mode_keys[start_mode_selection]);
+    settings::save();
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "Cold and Dark: powered-off cockpit at parking.\n"
+        "Engines Running: warm cockpit at parking, ready to call Ground.\n"
+        "Ready for Takeoff: at the holding point, awaiting Tower clearance.\n"
+        "Applies on next sim start.");
   }
 
   // Debug logging
@@ -1191,126 +1224,53 @@ static void draw_pilot_actions(const xplane_context::XPlaneContext &ctx,
 
   auto atc_state = atc_state_machine::get_state();
   std::string state_str = atc_state_machine::state_name(atc_state);
-  auto valid = atc_templates::valid_intents(is_towered, state_str);
-
-  // Filter by frequency type, flight phase, and post-landing context
   auto phase = flight_phase::get();
-  double now_secs = static_cast<double>(XPLMGetElapsedTime());
-  bool post_landing =
-      (atc_state == atc_state_machine::ATCState::LANDING_CLEARED ||
-       atc_state == atc_state_machine::ATCState::PATTERN_ENTRY ||
-       atc_state == atc_state_machine::ATCState::TOUCH_AND_GO_CLEARED) &&
-      (phase == flight_phase::FlightPhase::PARKED ||
-       phase == flight_phase::FlightPhase::TAXI ||
-       phase == flight_phase::FlightPhase::LANDING_ROLL);
-  // History-driven extension: after RUNWAY_VACATED rolls state to IDLE
-  // (or a Disregard takes us to IDLE/GROUND_CONTACT), atc_state alone
-  // can no longer tell post-landing apart from a fresh cold-start. The
-  // history deque does — a recent LANDING_CLEARED inside the just_landed
-  // window keeps post_landing true while the pilot is still on the
-  // ground at the airport.
-  if (!post_landing && ctx.on_ground &&
-      (atc_state == atc_state_machine::ATCState::IDLE ||
-       atc_state == atc_state_machine::ATCState::GROUND_CONTACT) &&
-      atc_state_machine::just_landed(now_secs)) {
-    post_landing = true;
-  }
 
-  // Track per-key filter reasons for the DEBUG dump.
+  // post_landing: pilot is on the ground at the airport after a recent
+  // landing or touch-and-go, with no new DEPARTURE_CLEARED in between.
+  // History-driven so the window survives long stand times — pilot can
+  // still pick up REQUEST_TAXI_PARKING after a long stop.
+  bool post_landing = atc_state_machine::at_airport_after_landing(ctx);
+
+  // Matrix lookup: deklarative State x Phase x Facility x Frequency rules
+  // in data/regions/<region>/phraseology_hints.json.
+  phraseology_hints::HintQuery query{};
+  query.state = atc_state;
+  query.phase = phase;
+  query.is_towered = is_towered;
+  query.frequency_type = ctx.frequency_type;
+  query.tower_only = ctx.tower_only;
+  query.post_landing = post_landing;
+  std::vector<std::string> raw = phraseology_hints::lookup(query);
+  std::vector<std::string> valid = raw;
+
+  // Defense-in-depth: drop intents the matrix surfaced but that the
+  // frequency rules or phase preconditions still reject. The matrix
+  // SHOULD never let one of these through, but a JSON typo or schema
+  // drift shouldn't render a wrong-frequency hint.
   std::vector<std::pair<std::string, std::string>> filtered;
-  std::vector<std::string> raw = valid;
+  valid.erase(std::remove_if(
+                  valid.begin(), valid.end(),
+                  [&](const std::string &key) {
+                    const char *reason = nullptr;
+                    if (!flight_phase::is_intent_valid_for_frequency(
+                            key, ctx.frequency_type)) {
+                      if (!(ctx.tower_only && ctx.frequency_type == FT::TOWER))
+                        reason = "frequency";
+                    }
+                    if (!reason &&
+                        !flight_phase::check_precondition(key, phase).empty())
+                      reason = "phase";
+                    if (reason) {
+                      filtered.emplace_back(key, reason);
+                      return true;
+                    }
+                    return false;
+                  }),
+              valid.end());
 
-  valid.erase(
-      std::remove_if(
-          valid.begin(), valid.end(),
-          [&](const std::string &key) {
-            const char *reason = nullptr;
-            // Frequency filter
-            if (!flight_phase::is_intent_valid_for_frequency(
-                    key, ctx.frequency_type)) {
-              // Exception: tower-only airports allow ground intents on
-              // tower freq
-              if (!(ctx.tower_only && ctx.frequency_type == FT::TOWER))
-                reason = "frequency";
-            }
-            // Flight phase filter
-            if (!reason &&
-                !flight_phase::check_precondition(key, phase).empty())
-              reason = "phase";
-            // Post-landing: hide departure hints
-            if (!reason && post_landing &&
-                (key == "READY_FOR_DEPARTURE" ||
-                 key == "READY_FOR_DEPARTURE_VFR"))
-              reason = "post_landing";
-            // Post-landing: a "request taxi" maps to REQUEST_TAXI_PARKING
-            // (taxi to apron), not REQUEST_TAXI (departure clearance).
-            // Hide the departure variant so the panel offers the correct
-            // option only.
-            if (!reason && post_landing && key == "REQUEST_TAXI")
-              reason = "post_landing_use_parking";
-            // Departure intents only make sense after taxi
-            // clearance, not in IDLE or GROUND_CONTACT
-            if (!reason &&
-                (atc_state == atc_state_machine::ATCState::IDLE ||
-                 atc_state == atc_state_machine::ATCState::GROUND_CONTACT) &&
-                (key == "READY_FOR_DEPARTURE" ||
-                 key == "READY_FOR_DEPARTURE_VFR"))
-              reason = "needs_taxi_clearance";
-            // On tower freq at airport with ground in IDLE:
-            // pilot should contact ground first — hide all hints
-            if (!reason && ctx.frequency_type == FT::TOWER &&
-                atc_state == atc_state_machine::ATCState::IDLE &&
-                ctx.on_ground && ctx.airport_freqs.has_ground() &&
-                !ctx.tower_only)
-              reason = "tune_ground_first";
-            // After Ground handoff (state=TOWER_CONTACT) but pilot still
-            // on Ground freq: hide all hints — only valid action is to
-            // retune to Tower. Tower-only airports are unaffected
-            // (TAXI_CLEARED auto-advances to TOWER_CONTACT, and the
-            // single controller is already on the Tower freq).
-            if (!reason &&
-                atc_state == atc_state_machine::ATCState::TOWER_CONTACT &&
-                ctx.frequency_type == FT::GROUND && !ctx.tower_only)
-              reason = "tune_tower_first";
-            // Tower-only airports: hide INITIAL_CALL_GROUND. The single
-            // controller is addressed as "Tower" — REQUEST_TAXI on the
-            // Tower freq is the right opening call. Showing both confuses
-            // the pilot ("which one do I use?").
-            if (!reason && ctx.tower_only && key == "INITIAL_CALL_GROUND")
-              reason = "tower_only_no_ground";
-            // RUNWAY_VACATED: only meaningful right after a landing.
-            // The IDLE-state template still accepts a late call (after
-            // auto-correction reset state to IDLE while the pilot was
-            // still rolling out / taxiing clear), but at PARKED it's pure
-            // noise. Hide unless we're in a landing-related state OR the
-            // pilot just rolled out (TAXI/LANDING_ROLL phase).
-            if (!reason && key == "RUNWAY_VACATED") {
-              bool active_landing =
-                  atc_state == atc_state_machine::ATCState::LANDING_CLEARED ||
-                  atc_state == atc_state_machine::ATCState::PATTERN_ENTRY ||
-                  atc_state ==
-                      atc_state_machine::ATCState::TOUCH_AND_GO_CLEARED;
-              bool just_landed =
-                  phase == flight_phase::FlightPhase::LANDING_ROLL ||
-                  (phase == flight_phase::FlightPhase::TAXI && active_landing);
-              if (!active_landing && !just_landed)
-                reason = "no_landing_in_progress";
-            }
-            // READBACK: only when ATC actually expects one. The state
-            // machine flag drives the readback override below; here we
-            // suppress the standalone hint to keep the panel honest.
-            if (!reason && key == "READBACK" &&
-                !atc_state_machine::is_readback_pending())
-              reason = "no_readback_pending";
-            if (reason) {
-              filtered.emplace_back(key, reason);
-              return true;
-            }
-            return false;
-          }),
-      valid.end());
-
-  // When readback is pending, only allow READBACK — ATC expects a response
+  // Readback override: when ATC expects a readback, that's the ONLY
+  // legitimate action regardless of what the matrix offers.
   bool readback_override = false;
   if (atc_state_machine::is_readback_pending()) {
     valid.clear();

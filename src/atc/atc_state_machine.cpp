@@ -175,6 +175,17 @@ void init() {
   departure_type_ = DepartureType::PATTERN;
   history_.clear();
   last_now_secs_ = 0.0;
+
+  // Honor the user's "where am I starting" setting. The default
+  // engines_running keeps the IDLE start above; ready_for_takeoff
+  // jumps straight to TOWER_CONTACT so a pilot spawning on the
+  // runway sees READY_FOR_DEPARTURE hints immediately.
+  const std::string mode = settings::start_mode();
+  if (mode == "ready_for_takeoff") {
+    state_ = ATCState::TOWER_CONTACT;
+    logging::info(
+        "Initial state: TOWER_CONTACT (start_mode=ready_for_takeoff)");
+  }
 }
 
 void stop() {
@@ -919,6 +930,30 @@ bool was_recently_in(ATCState s, double max_age_secs, double now_secs) {
 bool just_landed(double now_secs, double window_secs) {
   return was_recently_in(ATCState::LANDING_CLEARED, window_secs, now_secs) ||
          was_recently_in(ATCState::TOUCH_AND_GO_CLEARED, window_secs, now_secs);
+}
+
+bool at_airport_after_landing(const xplane_context::XPlaneContext &ctx) {
+  if (!ctx.on_ground)
+    return false;
+  auto is_landing = [](ATCState s) {
+    return s == ATCState::LANDING_CLEARED ||
+           s == ATCState::TOUCH_AND_GO_CLEARED;
+  };
+  if (is_landing(state_))
+    return true;
+  // Walk newest-to-oldest. A DEPARTURE_CLEARED *after* the most
+  // recent landing means the pilot is on a new flight (mid-taxi to
+  // takeoff or already cleared) — drop out of the post-landing
+  // window. Other transitional states (GROUND_CONTACT, TAXI_CLEARED,
+  // TOWER_CONTACT) can legitimately appear during taxi-in and don't
+  // disqualify.
+  for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+    if (it->state == ATCState::DEPARTURE_CLEARED)
+      return false;
+    if (is_landing(it->state))
+      return true;
+  }
+  return false;
 }
 
 const std::deque<StateHistoryEntry> &get_history() { return history_; }

@@ -150,6 +150,13 @@ bool was_recently_in(ATCState s, double max_age_secs, double now_secs);
 // check ctx.on_ground if "still rolling out" matters.
 bool just_landed(double now_secs, double window_secs = 120.0);
 
+// Time-independent post-landing check. True when the pilot is on the
+// ground AND the most recent landing in history (or current state)
+// has not been followed by a new DEPARTURE_CLEARED. Survives long
+// stand times — REQUEST_TAXI_PARKING stays a valid hint while the
+// pilot is still taxiing in, regardless of how many minutes elapsed.
+bool at_airport_after_landing(const xplane_context::XPlaneContext &ctx);
+
 // Read-only access to the full history deque (oldest at front).
 // Stable across calls until the next transition.
 const std::deque<StateHistoryEntry> &get_history();

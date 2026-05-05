@@ -28,6 +28,7 @@
 #include "atc/atc_templates.hpp"
 #include "atc/atis_generator.hpp"
 #include "atc/flight_phase.hpp"
+#include "atc/phraseology_hints.hpp"
 #include "atc/traffic_dialog.hpp"
 #include "audio/audio_player.hpp"
 #include "audio/audio_recorder.hpp"
@@ -133,6 +134,7 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
 
   settings::init();
   atc_templates::init();
+  phraseology_hints::init();
   airport_vrps::init();
   {
     char raw[2048] = {};
@@ -223,6 +225,7 @@ PLUGIN_API void XPluginStop() {
   xplane_context::stop();
   airspace_db::stop();
   airport_vrps::stop();
+  phraseology_hints::stop();
   atc_templates::stop();
   settings::stop();
 

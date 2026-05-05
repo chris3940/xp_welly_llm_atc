@@ -49,6 +49,7 @@ static json default_config() {
       {"auto_correction_factor", 1.0},
       {"flow_region", "EU"},
       {"debug_traffic", false},
+      {"start_mode", "engines_running"},
       {"voice_atis", model_manifest::default_voice_for(VoiceRole::Atis)},
       {"voice_tower", model_manifest::default_voice_for(VoiceRole::Tower)},
       {"voice_ground", model_manifest::default_voice_for(VoiceRole::Ground)},
@@ -199,6 +200,13 @@ std::string flow_region() {
   return v;
 }
 bool debug_traffic() { return cfg.value("debug_traffic", false); }
+std::string start_mode() {
+  std::string v = cfg.value("start_mode", std::string("engines_running"));
+  if (v != "cold_and_dark" && v != "engines_running" &&
+      v != "ready_for_takeoff")
+    v = "engines_running";
+  return v;
+}
 
 // --- Setters ---
 
@@ -268,6 +276,13 @@ void set_flow_region(const std::string &v) {
     cfg["flow_region"] = "EU";
 }
 void set_debug_traffic(bool v) { cfg["debug_traffic"] = v; }
+void set_start_mode(const std::string &v) {
+  if (v == "cold_and_dark" || v == "engines_running" ||
+      v == "ready_for_takeoff")
+    cfg["start_mode"] = v;
+  else
+    cfg["start_mode"] = "engines_running";
+}
 
 // ── Voice assignments ──────────────────────────────────────────
 

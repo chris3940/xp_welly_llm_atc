@@ -271,6 +271,7 @@ make distclean  # also remove sdk/, vendor/
 | **"via Alpha" hardcoded** — taxiway name is always Alpha | Unrealistic at airports with different taxiway layouts | High — would need taxiway data from apt.dat or WED |
 | **No traffic *sequencing*** — always "number one" — *traffic awareness* (advisories) shipped in v2.1; sequencing pending Phases 4 + 5 | Unrealistic at busy airports | Medium — Phases 4 + 5 on roadmap |
 | **No callsign validation** | ATC accepts any callsign | Low priority for single-player |
+| **Big-hub airports (LSZH, LSGG, …) not officially supported** — pilot can fly inbound/outbound, but Delivery (slot/VFR-clearance) workflow, RWY-specific Tower routing, and AIP VFR reporting points are not modelled | Generic hints at large hubs do not match real-world procedures (slot enforcement, multiple Tower frequencies, mandatory VFR points) | High — needs per-airport AIP research + new Delivery intent + slot setting + multi-Tower disambiguation |
 
 ## Project Structure
 

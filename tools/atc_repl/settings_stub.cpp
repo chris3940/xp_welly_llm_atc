@@ -67,6 +67,10 @@ std::string region_data_dir() {
 // case they creep into the engine OBJECT library from a transitive include.
 bool skip_radio_power_check() { return true; }
 
+// Headless scenarios always start fresh (IDLE+PARKED), the start_mode
+// setting is a UI affordance only.
+std::string start_mode() { return "engines_running"; }
+
 // Voice resolver — pulled into the engine library by backends::manager.
 // The headless tools never synthesize audio (TTS calls short-circuit on
 // `tts_ready() == false`) so this getter is only here to satisfy the

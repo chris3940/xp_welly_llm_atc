@@ -6,5 +6,6 @@
   "active_com": 1,
   "volume": 1.0,
   "debug_logging": false,
-  "debug_traffic": false
+  "debug_traffic": false,
+  "start_mode": "engines_running"
 }

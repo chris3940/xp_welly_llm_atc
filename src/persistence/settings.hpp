@@ -46,6 +46,12 @@ bool skip_radio_power_check();
 bool show_phraseology_hints();
 float auto_correction_factor();
 std::string flow_region(); // "EU" or "US"
+// Cockpit start state assumed at plugin boot. Drives the initial
+// ATCState the state machine adopts. One of:
+//   "cold_and_dark"     — IDLE, pilot expected to power up + tune freq
+//   "engines_running"   — IDLE, pilot ready to call Ground (default)
+//   "ready_for_takeoff" — TOWER_CONTACT, pilot at holding point
+std::string start_mode();
 bool debug_traffic();
 
 // Setters
@@ -62,6 +68,7 @@ void set_show_phraseology_hints(bool v);
 void set_auto_correction_factor(float v);
 void set_flow_region(const std::string &v);
 void set_debug_traffic(bool v);
+void set_start_mode(const std::string &v);
 
 // Voice id (Piper voice_id, e.g. "en_US-lessac-medium") currently
 // assigned to a logical ATC role. Defaults to the manifest default if
