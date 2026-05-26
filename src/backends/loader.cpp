@@ -7,16 +7,19 @@
 
 #include "backends/loader.hpp"
 
-#include "backends/llama_lm.hpp"
 #include "backends/manager.hpp"
 #include "backends/openai_lm.hpp"
 #include "backends/openai_stt.hpp"
 #include "backends/openai_tts.hpp"
-#include "backends/piper_tts.hpp"
-#include "backends/whisper_stt.hpp"
 #include "core/logging.hpp"
 #include "persistence/model_paths.hpp"
 #include "persistence/settings.hpp"
+
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
+#include "backends/llama_lm.hpp"
+#include "backends/piper_tts.hpp"
+#include "backends/whisper_stt.hpp"
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -47,10 +50,14 @@ std::atomic<bool> g_running{false};
 std::atomic<bool> g_should_exit{false};
 std::thread g_worker;
 
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
 // One ITextToSpeech survives across loader runs so newly-downloaded
-// optional voices can be hot-loaded. Created on first run.
+// optional voices can be hot-loaded. Created on first run. Local
+// inference only — the OpenAI TTS backend is owned by the manager.
 std::shared_ptr<PiperTts> g_piper;
+#endif
 
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
 void update_state(const model_manifest::Entry &entry, FileState s,
                   std::string message = {}) {
   std::lock_guard<std::mutex> lk(g_mtx);
@@ -62,6 +69,7 @@ void update_state(const model_manifest::Entry &entry, FileState s,
     }
   }
 }
+#endif
 
 void seed_status_locked() {
   // Initial layout, mirrors the manifest order. Idempotent: only
@@ -85,18 +93,25 @@ bool entry_loaded(const model_manifest::Entry &e) {
     return backends::lm_ready();
   case model_manifest::Kind::PiperVoice:
   case model_manifest::Kind::PiperVoiceConfig:
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
     return g_piper && g_piper->has_voice(e.voice_id);
+#else
+    return false;
+#endif
   }
   return false;
 }
 
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
 bool dir_exists(const std::string &path) {
   struct stat st{};
   if (stat(path.c_str(), &st) != 0)
     return false;
   return S_ISDIR(st.st_mode);
 }
+#endif
 
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
 // The set of voice_ids the user currently wants loaded — i.e. the
 // four roles' assignments. Optional voices not assigned to any role
 // are not loaded into memory but still verified (so the UI can show
@@ -109,7 +124,9 @@ std::unordered_set<std::string> assigned_voice_ids() {
   (void)R{};
   return v;
 }
+#endif
 
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
 // Walks the manifest, fast-checks size, computes SHA256 only for
 // files that pass the size check. Updates `g_status` as it goes so
 // the UI can reflect "Verifying… llama-3.2-3B (45%)" etc.
@@ -330,6 +347,7 @@ void load_backends() {
     logging::info("TTS backend ready (Piper)");
   }
 }
+#endif // XPWELLYS_USE_LOCAL_INFERENCE
 
 // Construct the three OpenAI cloud backends and register them with the
 // manager. Skips the local-model verification entirely: no files on
@@ -375,6 +393,7 @@ void run_worker() {
                     "Audio + transcripts will be sent to OpenAI.");
       load_openai_backends();
     } else {
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
       logging::info("[xp_wellys_atc] BACKEND MODE: LOCAL (whisper.cpp + "
                     "llama.cpp + Piper). No network traffic to AI APIs.");
       bool all_files_verified = verify_files();
@@ -389,6 +408,14 @@ void run_worker() {
             "One or more model files are missing or corrupt - backends not "
             "loaded; open the plugin window to download.");
       }
+#else
+      // Cloud-only slice (e.g. x86_64 of the universal binary) but
+      // settings still ask for Local. Surface this clearly — the
+      // user has to switch to OpenAI in Settings.
+      logging::error("[xp_wellys_atc] BACKEND MODE: LOCAL requested but this "
+                     "build has no local-inference backends. Switch to "
+                     "OpenAI in Settings (Apple Silicon required for Local).");
+#endif
     }
   } catch (const std::exception &e) {
     logging::error("loader: run_worker threw: %s", e.what());
@@ -478,7 +505,9 @@ void stop() {
   }
   g_running = false;
   g_should_exit = false;
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
   g_piper.reset();
+#endif
   // Drop the registered backend pointers so a subsequent start() —
   // typically the one fired by the UI when the user switches Backend
   // Mode — comes up against a clean slate. Without this the old
