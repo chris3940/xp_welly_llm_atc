@@ -96,11 +96,16 @@ static const char *start_mode_labels[] = {"Cold and Dark", "Engines Running",
 static int start_mode_selection = 1; // default: engines_running
 
 // AI backend selection — local (whisper.cpp + llama.cpp + Piper) vs.
-// OpenAI Cloud (Whisper API + Chat Completions + TTS API).
+// OpenAI Cloud (Whisper API + Chat Completions + TTS API). The combo
+// + selection state only exist in builds that actually have a choice
+// to offer; the cloud-only x86_64 slice short-circuits to a static
+// label instead.
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
 static const char *backend_mode_keys[] = {"local", "openai"};
 static const char *backend_mode_labels[] = {"Local (whisper + llama + Piper)",
                                             "OpenAI Cloud"};
 static int backend_mode_selection = 0;
+#endif
 
 // OpenAI model + voice combos. The model lists are tiny on purpose —
 // these are the only models that make sense for this workload. A
@@ -986,8 +991,10 @@ static void draw_settings_tab() {
         break;
       }
     }
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
     std::string bm = settings::backend_mode();
     backend_mode_selection = (bm == "openai") ? 1 : 0;
+#endif
     buffers_initialized = true;
   }
 
@@ -996,6 +1003,7 @@ static void draw_settings_tab() {
   // this tab: it picks the entire inference pipeline (Local vs.
   // OpenAI Cloud) and a change forces a backend reload.
   ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "AI Backend");
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
   if (ImGui::Combo("Backend", &backend_mode_selection, backend_mode_labels,
                    2)) {
     settings::set_backend_mode(backend_mode_keys[backend_mode_selection]);
@@ -1013,8 +1021,20 @@ static void draw_settings_tab() {
         "OpenAI Cloud: audio + transcripts are sent to api.openai.com.\n"
         "Switching reloads the inference pipeline.");
   }
+  const bool show_openai_controls = (backend_mode_selection == 1);
+#else
+  // Cloud-only slice (the x86_64 half of the universal binary).
+  // No choice to offer — Local cannot run here because Metal
+  // kernels and the onnxruntime prebuilt are Apple Silicon only.
+  ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
+                     "Backend: OpenAI Cloud (Intel build)");
+  ImGui::TextDisabled(
+      "Local inference requires Apple Silicon. This slice of the "
+      "universal binary is OpenAI-only.");
+  const bool show_openai_controls = true;
+#endif
 
-  if (backend_mode_selection == 1) {
+  if (show_openai_controls) {
     // OpenAI mode — show the key + model + voice controls. None of
     // these fields are visible in Local mode.
     ImGui::Indent();

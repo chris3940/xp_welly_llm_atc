@@ -387,7 +387,20 @@ void run_worker() {
   // terminating X-Plane. We log + leave g_running false so a
   // subsequent start() can retry.
   try {
-    const std::string mode = settings::backend_mode();
+    std::string mode = settings::backend_mode();
+#ifndef XPWELLYS_USE_LOCAL_INFERENCE
+    // Cloud-only slice: settings.json may still say "local" if the
+    // user previously ran the arm64 slice on the same Mac. Force
+    // OpenAI silently so the cockpit comes up usable, and persist
+    // so the next launch starts clean.
+    if (mode == "local") {
+      logging::info("[xp_wellys_atc] Local inference not compiled into this "
+                    "build; switching backend_mode to openai.");
+      settings::set_backend_mode("openai");
+      settings::save();
+      mode = "openai";
+    }
+#endif
     if (mode == "openai") {
       logging::info("[xp_wellys_atc] BACKEND MODE: OPENAI (api.openai.com). "
                     "Audio + transcripts will be sent to OpenAI.");

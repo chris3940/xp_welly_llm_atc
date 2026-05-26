@@ -1,32 +1,50 @@
-# Welly's ATC — Local AI Voice ATC for X-Plane 12
+# Welly's ATC — AI Voice ATC for X-Plane 12
 
-> **Fully local-inference X-Plane 12 ATC plugin for Apple Silicon.**
-> `whisper.cpp` (Metal) + `llama.cpp` (Metal) + Piper TTS, bundled with the
-> plugin. **No daemons, no helper apps, no cloud, no API keys.**
+> **Dual-backend X-Plane 12 ATC plugin: local inference or OpenAI Cloud, your choice.**
+>
+> - **Local (Apple Silicon, default)** — `whisper.cpp` (Metal) + `llama.cpp`
+>   (Metal) + Piper TTS, fully offline once the models are downloaded.
+>   No daemons, no helper apps, no API keys.
+> - **OpenAI Cloud (any Mac)** — Whisper API + Chat Completions +
+>   TTS API. Bring your own API key (stored in the macOS Keychain).
+>   The only option on Intel Macs.
+>
+> The plugin ships as a **universal binary**: the arm64 slice carries
+> both backends, the x86_64 slice is OpenAI-only. The user picks the
+> mode at runtime in Settings.
 >
 > The spike-phase architecture and per-backend measurements are archived in
 > [`docs/architecture-analysis.md`](docs/architecture-analysis.md) and
 > [`spikes/spike_e2e/RESULTS.md`](spikes/spike_e2e/RESULTS.md).
 >
-> **Measured pipeline latency** (warm, M4, end-to-end spike):
+> **Measured pipeline latency** (warm, M4, local inference, end-to-end spike):
 > STT 321 ms · LM 634 ms · TTS 200 ms · **total ≈ 1.16 s per request** —
 > well under the 3 s acceptance target with > 1.8 s of headroom for the
 > M4-vs-M1 generational gap and the plugin's main-thread / Core Audio
-> overhead. M1 re-validation: pending real-flight smoke test.
+> overhead. OpenAI Cloud is typically slower: 2–3 s warm round-trip
+> dominated by API latency. M1 local re-validation: pending real-flight
+> smoke test.
 
 ---
 
-AI-powered ATC voice communication plugin for X-Plane 12 VFR flights, running
-fully offline once the models are downloaded.
+AI-powered ATC voice communication plugin for X-Plane 12 VFR flights.
 
-Talk to ATC using your microphone via push-to-talk. The plugin transcribes your
-speech locally with whisper.cpp, interprets your intent through a rule-based
-ATC state machine (with low-confidence fallback to a local Llama 3.2 3B
-classifier), and plays back ATC responses synthesised locally with Piper.
+Talk to ATC using your microphone via push-to-talk. The plugin
+transcribes your speech (locally with whisper.cpp **or** via the
+OpenAI Whisper API, your pick), interprets your intent through a
+rule-based ATC state machine — with a low-confidence fallback to a
+local Llama 3.2 3B classifier or OpenAI's `gpt-4o-mini`, again your
+pick — and plays back ATC responses synthesised locally with Piper or
+via the OpenAI TTS API.
 
 ## Features
 
 - **Push-to-Talk** — bound via X-Plane command binding (keyboard or joystick)
+- **Dual-backend inference** — pick **Local** (Apple Silicon only) or
+  **OpenAI Cloud** (any Mac, BYO API key) in the Settings tab. Switch
+  at runtime, no plugin restart. Every inference call is tagged with
+  `[STT-LOCAL]` / `[STT-OPENAI]` (and equivalent for LM/TTS) in
+  X-Plane's `Log.txt` so you can audit which side served each request.
 - **Local Speech-to-Text** — `whisper.cpp` `small.en-q5_1`, Metal-accelerated
 - **Local LLM** — `llama.cpp` running Llama 3.2 3B Instruct (Q4_K_M),
   Metal-accelerated; used for intent disambiguation when the rule-based
@@ -34,6 +52,12 @@ classifier), and plays back ATC responses synthesised locally with Piper.
   hallucinated runways or frequencies.
 - **Local Text-to-Speech** — Piper, neutral US accent (`en_US-lessac-medium`),
   CPU + onnxruntime
+- **OpenAI Cloud option** — `whisper-1` for STT, `gpt-4o-mini` for the
+  intent classifier (JSON-mode for constrained output), `tts-1` with
+  six selectable voices (`alloy/echo/fable/onyx/nova/shimmer`; `onyx`
+  is closest to real ATC). Key stored in the macOS Keychain via
+  `Security.framework`, never in `settings.json`, never logged in full
+  (only the last 4 characters appear in audit lines).
 - **ATC State Machine** — VFR phraseology for towered and non-towered airports
 - **Flight Phase Detection** — context-aware guards prevent unrealistic ATC
   interactions based on aircraft state (parked, taxi, airborne, etc.)
@@ -68,68 +92,115 @@ classifier), and plays back ATC responses synthesised locally with Piper.
 
 ## Hardware Requirements
 
-| Item | Requirement |
-|---|---|
-| CPU | Apple Silicon (M1 / M2 / M3 / M4). **Intel Macs are not supported.** |
-| RAM | 32 GB recommended (X-Plane 12 typically uses 8–16 GB; budget ~3 GB headroom for the inference stack) |
-| Disk | ~2.5 GB free wherever the plugin is installed (models + bundle) |
-| GPU | Any Metal-capable GPU on the same Apple Silicon chip |
+The plugin ships as a **universal binary** — one `.xpl`, two slices.
+X-Plane automatically loads whichever matches the host.
 
-The plugin builds and ships **arm64-only**. On an Intel Mac the `.xpl` is
-silently skipped by X-Plane (a single line in `Log.txt`: *"Couldn't load
-plugin … bad architecture"*) — there is no in-sim error. Verify your Mac's
-architecture before installing:
+| Mac | Slice loaded | Backends available |
+|---|---|---|
+| Apple Silicon (M1 / M2 / M3 / M4) | `arm64` | **Local** *or* **OpenAI Cloud** |
+| Intel (x86_64) | `x86_64` | **OpenAI Cloud only** (local inference needs Metal + Apple Silicon) |
 
-```sh
-uname -m   # must print "arm64"
-```
+| Resource | Local mode | OpenAI Cloud mode |
+|---|---|---|
+| RAM | 32 GB recommended (X-Plane 12 + ~3 GB headroom for the inference stack) | 16 GB (no model in RAM — calls are stateless HTTP requests) |
+| Disk | ~2.5 GB free for the bundled models | ~50 MB for the plugin bundle (no models downloaded) |
+| GPU | Any Metal-capable GPU on the same Apple Silicon chip | not used |
+| Network | not used at runtime (one-time model download from HuggingFace) | required — every PTT release triggers HTTPS calls to `api.openai.com` |
+
+OpenAI Cloud mode also costs money per request (Whisper API + Chat
+Completions + TTS API). Latency is typically 2–3 s warm vs. 1–1.5 s
+warm for local inference. Plan accordingly.
 
 ## Software Requirements
 
 | Item | Requirement |
 |---|---|
-| macOS | **13.3 or later** (onnxruntime 1.22.0 requires this; lower versions show a linker warning at build time and may crash at runtime) |
+| macOS | **13.3 or later** (onnxruntime 1.22.0 requires this on the arm64 slice; the x86_64 slice inherits the same deployment target so the lipo'd binary stays consistent) |
 | X-Plane | X-Plane 12 (12.0 or later) |
+| OpenAI account | Only if you want to use OpenAI Cloud mode — needs an API key with billing enabled. Local mode has no cloud dependency. |
 | For building from source | CMake 3.26+, Homebrew LLVM (`brew install llvm`), Xcode Command Line Tools |
 
 ## Quick Start (pre-built release)
 
-1. Download `xp_wellys_atc-vX.Y.Z-arm64.zip` from the GitHub Releases page.
+1. Download `xp_wellys_atc-vX.Y.Z.zip` from the GitHub Releases page.
+   The `.xpl` inside is a universal binary covering arm64 and x86_64.
 2. Extract into `X-Plane 12/Resources/plugins/`. Result:
    ```
    X-Plane 12/Resources/plugins/xp_wellys_atc/
      ├── mac_x64/
-     │     ├── xp_wellys_atc.xpl
-     │     ├── libpiper.dylib
+     │     ├── xp_wellys_atc.xpl       (universal: arm64 + x86_64)
+     │     ├── libpiper.dylib          (used by arm64 slice only)
      │     ├── libonnxruntime.1.22.0.dylib
      │     └── libonnxruntime.dylib
      ├── Resources/
-     │     └── espeak-ng-data/   (~19 MB, ships with the plugin)
+     │     └── espeak-ng-data/   (~19 MB, used by arm64 slice only)
      └── data/
            └── (templates, region rules, etc.)
    ```
 3. Launch X-Plane. Open the plugin window via *Plugins → Welly's ATC*.
-4. **First launch only**: the **Models** tab shows three rows in red. Click
-   **Download all missing** — the plugin pulls ~2.0 GB from HuggingFace
-   over HTTPS. Resumable; cancellable; SHA256-verified after each file.
-5. Once all three rows show **Ready** (green), the PTT-disabled banner on
-   the Status tab disappears and you can fly.
+4. **Pick your backend** in the **Settings** tab:
+   - **Local** (Apple Silicon, default): the **Models** tab shows three
+     rows in red. Click **Download all missing** — the plugin pulls
+     ~2.0 GB from HuggingFace over HTTPS. Resumable; cancellable;
+     SHA256-verified after each file. Once all rows show **Ready**
+     (green), the PTT-disabled banner on the Status tab disappears.
+   - **OpenAI Cloud** (any Mac): paste your OpenAI API key into the
+     **OpenAI API Key** field in Settings (use the `[Paste]` button —
+     Cmd+V inside X-Plane's ImGui context is unreliable). Click
+     **Save Key**. The key is stored in the macOS Keychain under
+     service `com.xp_wellys_atc.openai`. PTT is enabled immediately;
+     no model download.
+5. Fly. The Status tab's banner will tell you which mode is active and
+   `Log.txt` carries a one-line `BACKEND MODE: ...` banner on every
+   load so you can prove after the fact which side served the session.
+
+## Backend Modes
+
+You can switch at any time in the Settings tab — the plugin tears
+down the active inference stack and brings up the other one, no
+X-Plane restart. Source-level invariant: the three local backends
+(`whisper_stt.cpp`, `llama_lm.cpp`, `piper_tts.cpp`) contain no
+`#include` of the OpenAI clients and zero `curl_easy_perform` calls;
+the three OpenAI clients (`openai_stt.cpp`, `openai_lm.cpp`,
+`openai_tts.cpp`) contain no `#include` of `whisper.h` / `llama.h` /
+`piper.h`. So in Local mode no code path can call OpenAI, and vice
+versa — verified by `tests/test_audit_logging.cpp`.
+
+Auditing which mode served a request: grep `Log.txt`.
+
+| Tag in `Log.txt` | What it means |
+|---|---|
+| `[xp_wellys_atc] BACKEND MODE: LOCAL ...` | Loader brought up the local pipeline. |
+| `[xp_wellys_atc] BACKEND MODE: OPENAI (api.openai.com) ...` | Loader brought up the cloud pipeline. |
+| `[STT-LOCAL] / [LM-LOCAL] / [TTS-LOCAL]` | Per-call audit for each local inference. |
+| `[STT-OPENAI] / [LM-OPENAI] / [TTS-OPENAI]` | Per-call audit for each cloud inference. API key is truncated to its last 4 chars (`sk-...ABCD`). |
 
 ## Build From Source
 
 ```sh
 git clone --recurse-submodules <repo-url>
 cd xp_welly_llm_atc
-make setup      # X-Plane SDK, Dear ImGui, nlohmann/json, Catch2
-make build      # CMake Release build → build/xp_wellys_atc.xpl
-                # builds whisper.cpp + llama.cpp + Piper from the spike
-                # submodules; the first build is slow (~2 min on M4)
-make install    # Code-sign + install to X-Plane plugins directory
+make setup            # X-Plane SDK, Dear ImGui, nlohmann/json, Catch2
+make build            # CMake Release build → build/xp_wellys_atc.xpl (arm64
+                      # with both backends; the dev default)
+make build-universal  # arm64 (local + cloud) + x86_64 (cloud-only),
+                      # lipo'd into one universal build/xp_wellys_atc.xpl
+                      # — what the GitHub Actions release pipeline runs
+make install          # Code-sign + install to X-Plane plugins directory
 ```
+
+`make build` is the fast dev loop — single arm64 slice, both
+backends. `make build-universal` is what you want before shipping:
+runs CMake twice (arm64 with `XPWELLYS_USE_LOCAL_INFERENCE=ON`,
+x86_64 with `XPWELLYS_USE_LOCAL_INFERENCE=OFF`) and `lipo`-merges
+the two `.xpl`s into one. Build time roughly doubles.
 
 The build downloads onnxruntime's prebuilt arm64 dylib (≈ 33 MB) into
 `spikes/spike_piper/third_party/piper1-gpl/libpiper/lib/` on first
-configure. After that everything is local.
+configure. After that everything is local. The x86_64 slice has no
+onnxruntime / Piper / whisper / llama dependency at all — it links
+only against libcurl + the system frameworks (Security, AudioToolbox,
+etc.) and the OpenAI clients.
 
 ## Local Inference Models
 
@@ -168,8 +239,9 @@ the 1.88 GB pull from scratch.
 
 ## Configuration
 
-Settings live in `<plugin>/data/settings.json`. The local-inference
-build ships with a slim schema — no API keys, no model selectors:
+Settings live in `<plugin>/data/settings.json`. The OpenAI API key
+is the only secret — and it lives in the macOS Keychain, never in
+this file.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -184,6 +256,12 @@ build ships with a slim schema — no API keys, no model selectors:
 | `flow_region` | `EU` | `EU` (ICAO/QNH/hPa) or `US` (FAA-TC/altimeter/inHg) phraseology |
 | `debug_logging` | `false` | Enable verbose debug output |
 | `debug_traffic` | `false` | Show the Traffic tab in the ATC panel (lists the 10 nearest aircraft from the TCAS DataRefs) |
+| `backend_mode` | `local` | `local` (whisper + llama + Piper, arm64 only) or `openai` (Whisper API + Chat Completions + TTS API). The x86_64 slice silently rewrites this to `openai` at startup since Local is not available there. |
+| `api_key_saved` | `false` | Flag only — set automatically when the user clicks **Save Key** in Settings. The actual key sits in the macOS Keychain under service `com.xp_wellys_atc.openai` / account `default`. Cleared by **Delete Key**. |
+| `openai_stt_model` | `whisper-1` | OpenAI Whisper model ID for the STT call. |
+| `openai_lm_model` | `gpt-4o-mini` | OpenAI Chat Completions model ID for the intent classifier. JSON mode is enabled automatically. |
+| `openai_tts_model` | `tts-1` | OpenAI TTS model ID. Set to `tts-1-hd` for higher-quality (slower) output. |
+| `openai_tts_voice_atis` / `openai_tts_voice_tower` / `openai_tts_voice_ground` | `onyx` / `echo` / `alloy` | Per-role OpenAI voice. One of `alloy / echo / fable / onyx / nova / shimmer`. `onyx` is closest to real ATC. |
 
 ATC response templates are defined in `data/regions/{eu,us}/atc_templates.json`.
 Flight phase detection thresholds, ATC precondition guards, frequency guards,
@@ -250,22 +328,24 @@ any key or joystick button.
 ## Make Targets
 
 ```sh
-make all        # clean + format + build + lint + test (full local CI)
-make build      # build only
-make test       # unit tests + scenario tests
-make install    # code-sign + install to X-Plane
-make repl       # build the headless atc_repl tool
-make format     # clang-format
-make lint       # clang-tidy (some rules promoted to errors)
-make clean      # remove build/
-make distclean  # also remove sdk/, vendor/
+make all              # clean + format + build + lint + test (full local CI)
+make build            # arm64 with both backends (dev default)
+make build-universal  # arm64 + x86_64 lipo'd; what the release pipeline runs
+                      # Optional: RELEASE_FLAG=-DRELEASE=ON for tagged builds
+make test             # unit tests + scenario tests
+make install          # code-sign + install to X-Plane
+make repl             # build the headless atc_repl tool
+make format           # clang-format
+make lint             # clang-tidy (some rules promoted to errors)
+make clean            # remove build/, build-arm64/, build-x86_64/, build-lint/, build-sanitize/
+make distclean        # also remove sdk/, vendor/
 ```
 
 ## Known Limitations
 
 | Limitation | Impact | Effort |
 |---|---|---|
-| **Apple Silicon only** | Intel Macs cannot run the plugin | High — onnxruntime, Metal kernels, and pipeline budget all assume ARM64 |
+| **Local inference is Apple Silicon only** | Intel Macs can run the plugin via the x86_64 slice but only in OpenAI Cloud mode (requires API key + billing) | Resolved by the universal binary; lifting the Intel restriction for Local mode would need Metal alternatives + an x86_64 onnxruntime build |
 | **English only** | non-English ATC not supported | Medium — would need different whisper / Llama / Piper voice |
 | **Single-voice TTS** | All ATC speakers (Tower, Ground, ATIS) use the same Piper voice; ATIS speaks slower via `length_scale=1.18` | Low — could ship more voices and add a per-frequency selector |
 | **"via Alpha" hardcoded** — taxiway name is always Alpha | Unrealistic at airports with different taxiway layouts | High — would need taxiway data from apt.dat or WED |
@@ -310,9 +390,12 @@ not read or write the cockpit transponder DataRefs. You dial the squawk
 manually on your transponder.
 
 **How does it compare to BeyondATC or SayIntentions?**
-Strengths: 100 % offline on Apple Silicon (no subscription, no cloud, no
-constant internet required), ~1.16 s warm pipeline latency, ICAO-correct EU
-phraseology with realistic Tower reactions to pilot errors.
+Strengths: 100 % offline option on Apple Silicon (no subscription, no
+cloud, no constant internet required — at the user's discretion), ~1.16 s
+warm pipeline latency in local mode, ICAO-correct EU phraseology with
+realistic Tower reactions to pilot errors. An OpenAI Cloud mode is
+available as a paid opt-in (BYO key) for users who prefer cloud LLMs
+or run an Intel Mac.
 Limitations today: VFR-only, no IFR, no routing, no traffic *sequencing*
 (only traffic *awareness*), no transponder data link, no co-pilot. It is
 not yet an all-in-one replacement for those products.
@@ -334,10 +417,17 @@ src/
 ├── audio/                  # Push-to-talk, mic capture, PCM playback
 │                           #   on the X-Plane radio bus (COM1 or COM2),
 │                           #   mic permission
-├── backends/               # Strategy interfaces + concrete WhisperStt /
-│                           #   LlamaLm / PiperTts + manager (async
+├── backends/               # Strategy interfaces + manager (async
 │                           #   dispatch) + loader (verify + load) +
-│                           #   downloader (libcurl + resume + SHA256)
+│                           #   downloader (libcurl + resume + SHA256).
+│                           #   Concrete backends split by mode:
+│                           #   Local: WhisperStt / LlamaLm / PiperTts
+│                           #     (arm64 slice only, gated on
+│                           #     XPWELLYS_USE_LOCAL_INFERENCE).
+│                           #   Cloud: OpenAiStt / OpenAiLm / OpenAiTts
+│                           #     (both slices). The two client sets
+│                           #     share no headers and no code path —
+│                           #     audit invariant enforced by tests.
 ├── core/                   # Logging, XPlaneContext (SDK-free struct +
 │                           #   SDK-coupled DataRef reader)
 ├── data/                   # Airport VRPs, apt.dat-derived airspace
@@ -352,12 +442,15 @@ units (`atc/`, `core/logging`, `core/xplane_context` struct, `data/`,
 `backends/manager.cpp`, `persistence/model_manifest`). Both the plugin
 module and the headless `atc_repl` tool reuse it. The plugin module adds
 the SDK-coupled units (`main.cpp`, `audio/`, `core/xplane_context_runtime.cpp`,
-`backends/{whisper_stt,llama_lm,piper_tts,loader,downloader}.cpp`,
-`persistence/{settings,model_paths}.cpp`, `ui/atc_ui.cpp`) plus statically
-linked `whisper`, `llama`, `common`, and a shared `libpiper.dylib` that
-links to `libonnxruntime.1.22.0.dylib` — both dylibs co-located inside the
-plugin bundle alongside the `.xpl` and resolved through `@loader_path`
-rpath.
+`backends/{loader,downloader,openai_*}.cpp`,
+`persistence/{settings,model_paths,keychain}.cpp`, `ui/atc_ui.cpp`).
+The arm64 slice additionally compiles
+`backends/{whisper_stt,llama_lm,piper_tts}.cpp` and links statically
+against `whisper`, `llama`, `common`, plus a shared `libpiper.dylib`
+that resolves `libonnxruntime.1.22.0.dylib` through `@loader_path` —
+both dylibs co-located inside the plugin bundle alongside the `.xpl`.
+The x86_64 slice has none of those dependencies; it links only
+libcurl + Security + the audio frameworks.
 
 ## Third-Party Dependencies
 
