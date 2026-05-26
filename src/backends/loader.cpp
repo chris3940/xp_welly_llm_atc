@@ -9,6 +9,9 @@
 
 #include "backends/llama_lm.hpp"
 #include "backends/manager.hpp"
+#include "backends/openai_lm.hpp"
+#include "backends/openai_stt.hpp"
+#include "backends/openai_tts.hpp"
 #include "backends/piper_tts.hpp"
 #include "backends/whisper_stt.hpp"
 #include "core/logging.hpp"
@@ -328,23 +331,64 @@ void load_backends() {
   }
 }
 
+// Construct the three OpenAI cloud backends and register them with the
+// manager. Skips the local-model verification entirely: no files on
+// disk, only an API key in the Keychain. On a missing/empty key we
+// log the situation and bail — the UI's "Backend Mode" banner will
+// surface that state to the user and PTT stays disabled via
+// all_ready().
+void load_openai_backends() {
+  std::string api_key = settings::load_api_key();
+  if (api_key.empty()) {
+    logging::error("[xp_wellys_atc] OpenAI mode active but no API key in "
+                   "Keychain. Open Settings to paste a key.");
+    return;
+  }
+
+  auto stt = std::make_unique<OpenAiStt>(api_key, settings::openai_stt_model());
+  auto lm = std::make_unique<OpenAiLm>(api_key, settings::openai_lm_model());
+  auto tts = std::make_unique<OpenAiTts>(api_key, settings::openai_tts_model());
+
+  // Pre-register the three configured OpenAI voices. load_voice() on
+  // the cloud TTS only validates the voice id (alloy / echo / fable /
+  // onyx / nova / shimmer) — no model file to fetch, so this is
+  // instant.
+  tts->load_voice(settings::openai_tts_voice_atis(), {}, {});
+  tts->load_voice(settings::openai_tts_voice_tower(), {}, {});
+  tts->load_voice(settings::openai_tts_voice_ground(), {}, {});
+
+  backends::register_stt(std::move(stt));
+  backends::register_lm(std::move(lm));
+  backends::register_tts(std::move(tts));
+  logging::info("STT/LM/TTS backends ready (OpenAI Cloud)");
+}
+
 void run_worker() {
   // Guard against any std::filesystem / whisper.cpp / llama.cpp /
   // Piper exception escaping into std::thread destructor and
   // terminating X-Plane. We log + leave g_running false so a
   // subsequent start() can retry.
   try {
-    bool all_files_verified = verify_files();
-    if (g_should_exit.load()) {
-      g_running = false;
-      return;
-    }
-    if (all_files_verified) {
-      load_backends();
+    const std::string mode = settings::backend_mode();
+    if (mode == "openai") {
+      logging::info("[xp_wellys_atc] BACKEND MODE: OPENAI (api.openai.com). "
+                    "Audio + transcripts will be sent to OpenAI.");
+      load_openai_backends();
     } else {
-      logging::info(
-          "One or more model files are missing or corrupt - backends not "
-          "loaded; open the plugin window to download.");
+      logging::info("[xp_wellys_atc] BACKEND MODE: LOCAL (whisper.cpp + "
+                    "llama.cpp + Piper). No network traffic to AI APIs.");
+      bool all_files_verified = verify_files();
+      if (g_should_exit.load()) {
+        g_running = false;
+        return;
+      }
+      if (all_files_verified) {
+        load_backends();
+      } else {
+        logging::info(
+            "One or more model files are missing or corrupt - backends not "
+            "loaded; open the plugin window to download.");
+      }
     }
   } catch (const std::exception &e) {
     logging::error("loader: run_worker threw: %s", e.what());
@@ -359,9 +403,13 @@ void run_worker() {
 bool Status::all_ready() const {
   if (!backends::stt_ready() || !backends::lm_ready() || !backends::tts_ready())
     return false;
-  // Every entry that counts against the readiness gate (required
-  // entries + the four assigned voices' .onnx and .json) must be
-  // Ready.
+  // In OpenAI mode there are no model files on disk to gate against —
+  // backend registration alone is the readiness signal.
+  if (settings::backend_mode() == "openai")
+    return true;
+  // Local mode: every entry that counts against the readiness gate
+  // (required entries + the four assigned voices' .onnx and .json)
+  // must be Ready.
   std::unordered_set<std::string> wanted;
   for (auto role : model_manifest::all_roles())
     wanted.insert(settings::voice_for_role(role));
@@ -431,6 +479,18 @@ void stop() {
   g_running = false;
   g_should_exit = false;
   g_piper.reset();
+  // Drop the registered backend pointers so a subsequent start() —
+  // typically the one fired by the UI when the user switches Backend
+  // Mode — comes up against a clean slate. Without this the old
+  // backend instance would linger (e.g. the 2 GB llama context would
+  // stay in RAM after switching to OpenAI).
+  backends::register_stt(nullptr);
+  backends::register_lm(nullptr);
+  backends::register_tts(nullptr);
+  {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_status.files.clear();
+  }
 }
 
 std::string espeakng_data_dir_for_piper() {
