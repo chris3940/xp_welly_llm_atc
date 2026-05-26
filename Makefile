@@ -144,11 +144,17 @@ build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
 #
 # `make install` keeps working unchanged — it copies build/xp_wellys_atc.xpl
 # (now universal) into the plugin dir together with the staged dylibs.
+# `RELEASE_FLAG` is passed straight through to both CMake configure
+# calls so the GitHub Actions workflow can flip `-DRELEASE=ON` for
+# tag-driven release builds without duplicating the logic. Empty by
+# default (regular dev build).
+RELEASE_FLAG ?=
+
 build-universal: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "=== Building universal binary (arm64 with local+cloud, x86_64 with cloud-only) ==="
 	@echo ""
 	@echo "--- arm64 slice (local + cloud) ---"
-	cmake -B build-arm64 -DCMAKE_BUILD_TYPE=Release \
+	cmake -B build-arm64 -DCMAKE_BUILD_TYPE=Release $(RELEASE_FLAG) \
 	    -DCMAKE_OSX_ARCHITECTURES=arm64 \
 	    -DXPWELLYS_USE_LOCAL_INFERENCE=ON \
 	    -DBUILD_TESTS=OFF \
@@ -156,7 +162,7 @@ build-universal: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON
 	cmake --build build-arm64 --parallel
 	@echo ""
 	@echo "--- x86_64 slice (cloud-only) ---"
-	cmake -B build-x86_64 -DCMAKE_BUILD_TYPE=Release \
+	cmake -B build-x86_64 -DCMAKE_BUILD_TYPE=Release $(RELEASE_FLAG) \
 	    -DCMAKE_OSX_ARCHITECTURES=x86_64 \
 	    -DXPWELLYS_USE_LOCAL_INFERENCE=OFF \
 	    -DBUILD_TESTS=OFF \
