@@ -180,8 +180,10 @@ Bei einem ungültigen Funkspruch antwortet ATC mit einer Ablehnungsmeldung (z.B.
 
 **Auto-Korrekturen:**
 Das Plugin korrigiert Zustands-/Phasen-Abweichungen automatisch nach einer konfigurierbaren Verzögerung. Beispiele:
-- In der Luft, aber Zustand noch `DEPARTURE_CLEARED` → automatischer Übergang zu `PATTERN_ENTRY` nach 5 Sekunden
-- Am Boden, aber Zustand noch `PATTERN_ENTRY` → automatischer Reset zu `IDLE` nach 3 Sekunden
+- In der Luft, aber Zustand noch `Pattern/DEPARTURE_CLEARED` → automatischer Übergang zu `Pattern/PATTERN_ENTRY` nach 5 Sekunden
+- Am Boden, aber Zustand noch `Pattern/PATTERN_ENTRY` → automatischer Reset zu `IDLE` nach 3 Sekunden
+
+Cross-Country-Starts (`XC/DEPARTURE_CLEARED`) haben bewusst **keine** Auto-Korrektur zu `Pattern/PATTERN_ENTRY` — sie bleiben in `XC/DEPARTURE_CLEARED`, bis der Pilot die Frequenz explizit verlässt (`REQUEST_FREQUENCY` / `LEAVING_FREQUENCY`).
 
 **Frequenzeinschränkungen:**
 Bestimmte Intents sind nur auf bestimmten Frequenzen gültig:
@@ -248,28 +250,34 @@ Diese Prompts sind vorkonfiguriert und müssen in der Regel nicht angepasst werd
 ### 4.1 Zustandsautomat — Übersicht
 
 ```
-IDLE ──────────────────────────────────────────────────────┐
- ├── Ground kontaktieren ──→ GROUND_CONTACT ──→ TAXI_CLEARED
- ├── Tower kontaktieren ──→ TOWER_CONTACT ─────────────────┤
- └── Inbound-Meldung ──→ PATTERN_ENTRY ───────────────────┤
-                                                           │
-TOWER_CONTACT ─┬── Ready for Departure ──→ DEPARTURE_CLEARED
-               ├── Request Landing ──→ PATTERN_ENTRY
-               └── Request Touch & Go ──→ TOUCH_AND_GO_CLEARED
-                                                           │
-DEPARTURE_CLEARED ─┬── Report Downwind ──→ PATTERN_ENTRY   │
-                   └── Leave Frequency ──→ EN_ROUTE ──→ IDLE
-                                                           │
-PATTERN_ENTRY ─┬── Report Final ──→ LANDING_CLEARED        │
-               ├── Request Touch & Go ──→ TOUCH_AND_GO_CLEARED
-               └── Go Around ──→ PATTERN_ENTRY             │
-                                                           │
-LANDING_CLEARED ─┬── Runway Vacated ──→ IDLE               │
-                 └── Go Around ──→ PATTERN_ENTRY           │
-                                                           │
-TOUCH_AND_GO_CLEARED ─┬── Report Downwind ──→ PATTERN_ENTRY
-                      ├── Runway Vacated ──→ IDLE
-                      └── Go Around ──→ PATTERN_ENTRY
+IDLE ──────────────────────────────────────────────────────────────┐
+ ├── Ground kontaktieren ──→ GROUND_CONTACT ──→ TAXI_CLEARED ─────┤
+ ├── Tower kontaktieren ──→ TOWER_CONTACT ────────────────────────┤
+ └── Inbound-Meldung ──→ Pattern/PATTERN_ENTRY ───────────────────┤
+                                                                   │
+TOWER_CONTACT ─┬── Ready for Departure ──→ Pattern/DEPARTURE_CLEARED
+               ├── Ready for Departure VFR ──→ XC/DEPARTURE_CLEARED
+               ├── Request Landing ──→ Pattern/PATTERN_ENTRY
+               └── Request Touch & Go ──→ Pattern/TOUCH_AND_GO_CLEARED
+                                                                   │
+Pattern/DEPARTURE_CLEARED ─┬── 5 s airborne (auto) ──→ Pattern/PATTERN_ENTRY
+                           └── Report Downwind/Final ──→ Pattern/PATTERN_ENTRY
+                                                                   │
+XC/DEPARTURE_CLEARED ─┬── Request Frequency ──→ XC/EN_ROUTE        │
+                      └── Leaving Frequency ──→ XC/EN_ROUTE        │
+                                                                   │
+Pattern/PATTERN_ENTRY ─┬── Report Final ──→ Pattern/LANDING_CLEARED│
+                       ├── Request Touch & Go ──→ Pattern/TOUCH_AND_GO_CLEARED
+                       └── Go Around ──→ Pattern/PATTERN_ENTRY     │
+                                                                   │
+Pattern/LANDING_CLEARED ─┬── Runway Vacated ──→ IDLE               │
+                         └── Go Around ──→ Pattern/PATTERN_ENTRY   │
+                                                                   │
+Pattern/TOUCH_AND_GO_CLEARED ─┬── Report Downwind ──→ Pattern/PATTERN_ENTRY
+                              ├── Runway Vacated ──→ IDLE
+                              └── Go Around ──→ Pattern/PATTERN_ENTRY
+                                                                   │
+XC/EN_ROUTE ── Flugplatzwechsel (auto) ──→ IDLE ───────────────────┘
 ```
 
 ### 4.2 Zustände und gültige Intents
@@ -326,20 +334,42 @@ Tower hat bestätigt, aber noch keine Freigabe erteilt.
 | `REPORT_POSITION` | *"N123AB, five miles south."* | *"N123AB, number one, runway 26, report final."* |
 | `READBACK` | *"Cleared for takeoff 26, N123AB."* | *(still)* |
 
-#### Zustand: `DEPARTURE_CLEARED`
+#### Zustand: `Pattern/DEPARTURE_CLEARED`
 
-In der Luft nach Startfreigabe.
+In der Luft nach einer **Platzrunden**-Startfreigabe (Pilot sagte *"ready for departure"* ohne
+*"on course"* / *"VFR northbound"* / etc.). Korrigiert sich automatisch zu
+`Pattern/PATTERN_ENTRY`, sobald der Steigflug erkannt wird (~5 s in der Luft).
 
 | Pilot-Intent | Beispiel Funkspruch | ATC-Antwort |
 |---|---|---|
 | `REPORT_POSITION_DOWNWIND` | *"N123AB, midfield left downwind runway 26."* | *"N123AB, number one, runway 26, continue approach, report final."* |
 | `REPORT_POSITION_BASE` | *"N123AB, turning left base runway 26."* | *"N123AB, number one, runway 26, continue approach."* |
 | `REPORT_POSITION_FINAL` | *"N123AB, final runway 26."* | *"N123AB, runway 26, cleared to land, wind 240 at 8."* |
-| `READBACK` | *"Cleared for takeoff runway 26, on course, N123AB."* | *(still)* |
-| `REQUEST_FREQUENCY` | *"Tower, N123AB, request frequency change."* | *"N123AB, frequency change approved, good day."* |
-| `LEAVING_FREQUENCY` | *"N123AB, leaving frequency, good day."* | *"N123AB, good day."* |
+| `READBACK` | *"Cleared for takeoff runway 26, N123AB."* | *(still)* |
+| `_INVALID` (alles andere) | — | *"N123AB, read back takeoff clearance."* |
 
-#### Zustand: `PATTERN_ENTRY`
+> **Hinweis — XC-only Intents werden hier abgelehnt.** Ein `REQUEST_FREQUENCY`-
+> oder `LEAVING_FREQUENCY`-Anruf nach einer Platzrunden-Departure fällt auf
+> `_INVALID` ("read back takeoff clearance"). Das ist ICAO-konform: Wer
+> mid-flight die Frequenz verlassen will, muss von Anfang an Cross-Country
+> deklarieren (`READY_FOR_DEPARTURE_VFR`), damit Tower die passende Clearance
+> erteilt. Nachträglicher Mode-Wechsel ist nicht vorgesehen — die Platzrunde
+> regulär abschließen und am Boden eine neue Cross-Country-Clearance anfordern.
+
+#### Zustand: `XC/DEPARTURE_CLEARED`
+
+In der Luft nach einer **Cross-Country**-Startfreigabe (Pilot sagte *"on course"* /
+*"VFR northbound"* / etc.). Bleibt in diesem Zustand — **keine** Pattern-
+Auto-Korrektur — bis der Pilot die Frequenz explizit verlässt.
+
+| Pilot-Intent | Beispiel Funkspruch | ATC-Antwort |
+|---|---|---|
+| `READBACK` | *"Cleared for takeoff runway 26, on course, N123AB."* | *(still)* |
+| `REQUEST_FREQUENCY` | *"Tower, N123AB, request frequency change."* | *"N123AB, frequency change approved, good day."* (→ `XC/EN_ROUTE`) |
+| `LEAVING_FREQUENCY` | *"N123AB, leaving frequency, good day."* | *"N123AB, good day."* (→ `XC/EN_ROUTE`) |
+| `_INVALID` (alles andere) | — | *"N123AB, frequency change approved when airborne."* |
+
+#### Zustand: `Pattern/PATTERN_ENTRY`
 
 In der Platzrunde (nach Inbound-Freigabe oder Downwind-Meldung).
 
@@ -353,7 +383,7 @@ In der Platzrunde (nach Inbound-Freigabe oder Downwind-Meldung).
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
 | `READBACK` | *"Cleared via Whiskey, runway 14, wilco report left downwind, N123AB."* | *(still)* |
 
-#### Zustand: `TOUCH_AND_GO_CLEARED`
+#### Zustand: `Pattern/TOUCH_AND_GO_CLEARED`
 
 Nach Touch-and-Go-Freigabe.
 
@@ -368,7 +398,7 @@ Nach Touch-and-Go-Freigabe.
 | `RUNWAY_VACATED` | *"N123AB, clear of runway 26."* | *"N123AB, contact ground on 121.9, good day."* |
 | `READBACK` | *"Cleared touch and go runway 26, N123AB."* | *(still)* |
 
-#### Zustand: `LANDING_CLEARED`
+#### Zustand: `Pattern/LANDING_CLEARED`
 
 Landefreigabe erteilt — warten auf Aufsetzen und Verlassen der Piste.
 
@@ -381,9 +411,9 @@ Landefreigabe erteilt — warten auf Aufsetzen und Verlassen der Piste.
 
 **Hinweis — `REQUEST_TAXI_PARKING` ist nur nach der Landung gültig** (Flugphasen `TAXI` oder `LANDING_ROLL`). Ein Taxi-to-Parking Request während du noch am Parkplatz stehst (Flugphase `PARKED`) wird abgewiesen — man kann nicht dahin rollen wo man schon steht.
 
-#### Zustand: `EN_ROUTE`
+#### Zustand: `XC/EN_ROUTE`
 
-Überlandflug — kein ATC-Kontakt. Der Zustand wird automatisch auf `IDLE` zurückgesetzt, wenn sich der nächstgelegene Flugplatz ändert (so dass der Inbound-Call beim nächsten Platz sauber startet).
+Überlandflug — kein ATC-Kontakt. `crosscountry_flow::check_airport_change()` setzt den Zustand automatisch auf `IDLE` zurück, wenn sich der nächstgelegene Flugplatz ändert, so dass der Inbound-Call beim nächsten Platz sauber startet.
 
 #### Universelle Intents (in jedem Zustand gültig)
 
@@ -391,7 +421,7 @@ Einige Pilot-Intents werden zu jedem Zeitpunkt akzeptiert, unabhängig vom aktue
 
 | Pilot-Intent | Beispiel Funkspruch | Wirkung |
 |---|---|---|
-| `NEGATIVE_CORRECTION` | *"Negative, N123AB, request VFR departure on course."* / *"Disregard, N123AB, ..."* / *"No correction, ..."* | Der Zustandsautomat geht einen Schritt zurück (z.B. `DEPARTURE_CLEARED → TOWER_CONTACT`, `TAXI_CLEARED → GROUND_CONTACT`), damit der Pilot die Anfrage neu absetzen kann. ATC antwortet *"N123AB, roger, correction noted, say intentions."* Wenn der Controller die Departure-Art (Pattern vs. Cross-Country) falsch interpretiert hat, ist das der realitätsnahe Weg zur Korrektur. |
+| `NEGATIVE_CORRECTION` | *"Negative, N123AB, request VFR departure on course."* / *"Disregard, N123AB, ..."* / *"No correction, ..."* | Der Zustandsautomat geht einen Schritt zurück (z.B. `Pattern/DEPARTURE_CLEARED → TOWER_CONTACT`, `XC/DEPARTURE_CLEARED → TOWER_CONTACT`, `TAXI_CLEARED → GROUND_CONTACT`), damit der Pilot die Anfrage neu absetzen kann. ATC antwortet *"N123AB, roger, correction noted, say intentions."* Wenn der Controller die Departure-Art (Pattern vs. Cross-Country) falsch interpretiert hat, ist das der realitätsnahe Weg zur Korrektur. |
 | `UNABLE` | *"Unable, N123AB."* | Wird mit *"N123AB, roger."* quittiert. Kein Zustandswechsel. |
 | `INAPPROPRIATE_LANGUAGE` | (unprofessionelle Wortwahl) | Beim ersten Verstoss höfliche Erinnerung, danach Eskalation. Die eigentliche Anfrage wird beim ersten Verstoss noch normal verarbeitet. State unverändert. |
 | `TRAFFIC_IN_SIGHT` / `TRAFFIC_NEGATIVE_CONTACT` / `TRAFFIC_LOOKING` | *"Traffic in sight, N123AB."* | Nur gültig direkt nachdem der Controller eine Verkehrsmeldung abgesetzt hat; läuft über den parallelen Traffic-Dialog. |
@@ -515,7 +545,7 @@ Der Schlüsselbegriff **"on course"** signalisiert ATC, dass es sich um einen Ü
 
 ### Phase 2 — Streckenflug
 
-Kein ATC-Kontakt. Reiseflug zum Zielflugplatz. Der Plugin-Zustand ist `EN_ROUTE`.
+Kein ATC-Kontakt. Reiseflug zum Zielflugplatz. Der Plugin-Zustand ist `XC/EN_ROUTE`.
 
 ### Phase 3 — Anflug (LSZB)
 

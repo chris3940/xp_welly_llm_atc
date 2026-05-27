@@ -94,20 +94,42 @@ Tower has acknowledged but no clearance issued yet.
 | `REPORT_POSITION` | *"N123AB, five miles south."* | *"N123AB, number one, runway 26, report final."* |
 | `READBACK` | *"Cleared for takeoff 26, N123AB."* | *(silent)* |
 
-### State: `DEPARTURE_CLEARED`
+### State: `Pattern/DEPARTURE_CLEARED`
 
-Airborne after takeoff clearance. Pattern or cross-country.
+Airborne after a pattern takeoff clearance (pilot said *"ready for departure"* without
+*"on course"* / *"VFR northbound"* / etc.). Auto-corrects to `Pattern/PATTERN_ENTRY`
+once the climb is detected (~5 s airborne, see `flight_rules.json`).
 
 | Pilot Intent | Example Pilot Call | ATC Response |
 |---|---|---|
 | `REPORT_POSITION_DOWNWIND` | *"N123AB, midfield left downwind runway 26."* | *"N123AB, number one, runway 26, continue approach, report final."* |
 | `REPORT_POSITION_BASE` | *"N123AB, turning left base runway 26."* | *"N123AB, number one, runway 26, continue approach."* |
 | `REPORT_POSITION_FINAL` | *"N123AB, final runway 26."* | *"N123AB, runway 26, cleared to land, wind 240 at 8."* |
-| `READBACK` | *"Cleared for takeoff runway 26, on course, N123AB."* | *(silent)* |
-| `REQUEST_FREQUENCY` | *"Tower, N123AB, request frequency change."* | *"N123AB, frequency change approved, good day."* (→ `EN_ROUTE`) |
-| `LEAVING_FREQUENCY` | *"N123AB, leaving frequency, good day."* | *"N123AB, good day."* (→ `EN_ROUTE`) |
+| `READBACK` | *"Cleared for takeoff runway 26, N123AB."* | *(silent)* |
+| `_INVALID` (anything else) | — | *"N123AB, read back takeoff clearance."* |
 
-### State: `PATTERN_ENTRY`
+> **Note — XC-only intents are rejected here.** A `REQUEST_FREQUENCY` or
+> `LEAVING_FREQUENCY` call after a pattern departure falls through to
+> `_INVALID` ("read back takeoff clearance"). ICAO-conform: a pilot who
+> wants to leave the frequency mid-flight has to declare cross-country up
+> front (`READY_FOR_DEPARTURE_VFR`) so Tower issues the appropriate
+> clearance. To switch mode after the fact, finish the pattern and request
+> a new cross-country clearance from the ground.
+
+### State: `XC/DEPARTURE_CLEARED`
+
+Airborne after a cross-country takeoff clearance (pilot said *"on course"* /
+*"VFR northbound"* / etc.). Stays in this state — no Pattern auto-correction —
+until the pilot leaves the frequency.
+
+| Pilot Intent | Example Pilot Call | ATC Response |
+|---|---|---|
+| `READBACK` | *"Cleared for takeoff runway 26, on course, N123AB."* | *(silent)* |
+| `REQUEST_FREQUENCY` | *"Tower, N123AB, request frequency change."* | *"N123AB, frequency change approved, good day."* (→ `XC/EN_ROUTE`) |
+| `LEAVING_FREQUENCY` | *"N123AB, leaving frequency, good day."* | *"N123AB, good day."* (→ `XC/EN_ROUTE`) |
+| `_INVALID` (anything else) | — | *"N123AB, frequency change approved when airborne."* |
+
+### State: `Pattern/PATTERN_ENTRY`
 
 In the circuit after inbound clearance.
 
@@ -121,7 +143,7 @@ In the circuit after inbound clearance.
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
 | `READBACK` | *"Cleared via Whiskey, runway 14, wilco report left downwind, N123AB."* | *(silent)* |
 
-### State: `TOUCH_AND_GO_CLEARED`
+### State: `Pattern/TOUCH_AND_GO_CLEARED`
 
 After touch-and-go clearance — pilot can continue in the pattern or vacate.
 
@@ -136,7 +158,7 @@ After touch-and-go clearance — pilot can continue in the pattern or vacate.
 | `RUNWAY_VACATED` | *"N123AB, clear of runway 26."* | *"N123AB, contact ground on 121.9, good day."* |
 | `READBACK` | *"Cleared touch and go runway 26, N123AB."* | *(silent)* |
 
-### State: `LANDING_CLEARED`
+### State: `Pattern/LANDING_CLEARED`
 
 Cleared to land — no more clearances until runway vacated or go-around.
 
@@ -147,10 +169,12 @@ Cleared to land — no more clearances until runway vacated or go-around.
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
 | `READBACK` | *"Cleared to land runway 26, N123AB."* | *(silent)* |
 
-### State: `EN_ROUTE`
+### State: `XC/EN_ROUTE`
 
-Cross-country cruise — tower is not on frequency. No responses until a new
-airport's frequency is tuned (context switches automatically back to `IDLE`).
+Cross-country cruise — tower is not on frequency. No responses until the
+nearest airport changes; `crosscountry_flow::check_airport_change()` then
+drops the state back to `IDLE` so the next inbound call to the destination
+field starts cleanly.
 
 ### Universal Intents (valid in every state)
 
@@ -158,7 +182,7 @@ A handful of intents are accepted regardless of the active state:
 
 | Pilot Intent | Example Pilot Call | Effect |
 |---|---|---|
-| `NEGATIVE_CORRECTION` | *"Negative, N123AB, request VFR departure on course."* / *"Disregard, ..."* / *"No correction, ..."* | Reverts state one step (e.g. `DEPARTURE_CLEARED → TOWER_CONTACT`), so the pilot can re-issue the request when ATC misinterpreted them. ATC: *"N123AB, roger, correction noted, say intentions."* |
+| `NEGATIVE_CORRECTION` | *"Negative, N123AB, request VFR departure on course."* / *"Disregard, ..."* / *"No correction, ..."* | Reverts state one step (e.g. `Pattern/DEPARTURE_CLEARED → TOWER_CONTACT`), so the pilot can re-issue the request when ATC misinterpreted them. ATC: *"N123AB, roger, correction noted, say intentions."* |
 | `UNABLE` | *"Unable, N123AB."* | Acknowledged with *"N123AB, roger."* No state change. |
 | `INAPPROPRIATE_LANGUAGE` | (any rude wording) | Polite first warning; escalation on repeats. The original request still gets processed on the first warning. |
 | `TRAFFIC_IN_SIGHT` / `TRAFFIC_NEGATIVE_CONTACT` / `TRAFFIC_LOOKING` | *"Traffic in sight, N123AB."* | Only valid when the controller has just issued a traffic advisory; routed via the parallel traffic dialog. |
