@@ -17,7 +17,7 @@ SUBMODULES_SENTINEL := spikes/spike_whisper/third_party/whisper.cpp/CMakeLists.t
 
 CATCH2_VERSION := 3.7.1
 
-.PHONY: all help setup build install clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs repl run-repl test test-unit test-scenarios
+.PHONY: all help setup build build-universal install clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs repl run-repl test test-unit test-scenarios
 
 .DEFAULT_GOAL := help
 
@@ -31,6 +31,7 @@ help:
 	@echo "  make all               clean + format + build + lint"
 	@echo "  make setup             Init submodules + download X-Plane SDK, Dear ImGui, nlohmann/json, Catch2"
 	@echo "  make build             Build plugin (Release) -> build/xp_wellys_atc.xpl"
+	@echo "  make build-universal   Build arm64 (local+cloud) + x86_64 (cloud-only) and lipo into one .xpl"
 	@echo "  make repl              Build headless CLI -> build/atc_repl"
 	@echo "  make run-repl          Build + run the CLI (stdin transcripts)"
 	@echo "  make test              Run unit tests + scenario tests"
@@ -128,6 +129,63 @@ build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
 	@echo ""
 	@file build/xp_wellys_atc.xpl
 	@echo "Done. Run 'make install' to deploy."
+
+# ── Universal Binary build ────────────────────────────────────────────────────
+# Produces a single xp_wellys_atc.xpl that contains both an arm64 slice
+# (whisper.cpp + llama.cpp + Piper + OpenAI) and an x86_64 slice
+# (OpenAI only — no local inference, since the Metal kernels and
+# onnxruntime prebuilt are Apple Silicon only).
+#
+# Strategy: two separate CMake configures (build-arm64/, build-x86_64/),
+# each producing its own .xpl, then lipo-merged into build/xp_wellys_atc.xpl.
+# The arm64 slice ships libpiper.dylib + libonnxruntime.dylib next to the
+# .xpl so they're picked up by @loader_path; the x86_64 slice has no
+# such dylibs to ship.
+#
+# `make install` keeps working unchanged — it copies build/xp_wellys_atc.xpl
+# (now universal) into the plugin dir together with the staged dylibs.
+# `RELEASE_FLAG` is passed straight through to both CMake configure
+# calls so the GitHub Actions workflow can flip `-DRELEASE=ON` for
+# tag-driven release builds without duplicating the logic. Empty by
+# default (regular dev build).
+RELEASE_FLAG ?=
+
+build-universal: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+	@echo "=== Building universal binary (arm64 with local+cloud, x86_64 with cloud-only) ==="
+	@echo ""
+	@echo "--- arm64 slice (local + cloud) ---"
+	cmake -B build-arm64 -DCMAKE_BUILD_TYPE=Release $(RELEASE_FLAG) \
+	    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+	    -DXPWELLYS_USE_LOCAL_INFERENCE=ON \
+	    -DBUILD_TESTS=OFF \
+	    -Wno-dev
+	cmake --build build-arm64 --parallel
+	@echo ""
+	@echo "--- x86_64 slice (cloud-only) ---"
+	cmake -B build-x86_64 -DCMAKE_BUILD_TYPE=Release $(RELEASE_FLAG) \
+	    -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+	    -DXPWELLYS_USE_LOCAL_INFERENCE=OFF \
+	    -DBUILD_TESTS=OFF \
+	    -Wno-dev
+	cmake --build build-x86_64 --parallel
+	@echo ""
+	@echo "--- lipo merge ---"
+	@mkdir -p build
+	lipo -create \
+	    build-arm64/xp_wellys_atc.xpl \
+	    build-x86_64/xp_wellys_atc.xpl \
+	    -output build/xp_wellys_atc.xpl
+	@# Stage the arm64 slice's dylibs next to the merged binary so
+	@# `make install` finds them where it expects. The x86_64 slice
+	@# has no dylib dependencies (cloud-only build).
+	@cp build-arm64/libpiper.dylib              build/
+	@cp build-arm64/libonnxruntime.1.22.0.dylib build/
+	@cp build-arm64/libonnxruntime.dylib        build/
+	@cp -R build-arm64/espeak_ng-install        build/ 2>/dev/null || true
+	@echo ""
+	@file build/xp_wellys_atc.xpl
+	@lipo -info build/xp_wellys_atc.xpl
+	@echo "Done. Run 'make install' to deploy the universal .xpl."
 
 # ── REPL (headless CLI) ───────────────────────────────────────────────────────
 repl: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
@@ -333,7 +391,7 @@ cleanup-runs:
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 clean:
-	rm -rf build/ build-lint/ build-sanitize/
+	rm -rf build/ build-lint/ build-sanitize/ build-arm64/ build-x86_64/
 
 # ── Distclean ─────────────────────────────────────────────────────────────────
 # Remove everything 'make setup' downloaded so a full re-bootstrap is forced.

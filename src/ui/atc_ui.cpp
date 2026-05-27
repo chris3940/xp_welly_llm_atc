@@ -17,6 +17,7 @@
  */
 
 #include "ui/atc_ui.hpp"
+#include "ui/clipboard.hpp"
 #include "atc/atc_session.hpp"
 #include "atc/atc_state_machine.hpp"
 #include "atc/atc_templates.hpp"
@@ -61,6 +62,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <vector>
 
 namespace atc_ui {
@@ -93,6 +95,36 @@ static const char *start_mode_keys[] = {"cold_and_dark", "engines_running",
 static const char *start_mode_labels[] = {"Cold and Dark", "Engines Running",
                                           "Ready for Takeoff"};
 static int start_mode_selection = 1; // default: engines_running
+
+// AI backend selection — local (whisper.cpp + llama.cpp + Piper) vs.
+// OpenAI Cloud (Whisper API + Chat Completions + TTS API). The combo
+// + selection state only exist in builds that actually have a choice
+// to offer; the cloud-only x86_64 slice short-circuits to a static
+// label instead.
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
+static const char *backend_mode_keys[] = {"local", "openai"};
+static const char *backend_mode_labels[] = {"Local (whisper + llama + Piper)",
+                                            "OpenAI Cloud"};
+static int backend_mode_selection = 0;
+#endif
+
+// OpenAI model + voice combos. The model lists are tiny on purpose —
+// these are the only models that make sense for this workload. A
+// free-text field would tempt users to point at endpoints that do
+// not accept the request shape we build.
+static const char *openai_stt_models[] = {"whisper-1"};
+static const char *openai_lm_models[] = {"gpt-4o-mini", "gpt-4o"};
+static const char *openai_tts_models[] = {"tts-1", "tts-1-hd"};
+static const char *openai_voices[] = {"alloy", "echo", "fable",
+                                      "onyx",  "nova", "shimmer"};
+
+// API key TextInput buffer (password-masked at the ImGui call site).
+// Cleared when the user clicks Save Key so the in-memory copy doesn't
+// stick around. 256 bytes covers OpenAI's longest token format with
+// generous headroom.
+static char api_key_buf[256] = {};
+static float api_key_feedback_timer = 0.0f;
+static char api_key_feedback_msg[128] = {};
 
 // ── Helpers: format bytes, resident memory, model state strings ──
 
@@ -353,18 +385,27 @@ static void draw_status_tab() {
   // Models-not-ready banner. PTT is hard-gated on all three backends
   // being registered, so the user sees nothing happen if they hit
   // the key before models load. Surface that explicitly here and
-  // point at the Models tab.
+  // point at the Models tab (local mode) or the Settings tab
+  // (OpenAI mode — API key missing).
   {
     auto status = backends::loader::snapshot();
     if (!status.all_ready()) {
+      const bool is_openai = settings::backend_mode() == "openai";
       ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.4f, 0.1f, 0.1f, 0.6f));
       ImGui::BeginChild(
           "##model_banner",
           ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 2 + 8), true);
-      ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
-                         "Local inference models not ready - PTT disabled.");
-      ImGui::TextDisabled(
-          "Open the Models tab to download / verify (~2.0 GB total).");
+      if (is_openai) {
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                           "OpenAI API key missing - PTT disabled.");
+        ImGui::TextDisabled(
+            "Open the Settings tab and paste your OpenAI API key.");
+      } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+                           "Local inference models not ready - PTT disabled.");
+        ImGui::TextDisabled(
+            "Open the Models tab to download / verify (~2.0 GB total).");
+      }
       ImGui::EndChild();
       ImGui::PopStyleColor();
       ImGui::Spacing();
@@ -538,6 +579,20 @@ static void draw_status_tab() {
 // RAM usage and per-stage inference latency live at the bottom for
 // live tuning during dev sessions; both are read-only.
 static void draw_models_tab() {
+  // OpenAI mode has no local models to manage — short-circuit the
+  // whole panel so the user is not tempted to download files they
+  // would never use.
+  if (settings::backend_mode() == "openai") {
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                       "OpenAI Cloud mode active");
+    ImGui::TextDisabled(
+        "No local models needed. Inference runs against api.openai.com.");
+    ImGui::Spacing();
+    ImGui::TextDisabled("To switch back to local models, change 'Backend' in "
+                        "the Settings tab.");
+    return;
+  }
+
   auto loader_status = backends::loader::snapshot();
   auto downloads = backends::downloader::snapshot();
 
@@ -937,8 +992,171 @@ static void draw_settings_tab() {
         break;
       }
     }
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
+    std::string bm = settings::backend_mode();
+    backend_mode_selection = (bm == "openai") ? 1 : 0;
+#endif
     buffers_initialized = true;
   }
+
+  // ── AI Backend ─────────────────────────────────────────────────
+  // Sits at the top because it is the highest-impact choice in
+  // this tab: it picks the entire inference pipeline (Local vs.
+  // OpenAI Cloud) and a change forces a backend reload.
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "AI Backend");
+#ifdef XPWELLYS_USE_LOCAL_INFERENCE
+  if (ImGui::Combo("Backend", &backend_mode_selection, backend_mode_labels,
+                   2)) {
+    settings::set_backend_mode(backend_mode_keys[backend_mode_selection]);
+    settings::save();
+    // Tear down whatever was registered and re-run the loader so the
+    // newly-selected pipeline comes up. loader::stop() unregisters
+    // the backend pointers; start() reads settings::backend_mode()
+    // and instantiates accordingly.
+    backends::loader::stop();
+    backends::loader::start();
+  }
+  if (ImGui::IsItemHovered()) {
+    ImGui::SetTooltip(
+        "Local: runs on this Mac (Apple Silicon, ~2 GB models).\n"
+        "OpenAI Cloud: audio + transcripts are sent to api.openai.com.\n"
+        "Switching reloads the inference pipeline.");
+  }
+  const bool show_openai_controls = (backend_mode_selection == 1);
+#else
+  // Cloud-only slice (the x86_64 half of the universal binary).
+  // No choice to offer — Local cannot run here because Metal
+  // kernels and the onnxruntime prebuilt are Apple Silicon only.
+  ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
+                     "Backend: OpenAI Cloud (Intel build)");
+  ImGui::TextDisabled(
+      "Local inference requires Apple Silicon. This slice of the "
+      "universal binary is OpenAI-only.");
+  const bool show_openai_controls = true;
+#endif
+
+  if (show_openai_controls) {
+    // OpenAI mode — show the key + model + voice controls. None of
+    // these fields are visible in Local mode.
+    ImGui::Indent();
+
+    // API key: password-masked TextInput, plus three action buttons.
+    bool has_key = settings::api_key_saved();
+    if (has_key) {
+      ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+                         "API key saved in Keychain (OK)");
+    } else {
+      ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f),
+                         "No API key configured - paste a key below.");
+    }
+    ImGui::InputText("OpenAI API Key", api_key_buf, sizeof(api_key_buf),
+                     ImGuiInputTextFlags_Password);
+    // Explicit Paste button — Cmd+V into a password-flagged InputText
+    // is unreliable inside the X-Plane ImGui context (key events get
+    // intercepted by the sim's command bindings before ImGui sees
+    // them), AND ImGui::GetClipboardText() in this plugin only sees
+    // ImGui's internal buffer, not the system pasteboard (no
+    // platform backend is wired up). Read NSPasteboard directly via
+    // ui::clipboard::read_system_text().
+    if (ImGui::Button("Paste")) {
+      std::string clip = ui::clipboard::read_system_text();
+      if (!clip.empty()) {
+        std::strncpy(api_key_buf, clip.c_str(), sizeof(api_key_buf) - 1);
+        api_key_buf[sizeof(api_key_buf) - 1] = '\0';
+        std::snprintf(api_key_feedback_msg, sizeof(api_key_feedback_msg),
+                      "Pasted %zu chars - click Save Key",
+                      std::strlen(api_key_buf));
+        api_key_feedback_timer = 3.0f;
+      } else {
+        std::snprintf(api_key_feedback_msg, sizeof(api_key_feedback_msg),
+                      "Clipboard is empty");
+        api_key_feedback_timer = 3.0f;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save Key")) {
+      if (api_key_buf[0] != '\0' && settings::save_api_key(api_key_buf)) {
+        std::snprintf(api_key_feedback_msg, sizeof(api_key_feedback_msg),
+                      "Saved (Keychain)");
+        api_key_feedback_timer = 3.0f;
+        // Wipe the in-memory buffer — the key now lives in the
+        // Keychain only.
+        std::memset(api_key_buf, 0, sizeof(api_key_buf));
+        backends::loader::stop();
+        backends::loader::start();
+      } else {
+        std::snprintf(api_key_feedback_msg, sizeof(api_key_feedback_msg),
+                      "Save failed (empty key or Keychain error)");
+        api_key_feedback_timer = 3.0f;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Delete Key")) {
+      settings::delete_api_key();
+      std::memset(api_key_buf, 0, sizeof(api_key_buf));
+      std::snprintf(api_key_feedback_msg, sizeof(api_key_feedback_msg),
+                    "API key deleted");
+      api_key_feedback_timer = 3.0f;
+      backends::loader::stop();
+      backends::loader::start();
+    }
+    if (api_key_feedback_timer > 0.0f) {
+      ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s",
+                         api_key_feedback_msg);
+      api_key_feedback_timer -= ImGui::GetIO().DeltaTime;
+    }
+
+    // Model combos — pre-filled from settings, write straight back.
+    auto draw_str_combo =
+        [](const char *label, const char *current_value,
+           const char *const *options, int n,
+           const std::function<void(const std::string &)> &on_change) {
+          int sel = 0;
+          for (int i = 0; i < n; ++i) {
+            if (std::strcmp(current_value, options[i]) == 0) {
+              sel = i;
+              break;
+            }
+          }
+          if (ImGui::Combo(label, &sel, options, n)) {
+            on_change(options[sel]);
+            settings::save();
+          }
+        };
+
+    draw_str_combo(
+        "STT Model", settings::openai_stt_model().c_str(), openai_stt_models,
+        sizeof(openai_stt_models) / sizeof(openai_stt_models[0]),
+        [](const std::string &v) { settings::set_openai_stt_model(v); });
+    draw_str_combo(
+        "LM Model", settings::openai_lm_model().c_str(), openai_lm_models,
+        sizeof(openai_lm_models) / sizeof(openai_lm_models[0]),
+        [](const std::string &v) { settings::set_openai_lm_model(v); });
+    draw_str_combo(
+        "TTS Model", settings::openai_tts_model().c_str(), openai_tts_models,
+        sizeof(openai_tts_models) / sizeof(openai_tts_models[0]),
+        [](const std::string &v) { settings::set_openai_tts_model(v); });
+
+    // Voice combos — onyx flagged as the closest match to ATC.
+    constexpr int kVoiceCount =
+        sizeof(openai_voices) / sizeof(openai_voices[0]);
+    draw_str_combo("ATIS Voice", settings::openai_tts_voice_atis().c_str(),
+                   openai_voices, kVoiceCount, [](const std::string &v) {
+                     settings::set_openai_tts_voice_atis(v);
+                   });
+    draw_str_combo("Tower Voice", settings::openai_tts_voice_tower().c_str(),
+                   openai_voices, kVoiceCount, [](const std::string &v) {
+                     settings::set_openai_tts_voice_tower(v);
+                   });
+    draw_str_combo("Ground Voice", settings::openai_tts_voice_ground().c_str(),
+                   openai_voices, kVoiceCount, [](const std::string &v) {
+                     settings::set_openai_tts_voice_ground(v);
+                   });
+    ImGui::TextDisabled("Tip: 'onyx' is closest to real ATC voice.");
+
+    ImGui::Unindent();
+  }
+  ImGui::Separator();
 
   // PTT — bound via X-Plane settings
   ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Push-to-Talk");
@@ -2100,7 +2318,12 @@ static int draw_phase_cb(XPLMDrawingPhase, int, void *) {
         // "Models" sits second so first-launch users see it
         // immediately after Status — they cannot use the plugin
         // until they download here.
-        bool models_attention = !backends::loader::snapshot().all_ready();
+        // Highlight Models tab only in Local mode — in OpenAI mode
+        // the user goes to Settings, not Models, when something is
+        // missing (see the Status-tab banner above for the OpenAI
+        // path).
+        bool models_attention = !backends::loader::snapshot().all_ready() &&
+                                settings::backend_mode() != "openai";
         if (models_attention) {
           // Highlight the tab label so it's obvious where to go on
           // a fresh install.

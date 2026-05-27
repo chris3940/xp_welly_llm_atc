@@ -6,6 +6,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(BUILD_TESTS "Build Catch2 unit tests" ON)
 
+# ── Local-inference toggle ───────────────────────────────────────────────────
+# When ON, the plugin module is compiled with whisper.cpp + llama.cpp +
+# Piper (Metal-accelerated, Apple Silicon only). When OFF, those
+# backends are skipped entirely and only the OpenAI cloud clients are
+# built — letting the same source tree produce an x86_64 (Intel)
+# slice that runs against api.openai.com.
+#
+# A universal binary is assembled by building twice (once per
+# architecture) and lipo-ing the two .xpl outputs together — see
+# `make build-universal`.
+option(XPWELLYS_USE_LOCAL_INFERENCE
+    "Compile local whisper.cpp/llama.cpp/Piper backends (Apple Silicon only)"
+    ON)
+
 # ── Sanitizer build (ASan + UBSan) ───────────────────────────────────────────
 # When ON, instruments the SDK-free engine OBJECT lib + atc_repl + Catch2
 # tests with AddressSanitizer + UndefinedBehaviorSanitizer. The plugin
@@ -44,22 +58,36 @@ endif()
 file(READ "${CMAKE_SOURCE_DIR}/VERSION.txt" VERSION_STRING)
 string(STRIP "${VERSION_STRING}" VERSION_STRING)
 
-# ARM64-only: whisper.cpp / llama.cpp Metal backends ship Apple Silicon
-# Metal kernels, and Piper's onnxruntime build is ARM-targeted in the
-# spike. An x86_64 build would not meet the < 3 s end-to-end target on
-# Intel Macs (CPU-only inference), so we drop the universal-binary
-# requirement here. Document this in README.md / RELEASE.md.
+# Architecture + deployment target.
+#
+# Local inference (whisper.cpp / llama.cpp / Piper) ships Apple Silicon
+# Metal kernels and uses an arm64-only onnxruntime prebuilt, so any
+# build that enables XPWELLYS_USE_LOCAL_INFERENCE must target arm64.
+# The OpenAI-only build is libcurl + system frameworks all the way
+# down and is architecture-neutral, so it cleanly produces an x86_64
+# slice for Intel Macs. The two slices are then lipo'd together into
+# one universal .xpl by `make build-universal`.
 if(APPLE)
-    if(NOT CMAKE_OSX_ARCHITECTURES)
-        set(CMAKE_OSX_ARCHITECTURES "arm64")
+    if(XPWELLYS_USE_LOCAL_INFERENCE)
+        if(NOT CMAKE_OSX_ARCHITECTURES)
+            set(CMAKE_OSX_ARCHITECTURES "arm64")
+        endif()
+        # onnxruntime 1.22.0's prebuilt arm64 dylib is built against
+        # the macOS 13.3 SDK; setting the deployment target lower
+        # triggers a "newer version 13.3" linker warning and risks
+        # runtime crashes on macOS 12.
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3")
+    else()
+        # OpenAI-only build: caller picks the architecture (typically
+        # x86_64 for the universal-binary's Intel slice). Keep the
+        # 13.3 deployment target so both slices match and lipo is
+        # happy — bumping it lower would split the merged binary's
+        # LC_BUILD_VERSION load commands.
+        if(NOT CMAKE_OSX_ARCHITECTURES)
+            set(CMAKE_OSX_ARCHITECTURES "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+        endif()
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3")
     endif()
-    # onnxruntime 1.22.0's prebuilt arm64 dylib is built against the
-    # macOS 13.3 SDK; setting the deployment target lower triggers a
-    # "newer version 13.3" linker warning and risks runtime crashes on
-    # macOS 12. X-Plane 12 itself supports macOS 11+, but this plugin's
-    # local-inference path requires macOS 13.3 due to onnxruntime —
-    # document in README.
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3")
 endif()
 
 # ── Dear ImGui ────────────────────────────────────────────────────────────────
@@ -91,51 +119,53 @@ find_package(CURL REQUIRED)
 
 set(SPIKES_DIR "${CMAKE_SOURCE_DIR}/spikes")
 
-# --- shared ggml / metal options (apply to whichever subdir wins the ggml
-# add_subdirectory race) ---
-set(BUILD_SHARED_LIBS           OFF CACHE BOOL "" FORCE)
-set(GGML_METAL                  ON  CACHE BOOL "" FORCE)
-set(GGML_METAL_EMBED_LIBRARY    ON  CACHE BOOL "" FORCE)
-set(GGML_ACCELERATE             ON  CACHE BOOL "" FORCE)
-set(GGML_BLAS                   OFF CACHE BOOL "" FORCE)
+if(XPWELLYS_USE_LOCAL_INFERENCE)
+    message(STATUS "Building with local inference (whisper + llama + Piper)")
 
-# --- llama.cpp (provides `ggml`, `llama`, `common`) ---
-set(LLAMA_BUILD_COMMON       ON  CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_TOOLS        OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_EXAMPLES     OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_SERVER       OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_TESTS        OFF CACHE BOOL "" FORCE)
-set(LLAMA_CURL               OFF CACHE BOOL "" FORCE)
-add_subdirectory(${SPIKES_DIR}/spike_llama/third_party/llama.cpp
-                 ${CMAKE_BINARY_DIR}/llama.cpp EXCLUDE_FROM_ALL)
+    # --- shared ggml / metal options (apply to whichever subdir wins the ggml
+    # add_subdirectory race) ---
+    set(BUILD_SHARED_LIBS           OFF CACHE BOOL "" FORCE)
+    set(GGML_METAL                  ON  CACHE BOOL "" FORCE)
+    set(GGML_METAL_EMBED_LIBRARY    ON  CACHE BOOL "" FORCE)
+    set(GGML_ACCELERATE             ON  CACHE BOOL "" FORCE)
+    set(GGML_BLAS                   OFF CACHE BOOL "" FORCE)
 
-# --- whisper.cpp (provides `whisper`; reuses llama's ggml target) ---
-set(WHISPER_BUILD_EXAMPLES      OFF CACHE BOOL "" FORCE)
-set(WHISPER_BUILD_TESTS         OFF CACHE BOOL "" FORCE)
-set(WHISPER_BUILD_SERVER        OFF CACHE BOOL "" FORCE)
-add_subdirectory(${SPIKES_DIR}/spike_whisper/third_party/whisper.cpp
-                 ${CMAKE_BINARY_DIR}/whisper.cpp EXCLUDE_FROM_ALL)
+    # --- llama.cpp (provides `ggml`, `llama`, `common`) ---
+    set(LLAMA_BUILD_COMMON       ON  CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_TOOLS        OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_EXAMPLES     OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_SERVER       OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_TESTS        OFF CACHE BOOL "" FORCE)
+    set(LLAMA_CURL               OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${SPIKES_DIR}/spike_llama/third_party/llama.cpp
+                     ${CMAKE_BINARY_DIR}/llama.cpp EXCLUDE_FROM_ALL)
 
-# --- piper (provides `piper`; pulls in espeak-ng (static) + onnxruntime
-# (prebuilt dylib)) ---
-add_subdirectory(${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper
-                 ${CMAKE_BINARY_DIR}/libpiper EXCLUDE_FROM_ALL)
+    # --- whisper.cpp (provides `whisper`; reuses llama's ggml target) ---
+    set(WHISPER_BUILD_EXAMPLES      OFF CACHE BOOL "" FORCE)
+    set(WHISPER_BUILD_TESTS         OFF CACHE BOOL "" FORCE)
+    set(WHISPER_BUILD_SERVER        OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${SPIKES_DIR}/spike_whisper/third_party/whisper.cpp
+                     ${CMAKE_BINARY_DIR}/whisper.cpp EXCLUDE_FROM_ALL)
 
-# espeak-ng-data is installed by libpiper's ExternalProject under the build
-# dir. The plugin needs to find this dir at runtime; phase 4 (model loader)
-# resolves it relative to the .xpl bundle, but until then we bake the build
-# path so dev runs work.
-set(XP_WELLYS_ATC_ESPEAKNG_DATA_DIR
-    "${CMAKE_BINARY_DIR}/espeak_ng-install/share/espeak-ng-data"
-    CACHE PATH "Path to espeak-ng-data used at runtime (dev fallback)")
+    # --- piper (provides `piper`; pulls in espeak-ng (static) + onnxruntime
+    # (prebuilt dylib)) ---
+    add_subdirectory(${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper
+                     ${CMAKE_BINARY_DIR}/libpiper EXCLUDE_FROM_ALL)
 
-# Path to onnxruntime prebuilt — we copy the dylib next to the .xpl so it
-# resolves through @loader_path with no DYLD_LIBRARY_PATH gymnastics.
-# libpiper's CMake extracts the prebuilt archive into its own source tree
-# (CMAKE_CURRENT_LIST_DIR/lib), not the build dir.
-set(ONNXRUNTIME_LIB_DIR
-    "${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/lib/onnxruntime-osx-arm64-1.22.0/lib"
-    CACHE PATH "Directory holding libonnxruntime.<ver>.dylib")
+    # espeak-ng-data is installed by libpiper's ExternalProject under the build
+    # dir.
+    set(XP_WELLYS_ATC_ESPEAKNG_DATA_DIR
+        "${CMAKE_BINARY_DIR}/espeak_ng-install/share/espeak-ng-data"
+        CACHE PATH "Path to espeak-ng-data used at runtime (dev fallback)")
+
+    # Path to onnxruntime prebuilt — we copy the dylib next to the .xpl so it
+    # resolves through @loader_path with no DYLD_LIBRARY_PATH gymnastics.
+    set(ONNXRUNTIME_LIB_DIR
+        "${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/lib/onnxruntime-osx-arm64-1.22.0/lib"
+        CACHE PATH "Directory holding libonnxruntime.<ver>.dylib")
+else()
+    message(STATUS "Building OpenAI-only (no whisper/llama/piper)")
+endif()
 
 # ── Engine OBJECT library (X-Plane SDK-frei) ─────────────────────────────────
 # Must compile and link without any XPLM / XPWidgets symbols.
@@ -200,12 +230,16 @@ add_library(xp_wellys_atc MODULE
     src/audio/audio_recorder.cpp
     src/audio/audio_player.cpp
     src/audio/mic_permission.mm
-    # Concrete inference backends — pull whisper.h / llama.h /
-    # piper.h transitively. Static libs come from the spike
-    # submodules added above.
-    src/backends/whisper_stt.cpp
-    src/backends/llama_lm.cpp
-    src/backends/piper_tts.cpp
+    # OpenAI cloud clients — libcurl + nlohmann/json, never include
+    # any local backend header. Each TU carries a kBackendTag
+    # constant so every inference call shows up under
+    # [STT-OPENAI] / [LM-OPENAI] / [TTS-OPENAI] in Log.txt.
+    # Always compiled — even in the Intel slice that does not have
+    # the local backends, OpenAI is the only available path.
+    src/backends/openai_common.cpp
+    src/backends/openai_stt.cpp
+    src/backends/openai_lm.cpp
+    src/backends/openai_tts.cpp
     # Loader orchestrates verification + concrete backend load on a
     # worker thread; uses XPLMGetPluginInfo (via model_paths) so it
     # has to live in the plugin module, not the engine library.
@@ -216,9 +250,26 @@ add_library(xp_wellys_atc MODULE
     src/backends/downloader.cpp
     src/persistence/model_paths.cpp
     src/persistence/settings.cpp
+    src/persistence/keychain.cpp
     src/ui/atc_ui.cpp
+    # NSPasteboard bridge — the ImGui platform backend in this
+    # plugin does not wire up a clipboard connector, so the Paste
+    # button has to read the system pasteboard via AppKit directly.
+    src/ui/clipboard.mm
     ${IMGUI_SOURCES}
 )
+
+if(XPWELLYS_USE_LOCAL_INFERENCE)
+    # Concrete local backends — pull whisper.h / llama.h / piper.h
+    # transitively. Static libs come from the spike submodules added
+    # above. In the OpenAI-only build these TUs are not compiled at
+    # all (and the loader is built without their includes).
+    target_sources(xp_wellys_atc PRIVATE
+        src/backends/whisper_stt.cpp
+        src/backends/llama_lm.cpp
+        src/backends/piper_tts.cpp
+    )
+endif()
 
 target_include_directories(xp_wellys_atc PRIVATE
     ${CMAKE_SOURCE_DIR}/sdk
@@ -228,13 +279,23 @@ target_include_directories(xp_wellys_atc PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
-    # Local inference backends — headers from the spike submodules.
-    ${SPIKES_DIR}/spike_whisper/third_party/whisper.cpp/include
-    ${SPIKES_DIR}/spike_llama/third_party/llama.cpp/include
-    ${SPIKES_DIR}/spike_llama/third_party/llama.cpp/ggml/include
-    ${SPIKES_DIR}/spike_llama/third_party/llama.cpp/common
-    ${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/include
 )
+
+if(XPWELLYS_USE_LOCAL_INFERENCE)
+    target_include_directories(xp_wellys_atc PRIVATE
+        # Local inference backends — headers from the spike submodules.
+        ${SPIKES_DIR}/spike_whisper/third_party/whisper.cpp/include
+        ${SPIKES_DIR}/spike_llama/third_party/llama.cpp/include
+        ${SPIKES_DIR}/spike_llama/third_party/llama.cpp/ggml/include
+        ${SPIKES_DIR}/spike_llama/third_party/llama.cpp/common
+        ${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/include
+    )
+    # Surface the flag to C++ code so loader.cpp can #ifdef the
+    # local-only includes + backend instantiation calls.
+    target_compile_definitions(xp_wellys_atc PRIVATE
+        XPWELLYS_USE_LOCAL_INFERENCE=1
+    )
+endif()
 
 set_target_properties(xp_wellys_atc PROPERTIES
     OUTPUT_NAME "xp_wellys_atc"
@@ -269,59 +330,94 @@ if(APPLE)
         "-framework CoreAudio"
         "-framework AVFoundation"
         "-framework CoreFoundation"
-        # libcurl is now used solely for the in-plugin model
-        # downloader (HTTPS GET with Range resume to HuggingFace);
-        # OpenAI HTTP traffic is gone.
+        # AppKit is used by src/ui/clipboard.mm to read NSPasteboard.
+        "-framework AppKit"
+        # Security.framework is used by persistence/keychain.cpp to
+        # store the OpenAI API key in the macOS Keychain. Always
+        # linked — Keychain is the storage for both build modes.
+        "-framework Security"
+        # libcurl is used by the plugin's model downloader and by
+        # the three OpenAI cloud clients. Both modes need it.
         CURL::libcurl
-        # Local inference: whisper.cpp + llama.cpp build static and
-        # link in directly. Piper is shared (libpiper.dylib) and is
-        # resolved at runtime via @loader_path — see rpath setup
-        # below.
-        whisper
-        common
-        llama
-        piper
     )
 
-    # rpath: dev builds find dylibs in build/ and build/lib/<ort>; the
-    # installed bundle finds them via @loader_path (Makefile install
-    # target copies libpiper.dylib + libonnxruntime.<ver>.dylib next to
-    # the .xpl).
-    set_target_properties(xp_wellys_atc PROPERTIES
-        BUILD_WITH_INSTALL_RPATH FALSE
-        BUILD_RPATH "${CMAKE_BINARY_DIR};${ONNXRUNTIME_LIB_DIR}"
-        INSTALL_RPATH "@loader_path"
-    )
+    if(XPWELLYS_USE_LOCAL_INFERENCE)
+        target_link_libraries(xp_wellys_atc PRIVATE
+            # Local inference: whisper.cpp + llama.cpp build static
+            # and link in directly. Piper is shared (libpiper.dylib)
+            # and is resolved at runtime via @loader_path — see rpath
+            # setup below.
+            whisper
+            common
+            llama
+            piper
+        )
 
-    # Stage the runtime dependencies next to the built .xpl so a fresh
-    # `cmake --build` produces a directory the install step can copy
-    # verbatim. We do this on a separate `stage_dylibs` target chained
-    # to the plugin's POST_BUILD so it runs after `libpiper` and
-    # `libonnxruntime` exist.
-    add_custom_command(TARGET xp_wellys_atc POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:piper>"
-            "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:piper>"
-        COMMAND ${CMAKE_COMMAND} -E echo
-            "Staged libpiper next to xp_wellys_atc.xpl"
-        COMMENT "Staging libpiper.dylib alongside xp_wellys_atc.xpl"
-    )
-    # Copy only the actual onnxruntime dylibs (not pkgconfig + dSYM).
-    # The versioned + unversioned (symlink-style) names both need to be
-    # present so libpiper's @rpath/libonnxruntime.1.22.0.dylib resolves.
-    add_custom_command(TARGET xp_wellys_atc POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${ONNXRUNTIME_LIB_DIR}/libonnxruntime.1.22.0.dylib"
-            "${CMAKE_BINARY_DIR}/libonnxruntime.1.22.0.dylib"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${ONNXRUNTIME_LIB_DIR}/libonnxruntime.dylib"
-            "${CMAKE_BINARY_DIR}/libonnxruntime.dylib"
-        COMMENT "Staging libonnxruntime dylibs alongside xp_wellys_atc.xpl"
-    )
+        # rpath: dev builds find dylibs in build/ and build/lib/<ort>;
+        # the installed bundle finds them via @loader_path (Makefile
+        # install target copies libpiper.dylib +
+        # libonnxruntime.<ver>.dylib next to the .xpl).
+        set_target_properties(xp_wellys_atc PROPERTIES
+            BUILD_WITH_INSTALL_RPATH FALSE
+            BUILD_RPATH "${CMAKE_BINARY_DIR};${ONNXRUNTIME_LIB_DIR}"
+            INSTALL_RPATH "@loader_path"
+        )
+
+        # Stage the runtime dependencies next to the built .xpl so a
+        # fresh `cmake --build` produces a directory the install step
+        # can copy verbatim.
+        add_custom_command(TARGET xp_wellys_atc POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:piper>"
+                "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:piper>"
+            COMMAND ${CMAKE_COMMAND} -E echo
+                "Staged libpiper next to xp_wellys_atc.xpl"
+            COMMENT "Staging libpiper.dylib alongside xp_wellys_atc.xpl"
+        )
+        # Copy only the actual onnxruntime dylibs (not pkgconfig + dSYM).
+        # The versioned + unversioned (symlink-style) names both need
+        # to be present so libpiper's
+        # @rpath/libonnxruntime.1.22.0.dylib resolves.
+        add_custom_command(TARGET xp_wellys_atc POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_LIB_DIR}/libonnxruntime.1.22.0.dylib"
+                "${CMAKE_BINARY_DIR}/libonnxruntime.1.22.0.dylib"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_LIB_DIR}/libonnxruntime.dylib"
+                "${CMAKE_BINARY_DIR}/libonnxruntime.dylib"
+            COMMENT "Staging libonnxruntime dylibs alongside xp_wellys_atc.xpl"
+        )
+    else()
+        # OpenAI-only build: no shared dylibs to stage. @loader_path
+        # still applies for the install (so future shared libs would
+        # be found), but nothing actually resolves through it.
+        set_target_properties(xp_wellys_atc PROPERTIES
+            BUILD_WITH_INSTALL_RPATH FALSE
+            INSTALL_RPATH "@loader_path"
+        )
+    endif()
 endif()
 
 # ── CLI Executable (ohne X-Plane) ────────────────────────────────────────────
-# Host-arch only — no need for universal binary on a dev tool.
+# Host-arch only — no need for universal binary on a dev tool. The
+# x_atc_engine OBJECT library is compiled for whatever
+# CMAKE_OSX_ARCHITECTURES the plugin targets, so for a cross-arch
+# plugin build (e.g. the x86_64 slice of the universal binary built
+# on an arm64 host) we cannot link an arm64 atc_repl against x86_64
+# engine objects. Skip the dev tools in that case — the universal
+# build pipeline runs each arch as its own configure dir and only
+# needs the .xpl from each.
+set(_xp_engine_arch_matches_host TRUE)
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    if(NOT "${CMAKE_HOST_SYSTEM_PROCESSOR}" IN_LIST CMAKE_OSX_ARCHITECTURES)
+        set(_xp_engine_arch_matches_host FALSE)
+        message(STATUS "Cross-arch build (host ${CMAKE_HOST_SYSTEM_PROCESSOR} -> "
+                       "target ${CMAKE_OSX_ARCHITECTURES}); skipping atc_repl "
+                       "+ unit tests")
+    endif()
+endif()
+
+if(_xp_engine_arch_matches_host)
 add_executable(atc_repl
     $<TARGET_OBJECTS:xp_atc_engine>
     tools/atc_repl/main.cpp
@@ -358,8 +454,9 @@ endif()
 set_target_properties(atc_repl PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+endif() # _xp_engine_arch_matches_host
 
 # ── Tests ────────────────────────────────────────────────────────────────────
-if(BUILD_TESTS)
+if(BUILD_TESTS AND _xp_engine_arch_matches_host)
     add_subdirectory(tests)
 endif()

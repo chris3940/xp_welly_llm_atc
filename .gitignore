@@ -1,6 +1,8 @@
 build/
 build-lint/
 build-sanitize/
+build-arm64/
+build-x86_64/
 download/
 sdk/
 vendor/
