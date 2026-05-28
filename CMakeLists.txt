@@ -15,7 +15,7 @@ option(BUILD_TESTS "Build Catch2 unit tests" ON)
 #
 # A universal binary is assembled by building twice (once per
 # architecture) and lipo-ing the two .xpl outputs together — see
-# `make build-universal`.
+# `make build`.
 option(XPWELLYS_USE_LOCAL_INFERENCE
     "Compile local whisper.cpp/llama.cpp/Piper backends (Apple Silicon only)"
     ON)
@@ -66,7 +66,7 @@ string(STRIP "${VERSION_STRING}" VERSION_STRING)
 # The OpenAI-only build is libcurl + system frameworks all the way
 # down and is architecture-neutral, so it cleanly produces an x86_64
 # slice for Intel Macs. The two slices are then lipo'd together into
-# one universal .xpl by `make build-universal`.
+# one universal .xpl by `make build`.
 if(APPLE)
     if(XPWELLYS_USE_LOCAL_INFERENCE)
         if(NOT CMAKE_OSX_ARCHITECTURES)

@@ -40,17 +40,17 @@ jobs:
         run: make test
 
       - name: Build (universal)
-        # Two CMake configures, lipo'd into one build/xp_wellys_atc.xpl
-        # that carries an arm64 slice (whisper + llama + Piper + OpenAI)
-        # and an x86_64 slice (OpenAI-only). Tag pushes flip
-        # -DRELEASE=ON so VERSION.txt gets baked into both slices.
-        # libpiper.dylib + libonnxruntime.* are staged into build/
-        # from the arm64 slice so the existing release-bundle step
-        # finds them unchanged.
+        # `make build` always produces a universal .xpl: two CMake configures
+        # lipo'd into one build/xp_wellys_atc.xpl that carries an arm64 slice
+        # (whisper + llama + Piper + OpenAI) and an x86_64 slice (OpenAI-only).
+        # Tag pushes flip -DRELEASE=ON so VERSION.txt gets baked into both
+        # slices. libpiper.dylib + libonnxruntime.* are staged into build/
+        # from the arm64 slice so the existing release-bundle step finds
+        # them unchanged.
         run: |
           RELEASE_FLAG=""
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then RELEASE_FLAG="-DRELEASE=ON"; fi
-          make build-universal RELEASE_FLAG="$RELEASE_FLAG"
+          make build RELEASE_FLAG="$RELEASE_FLAG"
           ccache --show-stats
 
       - name: Stage release bundle

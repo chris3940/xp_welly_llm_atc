@@ -182,20 +182,22 @@ Auditing which mode served a request: grep `Log.txt`.
 ```sh
 git clone --recurse-submodules <repo-url>
 cd xp_welly_llm_atc
-make setup            # X-Plane SDK, Dear ImGui, nlohmann/json, Catch2
-make build            # CMake Release build → build/xp_wellys_atc.xpl (arm64
-                      # with both backends; the dev default)
-make build-universal  # arm64 (local + cloud) + x86_64 (cloud-only),
-                      # lipo'd into one universal build/xp_wellys_atc.xpl
-                      # — what the GitHub Actions release pipeline runs
-make install          # Code-sign + install to X-Plane plugins directory
+make setup     # X-Plane SDK, Dear ImGui, nlohmann/json, Catch2
+make build     # Universal Release build → build/xp_wellys_atc.xpl (arm64
+               # with both backends + x86_64 cloud-only, lipo'd into one
+               # .xpl). This is now the only build target — there is no
+               # arm64-only fast-path anymore.
+make install   # Code-sign + install to X-Plane plugins directory
 ```
 
-`make build` is the fast dev loop — single arm64 slice, both
-backends. `make build-universal` is what you want before shipping:
-runs CMake twice (arm64 with `XPWELLYS_USE_LOCAL_INFERENCE=ON`,
-x86_64 with `XPWELLYS_USE_LOCAL_INFERENCE=OFF`) and `lipo`-merges
-the two `.xpl`s into one. Build time roughly doubles.
+`make build` runs CMake twice (arm64 with `XPWELLYS_USE_LOCAL_INFERENCE=ON`
+in `build-arm64/`, x86_64 with the same flag `OFF` in `build-x86_64/`)
+and `lipo`-merges the two `.xpl`s into one universal binary. Build
+time is roughly double a single-arch build; that is the deliberate
+trade-off so dev and release artifacts are byte-for-byte identical in
+shape. For tag-driven release builds pass `RELEASE_FLAG=-DRELEASE=ON`
+(`make release-build` does this for you — embeds the version from
+`VERSION.txt`).
 
 The build downloads onnxruntime's prebuilt arm64 dylib (≈ 33 MB) into
 `spikes/spike_piper/third_party/piper1-gpl/libpiper/lib/` on first
@@ -330,17 +332,16 @@ any key or joystick button.
 ## Make Targets
 
 ```sh
-make all              # clean + format + build + lint + test (full local CI)
-make build            # arm64 with both backends (dev default)
-make build-universal  # arm64 + x86_64 lipo'd; what the release pipeline runs
-                      # Optional: RELEASE_FLAG=-DRELEASE=ON for tagged builds
-make test             # unit tests + scenario tests
-make install          # code-sign + install to X-Plane
-make repl             # build the headless atc_repl tool
-make format           # clang-format
-make lint             # clang-tidy (some rules promoted to errors)
-make clean            # remove build/, build-arm64/, build-x86_64/, build-lint/, build-sanitize/
-make distclean        # also remove sdk/, vendor/
+make all           # clean + format + build + lint + test (full local CI)
+make build         # universal: arm64 (local+cloud) + x86_64 (cloud-only), lipo'd
+make release-build # same as `make build` but passes -DRELEASE=ON (embeds VERSION.txt)
+make test          # unit tests + scenario tests
+make install       # code-sign + install to X-Plane
+make repl          # build the headless atc_repl tool
+make format        # clang-format
+make lint          # clang-tidy (some rules promoted to errors)
+make clean         # remove build/, build-arm64/, build-x86_64/, build-lint/, build-sanitize/
+make distclean     # also remove sdk/, vendor/
 ```
 
 ## Known Limitations

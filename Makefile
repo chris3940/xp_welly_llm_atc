@@ -17,7 +17,7 @@ SUBMODULES_SENTINEL := spikes/spike_whisper/third_party/whisper.cpp/CMakeLists.t
 
 CATCH2_VERSION := 3.7.1
 
-.PHONY: all help setup build build-universal install clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs repl run-repl test test-unit test-scenarios
+.PHONY: all help setup build install clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs repl run-repl test test-unit test-scenarios
 
 .DEFAULT_GOAL := help
 
@@ -30,8 +30,7 @@ help:
 	@echo "  make                   Show this help (default)"
 	@echo "  make all               clean + format + build + lint"
 	@echo "  make setup             Init submodules + download X-Plane SDK, Dear ImGui, nlohmann/json, Catch2"
-	@echo "  make build             Build plugin (Release) -> build/xp_wellys_atc.xpl"
-	@echo "  make build-universal   Build arm64 (local+cloud) + x86_64 (cloud-only) and lipo into one .xpl"
+	@echo "  make build             Build universal plugin (arm64 local+cloud, x86_64 cloud-only) -> build/xp_wellys_atc.xpl"
 	@echo "  make repl              Build headless CLI -> build/atc_repl"
 	@echo "  make run-repl          Build + run the CLI (stdin transcripts)"
 	@echo "  make test              Run unit tests + scenario tests"
@@ -122,19 +121,11 @@ $(CATCH2_SENTINEL):
 	@echo "Catch2 installed."
 
 # ── Build ─────────────────────────────────────────────────────────────────────
-build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
-	@echo "=== Building xp_wellys_atc ==="
-	cmake -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
-	cmake --build build --parallel
-	@echo ""
-	@file build/xp_wellys_atc.xpl
-	@echo "Done. Run 'make install' to deploy."
-
-# ── Universal Binary build ────────────────────────────────────────────────────
-# Produces a single xp_wellys_atc.xpl that contains both an arm64 slice
-# (whisper.cpp + llama.cpp + Piper + OpenAI) and an x86_64 slice
-# (OpenAI only — no local inference, since the Metal kernels and
-# onnxruntime prebuilt are Apple Silicon only).
+# Always produces a universal xp_wellys_atc.xpl that contains both an
+# arm64 slice (whisper.cpp + llama.cpp + Piper + OpenAI) and an x86_64
+# slice (OpenAI only — Metal + the onnxruntime prebuilt are Apple
+# Silicon only). The two slices share src/ and CMakeLists.txt but
+# differ via -DXPWELLYS_USE_LOCAL_INFERENCE.
 #
 # Strategy: two separate CMake configures (build-arm64/, build-x86_64/),
 # each producing its own .xpl, then lipo-merged into build/xp_wellys_atc.xpl.
@@ -142,16 +133,16 @@ build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
 # .xpl so they're picked up by @loader_path; the x86_64 slice has no
 # such dylibs to ship.
 #
-# `make install` keeps working unchanged — it copies build/xp_wellys_atc.xpl
-# (now universal) into the plugin dir together with the staged dylibs.
-# `RELEASE_FLAG` is passed straight through to both CMake configure
-# calls so the GitHub Actions workflow can flip `-DRELEASE=ON` for
-# tag-driven release builds without duplicating the logic. Empty by
-# default (regular dev build).
+# `make install` copies build/xp_wellys_atc.xpl into the plugin dir
+# together with the staged dylibs.
+# `RELEASE_FLAG` is passed through to both CMake configure calls so the
+# GitHub Actions workflow can flip `-DRELEASE=ON` for tag-driven
+# release builds without duplicating the logic. Empty by default
+# (regular dev build); `release-build` sets it to `-DRELEASE=ON`.
 RELEASE_FLAG ?=
 
-build-universal: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
-	@echo "=== Building universal binary (arm64 with local+cloud, x86_64 with cloud-only) ==="
+build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+	@echo "=== Building universal xp_wellys_atc (arm64 local+cloud, x86_64 cloud-only) ==="
 	@echo ""
 	@echo "--- arm64 slice (local + cloud) ---"
 	cmake -B build-arm64 -DCMAKE_BUILD_TYPE=Release $(RELEASE_FLAG) \
@@ -349,13 +340,9 @@ release:
 	@git push origin "v$(VERSION)"
 	@echo "Released v$(VERSION) and pushed tag to origin."
 
-release-build: $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
-	@echo "=== Building xp_wellys_atc (release) ==="
-	cmake -B build -DCMAKE_BUILD_TYPE=Release -DRELEASE=ON -Wno-dev
-	cmake --build build --parallel
-	@echo ""
-	@file build/xp_wellys_atc.xpl
-	@echo "Done. Release build with version from VERSION.txt."
+release-build:
+	@$(MAKE) build RELEASE_FLAG=-DRELEASE=ON
+	@echo "Done. Universal release build with version from VERSION.txt."
 
 # ── Cleanup Tags ──────────────────────────────────────────────────────────────
 cleanup-tags:
