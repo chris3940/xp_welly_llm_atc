@@ -62,6 +62,11 @@
         "next_state": "IDLE",
         "requires_readback": false
       },
+      "RUNWAY_VACATED_TOWER_ONLY": {
+        "response": "{callsign}, roger, taxi to the ramp via Alpha, good day.",
+        "next_state": "IDLE",
+        "requires_readback": false
+      },
       "_INVALID": {
         "response": "{callsign}, say again.",
         "next_state": "IDLE",
@@ -291,6 +296,11 @@
         "next_state": "IDLE",
         "requires_readback": false
       },
+      "RUNWAY_VACATED_TOWER_ONLY": {
+        "response": "{callsign}, roger, taxi to the ramp via Alpha, good day.",
+        "next_state": "IDLE",
+        "requires_readback": false
+      },
       "REQUEST_TAXI": {
         "response": "{callsign}, contact Ground on {frequency} for taxi.",
         "next_state": "IDLE",
@@ -310,6 +320,11 @@
     "Pattern/LANDING_CLEARED": {
       "RUNWAY_VACATED": {
         "response": "{callsign}, contact Ground on {frequency}, good day.",
+        "next_state": "IDLE",
+        "requires_readback": false
+      },
+      "RUNWAY_VACATED_TOWER_ONLY": {
+        "response": "{callsign}, roger, taxi to the ramp via Alpha, good day.",
         "next_state": "IDLE",
         "requires_readback": false
       },

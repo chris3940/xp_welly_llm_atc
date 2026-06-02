@@ -40,9 +40,9 @@
       "text": "Hotel Bravo Lima Uniform Kilo on final full stop",
       "expect": "cleared to land" },
     { "set": {"on_ground": true, "agl_ft": 0, "altitude_ft": 1800, "groundspeed_kt": 15} },
-    { "note": "LSZB Step 8 — Tower: runway vacated",
+    { "note": "LSZB Step 8 — Tower (tower-only): runway vacated bundles the taxi clearance (no Ground handoff)",
       "text": "Hotel Bravo Lima Uniform Kilo clear of the runway",
-      "expect": "contact ground" },
+      "expect": "taxi to general aviation parking" },
     { "note": "LSZB Step 9 — Tower (tower-only): taxi to parking",
       "text": "Bern Tower Hotel Bravo Lima Uniform Kilo request taxi to general aviation parking",
       "expect": "parking" }

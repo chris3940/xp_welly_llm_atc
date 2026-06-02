@@ -399,7 +399,8 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
   std::string intent_key = intent_parser::intent_template_key(msg.intent);
   std::string state_str = state_name(state_);
 
-  auto tmpl = atc_templates::lookup(true, state_str, intent_key);
+  auto tmpl =
+      atc_templates::lookup(true, state_str, intent_key, ctx.tower_only);
   resp.text = atc_templates::fill(tmpl.response_template, vars);
   resp.next_state = state_from_name(tmpl.next_state);
   resp.requires_readback = tmpl.requires_readback;

@@ -35,9 +35,11 @@ void init();
 void stop();
 void reload();
 
-// Lookup template for state+intent, falls back to _INVALID for that state
+// Lookup template for state+intent, falls back to _INVALID for that state.
+// When tower_only is true, tries `<intent>_TOWER_ONLY` first so airports
+// without a Ground controller can opt into bundled Tower phraseology.
 TemplateEntry lookup(bool is_towered, const std::string &state,
-                     const std::string &intent_key);
+                     const std::string &intent_key, bool tower_only = false);
 
 // Return valid intent keys for a given state (excluding _INVALID)
 std::vector<std::string> valid_intents(bool is_towered,

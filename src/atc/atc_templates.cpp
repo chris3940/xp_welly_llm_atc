@@ -87,7 +87,7 @@ void reload() {
 }
 
 TemplateEntry lookup(bool is_towered, const std::string &state,
-                     const std::string &intent_key) {
+                     const std::string &intent_key, bool tower_only) {
   static const TemplateEntry fallback{"Say again, {callsign}.", "IDLE", false};
 
   if (!loaded_)
@@ -100,10 +100,13 @@ TemplateEntry lookup(bool is_towered, const std::string &state,
 
   auto &state_obj = templates_[type][state];
 
-  // Try exact intent key first, then _INVALID fallback
+  // Prefer tower_only variant when applicable, then exact intent, then _INVALID
+  std::string tower_only_key = intent_key + "_TOWER_ONLY";
   const std::string *key = &intent_key;
   static const std::string invalid_key = "_INVALID";
-  if (!state_obj.contains(intent_key))
+  if (tower_only && state_obj.contains(tower_only_key))
+    key = &tower_only_key;
+  else if (!state_obj.contains(intent_key))
     key = &invalid_key;
 
   if (!state_obj.contains(*key))
