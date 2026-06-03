@@ -67,6 +67,7 @@ Die Settings werden aus `<plugin>/data/settings.json` geladen. Fehlende Schlüss
 | `auto_correction_factor` | float | `1.0` | Multiplikator für ATC-Recovery-Timeout (`0.5`–`2.0`). Niedrig = schnellere Korrektur, hoch = mehr Zeit zum Funken |
 | `debug_logging` | bool | `false` | Ausführliche Debug-Ausgabe in X-Plane Log.txt aktivieren |
 | `debug_traffic` | bool | `false` | Optionalen **Traffic**-Debug-Tab im ATC Commands Panel einblenden |
+| `traffic_features_enabled` | bool | `true` | Master-Schalter für das Traffic-Subsystem (Advisories, Landing-Sequencing, Runway-Occupied-Go-around). Ist der Schalter aus, wird der `TrafficContext` leer gehalten und alle nachgelagerten Konsumenten werden zum No-op — nützlich für Solo-Flüge ohne Traffic-Provider, wenn keinerlei Traffic-getriebene Tower-Calls gewünscht sind. Für tatsächliche Wirkung braucht das Subsystem ohnehin einen Traffic-Provider (LiveTraffic, xPilot, swift, X-IvAp, native X-Plane-KI). |
 
 ### 2.2.1 Regional-Auswahl (EU vs US/Kanada)
 
@@ -383,6 +384,8 @@ In der Platzrunde (nach Inbound-Freigabe oder Downwind-Meldung).
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
 | `READBACK` | *"Cleared via Whiskey, runway 14, wilco report left downwind, N123AB."* | *(still)* |
 
+**Landing-Sequencing (v2.2).** Wenn andere Maschinen auf Final oder in der Platzrunde sind, antwortet ATC auf `REQUEST_LANDING` / `REPORT_POSITION_FINAL` automatisch mit *"N123AB, number 3, follow the C172 on left base, cleared to land runway 26."* — die Position wird durch `compute_landing_sequence()` ermittelt, die Bein-Bezeichnung aus der Geometrie des direkt vorausfliegenden Flugzeugs abgeleitet. Ist die aktive Piste durch ein Bodenziel auf der Centerline blockiert, wird stattdessen *"N123AB, continue approach, traffic on the runway."* ausgegeben; der State wechselt trotzdem nach `Pattern/LANDING_CLEARED`. Benötigt einen Traffic-Provider — siehe `traffic_features_enabled` in Abschnitt 2.2.
+
 #### Zustand: `Pattern/TOUCH_AND_GO_CLEARED`
 
 Nach Touch-and-Go-Freigabe.
@@ -408,6 +411,8 @@ Landefreigabe erteilt — warten auf Aufsetzen und Verlassen der Piste.
 | `REQUEST_TAXI_PARKING` | *"Ground, N123AB, request taxi to parking."* | *"N123AB, Ground, taxi to general aviation parking via Alpha."* |
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
 | `READBACK` | *"Cleared to land runway 26, N123AB."* | *(still)* |
+
+**Unaufgeforderter Go-around (v2.2).** Unabhängig von jedem Pilotenfunkspruch sendet Tower *"N123AB, go around, traffic on the runway, climb runway heading 3000 feet."*, sobald der Pilot weniger als 1 NM von der Schwelle entfernt ist UND ein Bodenziel auf der Centerline der aktiven Piste sitzt. Reines Rendern: Der ATCState bleibt `Pattern/LANDING_CLEARED`, kein Readback erwartet, und ein 60-s-Cooldown verhindert ein erneutes Auslösen am selben Frame, während die Piste freigeräumt wird. Der eigene Funkspruch *"going around"* läuft weiterhin über den regulären `GO_AROUND`-Intent oben und wechselt nach `Pattern/PATTERN_ENTRY`.
 
 **Hinweis — `REQUEST_TAXI_PARKING` ist nur nach der Landung gültig** (Flugphasen `TAXI` oder `LANDING_ROLL`). Ein Taxi-to-Parking Request während du noch am Parkplatz stehst (Flugphase `PARKED`) wird abgewiesen — man kann nicht dahin rollen wo man schon steht.
 
@@ -623,3 +628,7 @@ Verwenden Sie diesen Button, wenn Sie in einer Schleife feststecken (z.B. ATC sa
 ### 7.4 Umliegende Flugplätze
 
 Der aufklappbare Abschnitt "Nearby Airports" listet Flugplätze im Umkreis von 40 NM, sortiert nach Entfernung. Klicken Sie auf einen Flugplatz, um ihn als aktiven Flugplatz zu fixieren und dessen wichtigste Frequenz (ATIS > Tower > UNICOM) als Standby einzustellen. "Unlock" kehrt zur automatischen Erkennung des nächsten Flugplatzes zurück.
+
+### 7.5 Traffic-Features-Schalter
+
+Im Settings-Tab gibt es eine Checkbox **Enable Traffic Features** (Standard: an). Sie ist der Master-Schalter für das gesamte Traffic-Subsystem: En-route-Advisories, Landing-Sequencing und der Runway-Occupied-Go-around-Trigger. Ist der Schalter aus, liest das Plugin keine TCAS-DataRefs mehr und sämtliche Traffic-getriebenen Tower-Calls bleiben stumm. Der Schalter muss nicht zwingend ausgeschaltet werden, wenn ohnehin kein Traffic-Provider aktiv ist — ohne Provider sind die TCAS-Slots leer und es feuert nichts —, ist aber die richtige Wahl, wenn man unabhängig von anderen Plugins definitiv keine Traffic-Chatter haben will.

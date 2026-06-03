@@ -125,7 +125,8 @@ xp_welly_llm_atc/
 │   │   ├── atis_generator.hpp/.cpp     # ATIS broadcast + letter management
 │   │   ├── flight_phase.hpp/.cpp       # Flight phase + precondition guards
 │   │   ├── traffic_advisor.hpp/.cpp    # En-route traffic advisory generator (SDK-free)
-│   │   └── traffic_dialog.hpp/.cpp     # Pilot reply parser ("in sight" / "negative") (SDK-free)
+│   │   ├── traffic_dialog.hpp/.cpp     # Pilot reply parser ("in sight" / "negative") (SDK-free)
+│   │   └── landing_sequence.hpp/.cpp   # Phase-4 sequencing + runway-occupancy primitives (SDK-free)
 │   ├── audio/
 │   │   ├── ptt_input.hpp/.cpp          # Push-to-talk command binding
 │   │   ├── audio_recorder.hpp/.cpp     # Core Audio mic capture → WAV buffer
@@ -181,8 +182,9 @@ visible at the call site.
 
 The `xp_atc_engine` CMake **OBJECT** library compiles all SDK-free TUs
 (engine, intent_parser, state machine, templates, flight phase, ATIS,
-traffic_advisor, traffic_dialog, manager, data loaders, traffic_context
-struct, traffic_geometry, logging, xplane_context struct, model_manifest).
+traffic_advisor, traffic_dialog, landing_sequence, manager, data loaders,
+traffic_context struct, traffic_geometry, traffic_phase_classifier,
+logging, xplane_context struct, model_manifest).
 Both the plugin module and the headless `atc_repl` tool reuse it. The
 plugin module adds the SDK-coupled units (main, atc_session, audio/*,
 xplane_context_runtime, traffic_context_runtime, loader, downloader,
@@ -316,16 +318,35 @@ invisible to this module. Blocks new PTT input while `PROCESSING` or
 **`audio_player`** — Plays PCM directly on the X-Plane radio bus,
 respecting `settings.volume`.
 
-**Traffic subsystem** (v2.1) — provider-agnostic 2 Hz `TrafficContext`
-snapshot from `sim/cockpit2/tcas/targets/...` (works with stock,
-LiveTraffic, xPilot, etc.). `traffic_geometry` computes relative
-bearing / clock-position / slant range. `traffic_advisor` builds
-EU-phraseology advisories ("Traffic, two o'clock, 3 miles, same
-altitude, opposite direction") and dispatches them through the TTS
-strategy interface on a **side channel** that does not block the main
-ATC flow; cooldown + dedup built in. `traffic_dialog` parses the pilot
-reply (`"in sight" / "negative contact" / "looking"`) into a
-`TrafficReply` enum.
+**Traffic subsystem** (v2.1 advisories + v2.2 sequencing) —
+provider-agnostic 2 Hz `TrafficContext` snapshot from
+`sim/cockpit2/tcas/targets/...` (works with stock, LiveTraffic, xPilot,
+etc.). `traffic_geometry` computes relative bearing / clock-position /
+slant range plus the Phase-4 runway-centerline projection
+(`is_on_runway_centerline`). `traffic_advisor` builds EU-phraseology
+advisories ("Traffic, two o'clock, 3 miles, same altitude, opposite
+direction") and dispatches them through the TTS strategy interface on a
+**side channel** that does not block the main ATC flow; cooldown + dedup
+built in. `traffic_dialog` parses the pilot reply (`"in sight" /
+"negative contact" / "looking"`) into a `TrafficReply` enum.
+`traffic_phase_classifier` promotes airborne targets to
+`Pattern` / `Final` when the live `AirportRunwayHints` (active-runway
+threshold + heading) match — feeds Phase-4 sequencing.
+`landing_sequence::compute_landing_sequence()` is a pure function that
+sorts Final-phase targets by distance-to-threshold, derives the user's
+1-based sequence position, and scans for ground-phase occupants on the
+runway centerline. `pattern_flow::apply_landing_sequence()` is the
+Pattern-side overlay that rewrites `Pattern/LANDING_CLEARED` responses
+into `number_to_land_follow` ("number N, follow the X on Y") or
+`continue_approach_traffic_runway` when sequencing applies.
+`engine::poll_go_around()` is the frame-driven unsolicited Tower call
+that fires `go_around_traffic_runway` when the user is within 1 NM of
+an occupied runway (render-only, no state change, 60 s cooldown).
+**Master switch** `settings::traffic_features_enabled` (default `true`)
+gates the entire subsystem at one point: `traffic_context::update()`
+returns early with an empty snapshot when off, so every downstream
+consumer (advisor / sequencing overlay / poll_go_around) becomes a
+no-op against the empty `TrafficContext`.
 
 **`atc_ui`** — Dear ImGui window. Status panel, Frequencies panel,
 Phraseology Hints, Transcript history, **Settings tab** (Backend Mode
@@ -477,6 +498,7 @@ status; the X-Plane main thread is never blocked.
   "flow_region": "EU",
   "debug_logging": false,
   "debug_traffic": false,
+  "traffic_features_enabled": true,         // master switch — advisor / sequencing / go-around
 
   "backend_mode": "local",                  // "local" | "openai"
   "api_key_saved": false,                   // flag only — key lives in Keychain

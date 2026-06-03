@@ -66,6 +66,7 @@ Settings are loaded from `<plugin>/data/settings.json`. Missing keys are merged 
 | `auto_correction_factor` | float | `1.0` | Multiplier for ATC recovery timeout (`0.5`–`2.0`). Lower = faster correction, higher = more time to make the call |
 | `debug_logging` | bool | `false` | Enable verbose debug output to X-Plane Log.txt |
 | `debug_traffic` | bool | `false` | Enable the optional **Traffic** debug tab in the ATC Commands panel |
+| `traffic_features_enabled` | bool | `true` | Master switch for the traffic subsystem (advisories, landing sequencing, runway-occupied go-around). When off, the live `TrafficContext` is dropped to empty and every downstream consumer becomes a no-op — useful if you fly solo without a traffic provider and don't want any traffic-driven Tower chatter. Requires a traffic provider (LiveTraffic, xPilot, swift, X-IvAp, native X-Plane AI) to produce anything anyway. |
 
 ### 2.2.1 Region Selection (EU vs US/Canada)
 
@@ -379,6 +380,8 @@ In the traffic pattern (after inbound clearance or downwind report).
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
 | `READBACK` | *"Cleared via Whiskey, runway 14, wilco report left downwind, N123AB."* | *(silent)* |
 
+**Landing sequencing (v2.2).** If other aircraft are on Final or in the pattern when you request landing, the response automatically becomes *"N123AB, number 3, follow the C172 on left base, cleared to land runway 26."* — the controller derives your position from `compute_landing_sequence()` and the leg of the aircraft directly ahead. If the active runway is blocked by a ground-phase target sitting on the centerline, the overlay swaps to *"N123AB, continue approach, traffic on the runway."* and the state still moves to `Pattern/LANDING_CLEARED`. Requires a traffic provider — see `traffic_features_enabled` in Section 2.2.
+
 #### State: `Pattern/TOUCH_AND_GO_CLEARED`
 
 After touch-and-go clearance.
@@ -404,6 +407,8 @@ Cleared to land — waiting for touchdown and runway exit.
 | `REQUEST_TAXI_PARKING` | *"Ground, N123AB, request taxi to parking."* | *"N123AB, Ground, taxi to general aviation parking via Alpha."* |
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
 | `READBACK` | *"Cleared to land runway 26, N123AB."* | *(silent)* |
+
+**Unsolicited go-around (v2.2).** Independent of any pilot transmission, Tower will issue *"N123AB, go around, traffic on the runway, climb runway heading 3000 feet."* when you are within 1 NM of the threshold AND a ground-phase target is detected on the active runway centerline. Render-only: ATCState stays `Pattern/LANDING_CLEARED`, no readback expected, and a 60 s cooldown prevents the call from re-firing on the same frame while the runway clears. Your own *"going around"* still routes through the regular `GO_AROUND` intent above and moves to `Pattern/PATTERN_ENTRY`.
 
 **Note — `REQUEST_TAXI_PARKING` is only valid after landing** (flight phases `TAXI` or `LANDING_ROLL`). Trying to request taxi to parking while still at the parking position (flight phase `PARKED`) is rejected — you can't taxi somewhere you already are.
 
@@ -619,3 +624,7 @@ Use this when you are stuck in a loop (e.g. ATC keeps saying "say again") or whe
 ### 7.4 Nearby Airports
 
 The collapsible "Nearby Airports" section lists airports within 40 NM, sorted by distance. Click an airport to lock it as the active airport and tune its most useful frequency (ATIS > Tower > UNICOM) to standby. Click "Unlock" to return to automatic nearest-airport detection.
+
+### 7.5 Traffic Features Toggle
+
+The Settings tab carries an **Enable Traffic Features** checkbox (default on). It is the master switch for the traffic subsystem: en-route advisories, landing sequencing, and the runway-occupied go-around trigger. When off, the plugin stops reading TCAS dataRefs and every traffic-driven Tower call goes silent. The toggle does not need to be turned off if you simply have no traffic provider running — without a provider the TCAS slots stay empty and nothing fires anyway — but it is the right switch if you want to guarantee zero traffic-driven chatter regardless of what other plugins do.

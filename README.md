@@ -63,12 +63,18 @@ via the OpenAI TTS API.
 - **ATC State Machine** — VFR phraseology for towered and non-towered airports
 - **Flight Phase Detection** — context-aware guards prevent unrealistic ATC
   interactions based on aircraft state (parked, taxi, airborne, etc.)
-- **Live Traffic Awareness (v2.1)** — provider-agnostic
-  `sim/cockpit2/tcas/targets/...` reader feeding a 2 Hz `TrafficContext`
-  snapshot. EU-phraseology en-route advisories with voice
-  acknowledgement (`"Traffic in sight"` / `"Negative contact"` /
-  `"Looking"`) on a side-channel that does not interfere with the main
-  ATC flow.
+- **Live Traffic Awareness (v2.1) + Landing Sequencing (v2.2)** —
+  provider-agnostic `sim/cockpit2/tcas/targets/...` reader feeding a
+  2 Hz `TrafficContext` snapshot. EU-phraseology en-route advisories
+  with voice acknowledgement (`"Traffic in sight"` / `"Negative
+  contact"` / `"Looking"`) on a side-channel that does not interfere
+  with the main ATC flow. **v2.2 adds VFR landing sequencing** —
+  *"number N, follow the [type] on left base, cleared to land runway X"*
+  when other traffic is on Final or Pattern, *"continue approach,
+  traffic on the runway"* when the active runway is blocked, and an
+  unsolicited Tower-issued go-around within 1 NM of the threshold when
+  the runway stays occupied. Master switch `traffic_features_enabled`
+  in Settings turns the whole subsystem off in one click.
 - **ATIS Generation** — automatic ATIS broadcasts from live sim weather
   data, on COM1 *or* COM2 (active or standby). Aborts mid-broadcast if
   the pilot retunes the COM that's playing.
@@ -260,6 +266,7 @@ this file.
 | `flow_region` | `EU` | `EU` (ICAO/QNH/hPa) or `US` (FAA-TC/altimeter/inHg) phraseology |
 | `debug_logging` | `false` | Enable verbose debug output |
 | `debug_traffic` | `false` | Show the Traffic tab in the ATC panel (lists the 10 nearest aircraft from the TCAS DataRefs) |
+| `traffic_features_enabled` | `true` | Master switch for the traffic subsystem (advisories, landing sequencing, go-around trigger). Off → `traffic_context::update()` returns an empty snapshot and every downstream consumer becomes a no-op. Requires a traffic provider (LiveTraffic, xPilot, swift, X-IvAp, native AI) to do anything anyway. |
 | `backend_mode` | `local` | `local` (whisper + llama + Piper, arm64 only) or `openai` (Whisper API + Chat Completions + TTS API). The x86_64 slice silently rewrites this to `openai` at startup since Local is not available there. |
 | `api_key_saved` | `false` | Flag only — set automatically when the user clicks **Save Key** in Settings. The actual key sits in the macOS Keychain under service `com.xp_wellys_atc.openai` / account `default`. Cleared by **Delete Key**. |
 | `openai_stt_model` | `whisper-1` | OpenAI Whisper model ID for the STT call. |
@@ -352,7 +359,7 @@ make distclean     # also remove sdk/, vendor/
 | **English only** | non-English ATC not supported | Medium — would need different whisper / Llama / Piper voice |
 | **Single-voice TTS** | All ATC speakers (Tower, Ground, ATIS) use the same Piper voice; ATIS speaks slower via `length_scale=1.18` | Low — could ship more voices and add a per-frequency selector |
 | **"via Alpha" hardcoded** — taxiway name is always Alpha | Unrealistic at airports with different taxiway layouts | High — would need taxiway data from apt.dat or WED |
-| **No traffic *sequencing*** — always "number one" — *traffic awareness* (advisories) shipped in v2.1; sequencing pending Phases 4 + 5 | Unrealistic at busy airports | Medium — Phases 4 + 5 on roadmap |
+| **No wake-turbulence spacing** — sequencing in v2.2 picks number-by-distance only, no Light/Medium/Heavy separation | Acceptable for GA pattern work; missing for mixed-weight ops | Phase 5 on roadmap |
 | **No callsign validation** | ATC accepts any callsign | Low priority for single-player |
 | **Big-hub airports (LSZH, LSGG, …) not officially supported** — pilot can fly inbound/outbound, but Delivery (slot/VFR-clearance) workflow, RWY-specific Tower routing, and AIP VFR reporting points are not modelled | Generic hints at large hubs do not match real-world procedures (slot enforcement, multiple Tower frequencies, mandatory VFR points) | High — needs per-airport AIP research + new Delivery intent + slot setting + multi-Tower disambiguation |
 
@@ -399,9 +406,10 @@ warm pipeline latency in local mode, ICAO-correct EU phraseology with
 realistic Tower reactions to pilot errors. An OpenAI Cloud mode is
 available as a paid opt-in (BYO key) for users who prefer cloud LLMs
 or run an Intel Mac.
-Limitations today: VFR-only, no IFR, no routing, no traffic *sequencing*
-(only traffic *awareness*), no transponder data link, no co-pilot. It is
-not yet an all-in-one replacement for those products.
+Limitations today: VFR-only, no IFR, no routing, no wake-turbulence
+spacing (sequencing in v2.2 is distance-only — Phase 5 on roadmap), no
+transponder data link, no co-pilot. It is not yet an all-in-one
+replacement for those products.
 
 **Is there an introduction video?**
 Not yet.

@@ -143,6 +143,16 @@ In the circuit after inbound clearance.
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
 | `READBACK` | *"Cleared via Whiskey, runway 14, wilco report left downwind, N123AB."* | *(silent)* |
 
+> **Note — landing sequencing (v2.2).** With Final-traffic ahead, the
+> response to `REQUEST_LANDING` / `REPORT_POSITION_FINAL` becomes
+> *"N123AB, number 3, follow the C172 on left base, cleared to land
+> runway 26."* instead — `pattern_flow::apply_landing_sequence()`
+> overlays the regular template once `compute_landing_sequence()`
+> reports a non-1 position. When the active runway is occupied by a
+> ground-phase target on the centerline, the overlay swaps to
+> *"N123AB, continue approach, traffic on the runway."* and the
+> clearance stays in `Pattern/LANDING_CLEARED`.
+
 ### State: `Pattern/TOUCH_AND_GO_CLEARED`
 
 After touch-and-go clearance — pilot can continue in the pattern or vacate.
@@ -168,6 +178,17 @@ Cleared to land — no more clearances until runway vacated or go-around.
 | `REQUEST_TAXI_PARKING` | *"Tower, N123AB, runway vacated, request taxi to parking."* | *"N123AB, runway vacated, taxi to general aviation parking via Alpha, good day."* (tower-only airports — Tower handles taxi after landing) |
 | `GO_AROUND` | *"N123AB, going around."* | *"N123AB, roger, fly runway heading, climb and maintain pattern altitude, re-enter left downwind runway 26."* |
 | `READBACK` | *"Cleared to land runway 26, N123AB."* | *(silent)* |
+
+> **Note — unsolicited go-around (v2.2).** When the pilot is within
+> 1 NM of the threshold AND a ground-phase target sits on the active
+> runway centerline, `engine::poll_go_around()` renders the Tower call
+> *"N123AB, go around, traffic on the runway, climb runway heading
+> 3000 feet."* directly via TTS. Render-only: ATCState stays
+> `Pattern/LANDING_CLEARED`, no readback is expected, and a 60 s
+> cooldown prevents re-firing the same call while the runway clears.
+> The pilot's own *"N123AB, going around."* still routes through the
+> regular `GO_AROUND` intent and moves to `Pattern/PATTERN_ENTRY` via
+> the existing template.
 
 ### State: `XC/EN_ROUTE`
 
@@ -257,3 +278,6 @@ All responses are filled at runtime from X-Plane context:
 | `{pattern_direction}` | Runway pattern side (left/right) |
 | `{entry_vrp}` | Detected VRP from `airport_vrps.json` |
 | `{frequency}` | Ground/handoff frequency from `apt.dat` |
+| `{seq_number}` | Phase-4 landing-sequence position (e.g. *"2"*); set by `pattern_flow::apply_landing_sequence` |
+| `{seq_type}` | ICAO type of the aircraft directly ahead (e.g. *"C172"*, falls back to *"traffic"*) |
+| `{seq_position}` | Leg label of the aircraft directly ahead (e.g. *"left base"*, *"final"*) |
