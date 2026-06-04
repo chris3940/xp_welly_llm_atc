@@ -193,8 +193,8 @@ void cmd_set(std::string &callsign, const std::string &rest) {
       std::string up = value;
       std::transform(up.begin(), up.end(), up.begin(),
                      [](unsigned char c) { return std::toupper(c); });
-      if (up != "EU" && up != "US")
-        throw std::runtime_error("region must be EU or US");
+      if (up != "EU" && up != "US" && up != "DE")
+        throw std::runtime_error("region must be EU, US or DE");
       settings::set_flow_region(up);
       atc_templates::reload();
       flight_phase::reload();
@@ -253,7 +253,7 @@ void cmd_help() {
       "  quit                  Exit (or Ctrl+D)\n"
       "\n"
       "Set fields:\n"
-      "  region EU|US             Switch phraseology region (reloads templates)\n"
+      "  region EU|US|DE          Switch phraseology region (reloads templates)\n"
       "  airport <ICAO>           e.g. LSZH\n"
       "  airport_name <text>\n"
       "  towered true|false\n"

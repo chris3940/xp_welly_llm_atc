@@ -47,7 +47,7 @@ void set_flow_region(const std::string &v) {
   std::string up;
   for (char c : v)
     up += (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
-  if (up != "EU" && up != "US") return;
+  if (up != "EU" && up != "US" && up != "DE") return;
   g_flow_region = up;
 }
 
@@ -58,7 +58,7 @@ std::string region_data_dir() {
   std::string lower;
   for (char c : r)
     lower += (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-  if (lower != "eu" && lower != "us")
+  if (lower != "eu" && lower != "us" && lower != "de")
     lower = "eu";
   return get_data_dir() + "/regions/" + lower;
 }

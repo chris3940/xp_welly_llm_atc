@@ -83,7 +83,7 @@ static bool buffers_initialized = false;
 static const char *pattern_dir_names[] = {"left", "right"};
 static int pattern_dir_selection = 0; // default: left
 
-static const char *flow_region_names[] = {"EU", "US"};
+static const char *flow_region_names[] = {"EU", "US", "DE"};
 static int flow_region_selection = 0; // default: EU
 static float region_feedback_timer = 0.0f;
 static char region_feedback_msg[128] = {0};
@@ -978,7 +978,14 @@ static void draw_settings_tab() {
     std::string pdir = settings::pattern_direction();
     pattern_dir_selection = (pdir == "right") ? 1 : 0;
     std::string region = settings::flow_region();
-    flow_region_selection = (region == "US") ? 1 : 0;
+    flow_region_selection = 0; // default EU
+    for (size_t i = 0;
+         i < sizeof(flow_region_names) / sizeof(flow_region_names[0]); ++i) {
+      if (region == flow_region_names[i]) {
+        flow_region_selection = static_cast<int>(i);
+        break;
+      }
+    }
     std::string sm = settings::start_mode();
     start_mode_selection = 1; // engines_running default
     for (size_t i = 0; i < sizeof(start_mode_keys) / sizeof(start_mode_keys[0]);
@@ -1186,7 +1193,8 @@ static void draw_settings_tab() {
 
   // ATC flow region — EU (ICAO) vs US/Canada (FAA/NAV CANADA).
   // Changing this reloads region-scoped config files at runtime.
-  if (ImGui::Combo("Region", &flow_region_selection, flow_region_names, 2)) {
+  if (ImGui::Combo("Region", &flow_region_selection, flow_region_names,
+                   IM_ARRAYSIZE(flow_region_names))) {
     settings::set_flow_region(flow_region_names[flow_region_selection]);
     settings::save();
     atc_templates::reload();

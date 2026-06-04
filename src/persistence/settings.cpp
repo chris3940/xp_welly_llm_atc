@@ -165,7 +165,7 @@ std::string region_data_dir() {
   lower.reserve(region.size());
   for (char c : region)
     lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  if (lower != "eu" && lower != "us")
+  if (lower != "eu" && lower != "us" && lower != "de")
     lower = "eu";
   return data_dir_path + "/regions/" + lower;
 }
@@ -210,7 +210,9 @@ std::string flow_region() {
     v = "EU";
   else if (v == "us")
     v = "US";
-  if (v != "EU" && v != "US")
+  else if (v == "de")
+    v = "DE";
+  if (v != "EU" && v != "US" && v != "DE")
     v = "EU";
   return v;
 }
@@ -329,6 +331,8 @@ void set_auto_correction_factor(float v) {
 void set_flow_region(const std::string &v) {
   if (v == "US" || v == "us")
     cfg["flow_region"] = "US";
+  else if (v == "DE" || v == "de")
+    cfg["flow_region"] = "DE";
   else
     cfg["flow_region"] = "EU";
 }

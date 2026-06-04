@@ -63,6 +63,7 @@ static int visibility_category(float vis_m) {
 }
 
 static std::string format_visibility(float vis_m) {
+  // Non-US regions (EU, DE, ...) share metric/ICAO visibility output.
   if (settings::flow_region() == "US") {
     // Statute miles, FAA AIM. 1 SM = 1609.344 m. Cap at "10 or more" like ATIS.
     float sm = vis_m / 1609.344f;
@@ -229,6 +230,7 @@ std::string generate_atis_text(const xplane_context::XPlaneContext &ctx) {
   text += "Temperature " + std::to_string(static_cast<int>(ctx.temperature_c)) +
           ", dewpoint " + std::to_string(static_cast<int>(ctx.dewpoint_c)) +
           ". ";
+  // Non-US regions (EU, DE, ...) use QNH in hPa per ICAO Doc 4444.
   if (settings::flow_region() == "US")
     text += "Altimeter " + format_altimeter(ctx.qnh_inhg) + ". ";
   else
