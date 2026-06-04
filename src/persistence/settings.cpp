@@ -170,6 +170,16 @@ std::string region_data_dir() {
   return data_dir_path + "/regions/" + lower;
 }
 
+std::string user_prefs_dir() {
+  // XPLMGetSystemPath returns the X-Plane root with a trailing slash.
+  // Sits under Output/preferences/ so it survives plugin re-installs.
+  char xp_root[2048] = {};
+  XPLMGetSystemPath(xp_root);
+  std::string path = std::string(xp_root) + "Output/preferences/xp_wellys_atc";
+  mkdir(path.c_str(), 0755);
+  return path;
+}
+
 void save() {
   std::string json_path = data_dir_path + "/settings.json";
   std::ofstream out(json_path);

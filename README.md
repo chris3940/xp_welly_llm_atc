@@ -318,19 +318,57 @@ and auto-correction rules are in `data/regions/{eu,us}/flight_rules.json`.
 Switching the Region setting hot-reloads both files. All data files can be
 edited without rebuilding the plugin.
 
-### Airport Database (`data/airport_vrps.json`)
+### Airport Database (`data/regions/{eu,us,de}/airport_vrps.json`)
 
 Per-airport configuration for Visual Reporting Points (VRPs) and traffic
-pattern directions. Pre-populated for common Swiss and German VFR airports.
-Each top-level key is an ICAO code with optional fields:
+pattern directions, scoped per region. Pre-populated for common Swiss
+and German VFR airports. Each top-level key is an ICAO code with optional
+fields:
 
 - `name` — display name
 - `pattern_direction` — per-runway `"left"` / `"right"` (overrides the
-  global `pattern_direction` setting)
+  global `pattern_direction` setting); accepts a string for an unconditional
+  default or an object keyed by runway designator with optional `_default`
 - `vrps` — array of `{ name, lat, lon, alt_ft }`; `name` is the phonetic
   spelling (e.g. `"November"`) so Whisper and Piper handle it cleanly
 - `arrival_routes` — per-runway ordered list of VRP names used for
   inbound routing
+- `_source` / `_comment` — optional audit annotations; ignored by the loader
+
+#### Optional user override (Navigraph Charts workflow)
+
+The bundled DE-region data only covers a handful of airports with verified
+VRPs; the others ship with `pattern_direction` only (`vrps: []`) until they
+are checked against an authoritative source. If you have a **Navigraph
+Charts** subscription you can supply your own VRP coordinates without
+forking the plugin:
+
+1. Drop a JSON file under
+   `<X-Plane>/Output/preferences/xp_wellys_atc/airport_vrps_<region>.json`
+   (`<region>` is lowercase, e.g. `airport_vrps_de.json`). The directory
+   is created on first plugin start. This path survives plugin re-installs.
+2. Use the same schema as the bundled file. Per-ICAO entries fully replace
+   the plugin defaults — there is no field-level merge, so include the
+   complete entry for every airport you want to override.
+3. Restart X-Plane (or `Reload Settings` from the menu) — a log banner in
+   `Log.txt` confirms the load:
+   `Airport VRPs loaded: N airports (X plugin, Y user overrides: Z replaced, W added) from <path>`
+
+Navigraph Charts workflow per airport:
+- Open the **VFR Approach Chart** (German charts: AD 2 EDxx, section
+  *Visual Approach* or *VFR-Anflug*).
+- Read the VRP code (W/N/E/S/Z…), translate to the phonetic name
+  (`W` → `Whiskey`, `N` → `November`, …) — this is what Whisper
+  transcribes and what Piper pronounces.
+- Hover the chart for cursor lat/lon (Navigraph Charts displays the
+  pointer coordinates in the toolbar).
+- Read the published transit altitude from the chart legend.
+- Note the pattern direction per runway from the AIP AD 2.22 (Flight
+  Procedures) section.
+
+The Navigraph **FMS Data** add-on for X-Plane Custom Data does *not*
+contain VRPs (ARINC-424 is IFR-only). You need the Navigraph **Charts**
+product to read the VFR data.
 
 ### ATC Response Templates (`data/regions/{eu,us}/atc_templates.json`)
 

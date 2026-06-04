@@ -35,6 +35,12 @@ std::string get_data_dir();
 // Region-scoped data directory (e.g. <data>/regions/eu or <data>/regions/us)
 std::string region_data_dir();
 
+// User preferences directory — under <X-Plane>/Output/preferences/xp_wellys_atc/.
+// Survives plugin re-installs. Used for optional per-user data overrides
+// (e.g. airport_vrps_<region>.json sourced from Navigraph Charts).
+// Created on first call if absent.
+std::string user_prefs_dir();
+
 // Getters
 std::string pilot_callsign();
 int active_com();
