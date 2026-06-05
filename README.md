@@ -429,6 +429,17 @@ make distclean     # also remove sdk/, vendor/
 
 ## Known Limitations
 
+### DE-Profil & BZF-Phraseologie
+
+Das DE-Profil orientiert sich an der NfL Sprechfunk 2024 (DACH-VFR-Phraseologie).
+Keine offizielle Zertifizierung, kein Prüfungsersatz — Korrekturen von BZF-Inhabern
+ausdrücklich willkommen.
+
+→ Die [BZF-Coverage-Matrix](docs/bzf/bzf_coverage.md) listet 60 Pflichtelemente in 16
+Sektionen mit `file:line`-Mapping in den Code. **BZF-II-Inhaber gesucht**: pro
+Matrix-Zeile ein GitHub-Issue (z. B. „Row 1.2: …") mit NfL-§-Verweis und ggf.
+Wortlaut-Vorschlag genügt als Beitrag — kein Code-Wissen nötig.
+
 | Limitation | Impact | Effort |
 |---|---|---|
 | **Local inference is Apple Silicon only** | Intel Macs can run the plugin via the x86_64 slice but only in OpenAI Cloud mode (requires API key + billing) | Resolved by the universal binary; lifting the Intel restriction for Local mode would need Metal alternatives + an x86_64 onnxruntime build |

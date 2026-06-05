@@ -18,6 +18,7 @@
 
 #include "atc/atc_state_machine.hpp"
 #include "atc/atc_templates.hpp"
+#include "atc/bzf_compliance.hpp"
 #include "atc/flight_phase.hpp"
 #include "atc/flows/crosscountry_flow.hpp"
 #include "atc/flows/ground_operations.hpp"
@@ -39,6 +40,13 @@ namespace atc_state_machine {
 static ATCState state_ = ATCState::IDLE;
 static bool readback_pending_ = false;
 static std::string assigned_runway_; // locked once ATC assigns a runway
+
+// Most recent tower clearance text that demanded a readback. Set by
+// apply_post_transition_hooks() whenever resp.requires_readback is
+// true, cleared on init/stop/reset/airport-change and whenever the
+// readback expectation resolves. Consumed by the BZF-strict
+// conformance check on the next READBACK intent.
+static std::string last_clearance_text_;
 static internal::DepartureType departure_type_ =
     internal::DepartureType::PATTERN;
 // The "last airport observed" tracker that drives the airport-change
@@ -191,6 +199,7 @@ void init() {
   departure_type_ = internal::DepartureType::PATTERN;
   history_.clear();
   last_now_secs_ = 0.0;
+  last_clearance_text_.clear();
 
   // Honor the user's "where am I starting" setting. The default
   // engines_running keeps the IDLE start above; ready_for_takeoff
@@ -211,6 +220,7 @@ void stop() {
   departure_type_ = internal::DepartureType::PATTERN;
   history_.clear();
   last_now_secs_ = 0.0;
+  last_clearance_text_.clear();
 }
 
 void reset() {
@@ -221,6 +231,7 @@ void reset() {
   crosscountry_flow::reset();
   history_.clear();
   last_now_secs_ = 0.0;
+  last_clearance_text_.clear();
   logging::info("ATC state machine reset to IDLE");
 }
 
@@ -238,6 +249,7 @@ void disregard(const xplane_context::XPlaneContext &ctx,
   // also drop the pending traffic ack.
   traffic_dialog::reset();
   readback_pending_ = false;
+  last_clearance_text_.clear();
 
   if (!flight_phase::is_airborne(phase)) {
     internal::transition_to(ATCState::IDLE, "disregard_on_ground");
@@ -286,6 +298,45 @@ std::string effective_runway(const xplane_context::XPlaneContext &ctx) {
 
 // ── Post-template hooks ─────────────────────────────────────────────
 
+// BZF-Strict-Mode pilot-utterance conformance check. Active only when
+// atc_profile() == "DE" AND settings::bzf_strict_mode() == true.
+// Returns true if the pilot's readback was non-conformant — in that
+// case `resp` is overwritten with a corrective tower response and the
+// caller must skip apply_post_transition_hooks() (state must not
+// advance, last_clearance_text_ stays armed for the retry).
+static bool apply_bzf_strict_check(const intent_parser::PilotMessage &msg,
+                                   ATCResponse &resp) {
+  if (settings::atc_profile() != "DE")
+    return false;
+  if (!settings::bzf_strict_mode())
+    return false;
+  if (msg.intent != intent_parser::PilotIntent::READBACK)
+    return false;
+  if (last_clearance_text_.empty())
+    return false;
+
+  const auto required = bzf_compliance::extract_required(last_clearance_text_);
+  const auto missing = bzf_compliance::check_pilot_readback(
+      msg.raw_transcript, required, settings::pilot_callsign());
+  if (missing.empty())
+    return false;
+
+  std::string callsign =
+      !msg.callsign.empty() ? msg.callsign : settings::pilot_callsign();
+  resp.text = bzf_compliance::build_correction_response(callsign, missing);
+  resp.next_state = state_;
+  resp.requires_readback = true;
+
+  std::string element_list;
+  for (auto e : missing) {
+    if (!element_list.empty())
+      element_list += ",";
+    element_list += bzf_compliance::element_name(e);
+  }
+  logging::info("BZF strict: readback missing %s", element_list.c_str());
+  return true;
+}
+
 // Apply the post-template hooks that mutate persistent state — runway lock,
 // readback tracking, departure-type, tower-only auto-advance. Step 4 will
 // split these between the per-flow modules; for now they live alongside
@@ -295,18 +346,25 @@ apply_post_transition_hooks(const intent_parser::PilotMessage &msg,
                             const xplane_context::XPlaneContext &ctx,
                             ATCResponse &resp) {
   // Track readback state.
-  if (msg.intent == intent_parser::PilotIntent::READBACK)
+  if (msg.intent == intent_parser::PilotIntent::READBACK) {
     readback_pending_ = false;
-  else if (resp.requires_readback)
+    last_clearance_text_.clear();
+  } else if (resp.requires_readback) {
     readback_pending_ = true;
+    // Snapshot the clearance text so the next READBACK intent can be
+    // checked against it by the BZF-strict conformance pass.
+    last_clearance_text_ = resp.text;
+  }
 
   // Leaving the controller's frequency or resetting drops stale readback
   // context. Without this, "frequency change good day" after an unread-back
   // takeoff clearance keeps readback_pending armed, and the UI hint pipeline
   // silences every other hint at the next airport.
   if (resp.next_state == ATCState::EN_ROUTE ||
-      resp.next_state == ATCState::IDLE)
+      resp.next_state == ATCState::IDLE) {
     readback_pending_ = false;
+    last_clearance_text_.clear();
+  }
 
   // Lock runway on first clearance that references a runway. Same fallback
   // chain as ground_ops::get_runway() (msg → assigned → active → "28"),
@@ -418,6 +476,20 @@ ATCResponse process(const intent_parser::PilotMessage &msg,
   else if (crosscountry_flow::is_xc_state(resp.next_state))
     crosscountry_flow::apply_landing_sequence(msg, ctx, traffic_now, vars,
                                               resp);
+
+  // BZF-Strict-Mode conformance check on READBACK intents. Active only
+  // when atc_profile() == "DE" AND settings::bzf_strict_mode() == true.
+  // When a readback is missing safety-relevant elements (NfL §25 b)
+  // Nr. 1), the tower issues a corrective response and the state does
+  // NOT advance — the pilot has to read back correctly.
+  if (apply_bzf_strict_check(msg, resp)) {
+    // Hold readback expectation; don't run apply_post_transition_hooks
+    // because the standard path would clear readback_pending_ on a
+    // READBACK intent. Leave last_clearance_text_ in place so the
+    // pilot can re-attempt against the same clearance.
+    readback_pending_ = true;
+    return resp;
+  }
 
   apply_post_transition_hooks(msg, ctx, resp);
   return resp;

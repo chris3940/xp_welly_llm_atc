@@ -197,7 +197,7 @@
     {
       "intent": "REQUEST_TOUCH_AND_GO",
       "confidence": 0.90,
-      "any": ["touch and go", "durchstartlandung", "durchstart und landung"],
+      "any": ["touch and go", "durchstartlandung", "durchstart und landung", "aufsetzen und durchstarten"],
       "none": ["taxi", "rollen"]
     },
 
@@ -286,6 +286,7 @@
       "none": [
         "touch and go",
         "durchstartlandung",
+        "aufsetzen und durchstarten",
         { "has_facility": "tower" },
         { "has_facility": "turm" },
         { "has_facility": "approach" },

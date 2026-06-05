@@ -1357,6 +1357,20 @@ static void draw_settings_tab() {
     ImGui::SetTooltip("%s", ui_strings::tr("tooltip.enable_traffic"));
   }
 
+  // BZF-Strict-Mode toggle — DE profile only. The corrective tower
+  // behaviour is anchored in NfL Sprechfunk 2024 §25 b) Nr. 1 and
+  // would not match EU/US readback conventions, so the toggle is
+  // hidden outside the DE profile.
+  if (settings::atc_profile() == "DE") {
+    bool strict = settings::bzf_strict_mode();
+    if (ImGui::Checkbox(ui_strings::tr("settings.bzf_strict_mode"), &strict)) {
+      settings::set_bzf_strict_mode(strict);
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("%s", ui_strings::tr("tooltip.bzf_strict_mode"));
+    }
+  }
+
   // ── Voices per ATC role ─────────────────────────────────────────
   // Each role gets a dropdown listing every voice that is currently
   // Ready (loaded into Piper). The defaults are seeded by
