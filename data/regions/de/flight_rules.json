@@ -1,5 +1,5 @@
 {
-  "_comment": "Flight phase detection rules and ATC state machine guards. phase_thresholds define sensor values for FlightPhase transitions. hysteresis prevents phase jitter with time delays. intent_preconditions block invalid pilot intents based on current flight phase (e.g., taxi request while airborne) with configurable rejection messages. auto_corrections fix state/phase mismatches after a delay (e.g., airborne after departure clearance → auto-transition to PATTERN_ENTRY). intent_frequency restricts which intents are valid on which frequency type (GROUND, TOWER, UNICOM). pilot_phraseology provides example phrases per intent for UI display.",
+  "_comment": "Flight phase detection rules and ATC state machine guards. phase_thresholds define sensor values for FlightPhase transitions. hysteresis prevents phase jitter with time delays. intent_preconditions block invalid pilot intents based on current flight phase (e.g., taxi request while airborne) with configurable rejection messages. auto_corrections fix state/phase mismatches after a delay (e.g., airborne after departure clearance -> auto-transition to PATTERN_ENTRY). intent_frequency restricts which intents are valid on which frequency type (GROUND, TOWER, UNICOM). pilot_phraseology provides example phrases per intent for UI display.",
   "phase_thresholds": {
     "taxi_min_gs_kt": 5.0,
     "roll_min_gs_kt": 40.0,
@@ -255,27 +255,27 @@
     }
   },
   "pilot_phraseology": {
-    "INITIAL_CALL_GROUND": "{airport} {taxi_controller}, {callsign}, at the parking, request taxi, information {atis_letter}",
-    "INITIAL_CALL_TOWER": "{airport} Tower, {callsign}, holding short runway {runway}, ready for departure",
-    "INITIAL_CALL_INBOUND": "{airport} Tower, {callsign}, inbound for landing, request joining instructions",
-    "INITIAL_CALL_INBOUND_VRP": "{airport} Tower, {callsign}, over {entry_vrp}, inbound for landing, information {atis_letter}",
-    "INITIAL_CALL_APPROACH": "{airport} Approach, {callsign}, (altitude) feet, inbound for landing",
-    "REQUEST_TAXI": "{airport} {taxi_controller}, {callsign}, request taxi to runway {runway}",
-    "REQUEST_TAXI_PARKING": "{airport} {taxi_controller}, {callsign}, request taxi to parking",
-    "READY_FOR_DEPARTURE": "{airport} Tower, {callsign}, runway {runway}, ready for departure",
-    "READY_FOR_DEPARTURE_VFR": "{airport} Tower, {callsign}, runway {runway}, ready for departure, on course",
-    "REPORT_POSITION": "{airport} Tower, {callsign}, in the pattern runway {runway}",
-    "REPORT_POSITION_DOWNWIND": "{airport} Tower, {callsign}, midfield downwind runway {runway}",
-    "REPORT_POSITION_BASE": "{airport} Tower, {callsign}, turning base runway {runway}",
-    "REPORT_POSITION_FINAL": "{airport} Tower, {callsign}, final runway {runway}",
-    "REQUEST_LANDING": "{airport} Tower, {callsign}, request full stop landing",
-    "REQUEST_TOUCH_AND_GO": "{airport} Tower, {callsign}, request touch and go",
-    "GO_AROUND": "{callsign}, going around",
-    "RUNWAY_VACATED": "{airport} Tower, {callsign}, runway {runway} vacated",
-    "READBACK": "(read back the last ATC clearance)",
-    "RADIO_CHECK": "{airport}, {callsign}, radio check",
-    "SELF_ANNOUNCE": "{airport} Traffic, {callsign}, (announce position and intentions)",
-    "LEAVING_FREQUENCY": "{callsign}, leaving your frequency, good day"
+    "INITIAL_CALL_GROUND": "{airport} {taxi_controller}, {callsign}, am Vorfeld, erbitte Rollen, Information {atis_letter}",
+    "INITIAL_CALL_TOWER": "{airport} Tower, {callsign}, Rollhalt Piste {runway}, abflugbereit",
+    "INITIAL_CALL_INBOUND": "{airport} Tower, {callsign}, zur Landung, erbitte Einflugverfahren",
+    "INITIAL_CALL_INBOUND_VRP": "{airport} Tower, {callsign}, ueber {entry_vrp}, zur Landung, Information {atis_letter}",
+    "INITIAL_CALL_APPROACH": "{airport} Approach, {callsign}, (Hoehe) Fuss, zur Landung",
+    "REQUEST_TAXI": "{airport} {taxi_controller}, {callsign}, erbitte Rollen zum Rollhalt Piste {runway}",
+    "REQUEST_TAXI_PARKING": "{airport} {taxi_controller}, {callsign}, erbitte Rollen zum Vorfeld",
+    "READY_FOR_DEPARTURE": "{airport} Tower, {callsign}, Piste {runway}, abflugbereit",
+    "READY_FOR_DEPARTURE_VFR": "{airport} Tower, {callsign}, Piste {runway}, abflugbereit, Kurs nach Plan",
+    "REPORT_POSITION": "{airport} Tower, {callsign}, in der Platzrunde Piste {runway}",
+    "REPORT_POSITION_DOWNWIND": "{airport} Tower, {callsign}, Mitte Gegenanflug Piste {runway}",
+    "REPORT_POSITION_BASE": "{airport} Tower, {callsign}, im Queranflug Piste {runway}",
+    "REPORT_POSITION_FINAL": "{airport} Tower, {callsign}, Endanflug Piste {runway}",
+    "REQUEST_LANDING": "{airport} Tower, {callsign}, erbitte Landung",
+    "REQUEST_TOUCH_AND_GO": "{airport} Tower, {callsign}, erbitte Aufsetzen und Durchstarten",
+    "GO_AROUND": "{callsign}, Durchstart",
+    "RUNWAY_VACATED": "{airport} Tower, {callsign}, Piste {runway} verlassen",
+    "READBACK": "(letzte ATC-Freigabe zurueckmelden)",
+    "RADIO_CHECK": "{airport}, {callsign}, Funkprobe",
+    "SELF_ANNOUNCE": "{airport} Verkehr, {callsign}, (Position und Absicht melden)",
+    "LEAVING_FREQUENCY": "{callsign}, verlasse Ihre Frequenz, auf Wiederhoeren"
   },
 
   "_state_machine_guards_comment": "Tables consumed by atc_state_machine::process. state_frequency_validity: when current freq doesn't match the listed states for that freq type, atc_state_machine resets to IDLE. idle_redirects: in IDLE state, a matching intent + freq combo emits the configured response and stays in IDLE. state_reverts: pilot re-issues an intent while in `in_state` -> revert to `revert_to` so the request reroutes. tower_only_auto_advance: at airports with no Ground controller, the listed states auto-advance after the standard taxi handoff. frequency_hint: rendered when freq_type is UNKNOWN at a towered airport.",
@@ -294,13 +294,13 @@
       "intent_in": ["REQUEST_TAXI", "REQUEST_TAXI_PARKING"],
       "freq_type": "TOWER",
       "unless_flag": "tower_only",
-      "response": "{callsign}, contact ground for taxi.",
+      "response": "{callsign}, rufen Sie Ground fuer Rollanweisungen.",
       "log": "REQUEST_TAXI on Tower freq -> redirect to ground"
     },
     {
       "intent_in": ["READY_FOR_DEPARTURE", "READY_FOR_DEPARTURE_VFR"],
       "freq_type": "GROUND",
-      "response": "{callsign}, contact tower when ready for departure.",
+      "response": "{callsign}, rufen Sie Tower wenn abflugbereit.",
       "log": "READY_FOR_DEPARTURE on Ground freq -> redirect to tower"
     }
   ],
@@ -328,7 +328,7 @@
 
   "frequency_hint": {
     "ground_intents": ["INITIAL_CALL_GROUND", "REQUEST_TAXI", "REQUEST_TAXI_PARKING"],
-    "ground_response": "{callsign}, you are not on the correct frequency. Contact {airport} Ground on {ground_frequency}.",
-    "tower_response":  "{callsign}, you are not on the correct frequency. Contact {airport} Tower on {tower_frequency}."
+    "ground_response": "{callsign}, Sie sind nicht auf der korrekten Frequenz. Rufen Sie {airport} Ground auf {ground_frequency}.",
+    "tower_response":  "{callsign}, Sie sind nicht auf der korrekten Frequenz. Rufen Sie {airport} Tower auf {tower_frequency}."
   }
 }
