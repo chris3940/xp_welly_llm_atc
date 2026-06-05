@@ -52,4 +52,14 @@ std::string normalize_for_speech(const std::string &text);
 // nur Runs aus 2..4 zusammenhaengenden Ziffernwoertern.
 std::string parse_spoken_number(const std::string &text);
 
+// BZF-phonetic expansion of a raw callsign:
+//   "HBAKA"  -> "Hotel Bravo Alfa Kilo Alfa"
+//   "D-EXYZ" -> "Delta Echo X-Ray Yankee Zulu"
+//   "N123AB" -> "November eins zwo drei Alfa Bravo"
+// Mirrors settings::to_icao_phonetic() in format (single space between
+// words, empty input -> empty output) but uses the BZF tables
+// (Alfa/Juliett/X-Ray, null/eins/zwo/...). Non-alphanumeric chars
+// (dash, space) are skipped.
+std::string expand_callsign_phonetic(const std::string &raw);
+
 } // namespace de_phraseology

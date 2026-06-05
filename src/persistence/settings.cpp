@@ -18,6 +18,7 @@
 
 #include "persistence/settings.hpp"
 
+#include "atc/de_phraseology.hpp"
 #include "persistence/keychain.hpp"
 
 #include <cctype>
@@ -196,7 +197,16 @@ std::string pilot_callsign_raw() {
   return cfg.value("pilot_callsign_raw", std::string(""));
 }
 std::string pilot_callsign() {
-  return cfg.value("pilot_callsign", std::string(""));
+  // Region-aware: compute on the fly so a region switch flips
+  // English-NATO ("Alpha Bravo One") to BZF-German ("Alfa Bravo eins")
+  // without needing to re-save the callsign. Falls back to the cached
+  // value only when no raw callsign is present (legacy settings.json).
+  std::string raw = cfg.value("pilot_callsign_raw", std::string(""));
+  if (raw.empty())
+    return cfg.value("pilot_callsign", std::string(""));
+  if (flow_region() == "DE")
+    return de_phraseology::expand_callsign_phonetic(raw);
+  return to_icao_phonetic(raw);
 }
 int active_com() { return cfg.value("active_com", 1); }
 float volume() { return cfg.value("volume", 1.0f); }

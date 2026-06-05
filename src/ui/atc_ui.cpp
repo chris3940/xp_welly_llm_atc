@@ -1803,8 +1803,12 @@ static void draw_airport_tab(const xplane_context::XPlaneContext &ctx) {
           vrp_line += " | ";
         vrp_line += vrp_data->vrps[i].name;
       }
-      ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "%s",
-                         vrp_line.c_str());
+      // TextWrapped so long VRP lists wrap at the current window width
+      // instead of forcing the window wider. No TextColoredWrapped in
+      // ImGui — emulate via PushStyleColor.
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.9f, 0.7f, 1.0f));
+      ImGui::TextWrapped("%s", vrp_line.c_str());
+      ImGui::PopStyleColor();
     }
   }
 
@@ -2046,7 +2050,7 @@ static void draw_atc_panel() {
     return;
 
   ImGui::SetNextWindowSize(ImVec2(420, 620), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSizeConstraints(ImVec2(280, 300), ImVec2(700, 1000));
+  ImGui::SetNextWindowSizeConstraints(ImVec2(280, 300), ImVec2(1200, 1000));
 
   bool open = atc_panel_visible_;
   if (ImGui::Begin(ui_strings::tr("window.atc_panel"), &open,

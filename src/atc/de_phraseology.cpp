@@ -741,4 +741,24 @@ std::string parse_spoken_number(const std::string &text) {
   return parse_spoken_number_impl(text);
 }
 
+std::string expand_callsign_phonetic(const std::string &raw) {
+  std::string out;
+  out.reserve(raw.size() * 6);
+  for (char c : raw) {
+    const char *word = nullptr;
+    if (is_upper(c))
+      word = kNatoLetters[c - 'A'];
+    else if (is_lower(c))
+      word = kNatoLetters[c - 'a'];
+    else if (is_digit(c))
+      word = kDigitWords[c - '0'];
+    if (!word)
+      continue; // skip dashes, spaces, punctuation
+    if (!out.empty())
+      out += ' ';
+    out += word;
+  }
+  return out;
+}
+
 } // namespace de_phraseology
