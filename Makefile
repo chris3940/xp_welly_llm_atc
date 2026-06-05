@@ -260,32 +260,36 @@ install:
 	fi
 	@cp data/atc_prompt_templates.json "$(PLUGIN_DIR)/data/"
 	@echo "Installed: $(PLUGIN_DIR)/data/atc_prompt_templates.json"
-	@mkdir -p "$(PLUGIN_DIR)/data/regions/eu" \
-	          "$(PLUGIN_DIR)/data/regions/us" \
-	          "$(PLUGIN_DIR)/data/regions/de"
-	@cp data/regions/eu/atc_templates.json     "$(PLUGIN_DIR)/data/regions/eu/"
-	@cp data/regions/eu/flight_rules.json      "$(PLUGIN_DIR)/data/regions/eu/"
-	@cp data/regions/eu/airport_vrps.json      "$(PLUGIN_DIR)/data/regions/eu/"
-	@cp data/regions/eu/intent_rules.json      "$(PLUGIN_DIR)/data/regions/eu/"
-	@cp data/regions/eu/phraseology_hints.json "$(PLUGIN_DIR)/data/regions/eu/"
-	@cp data/regions/eu/ui_strings.json        "$(PLUGIN_DIR)/data/regions/eu/"
-	@echo "Installed: $(PLUGIN_DIR)/data/regions/eu/*.json"
-	@cp data/regions/us/atc_templates.json     "$(PLUGIN_DIR)/data/regions/us/"
-	@cp data/regions/us/flight_rules.json      "$(PLUGIN_DIR)/data/regions/us/"
-	@cp data/regions/us/intent_rules.json      "$(PLUGIN_DIR)/data/regions/us/"
-	@cp data/regions/us/phraseology_hints.json "$(PLUGIN_DIR)/data/regions/us/"
-	@cp data/regions/us/ui_strings.json        "$(PLUGIN_DIR)/data/regions/us/"
-	@echo "Installed: $(PLUGIN_DIR)/data/regions/us/*.json"
-	@cp data/regions/de/atc_templates.json     "$(PLUGIN_DIR)/data/regions/de/"
-	@cp data/regions/de/flight_rules.json      "$(PLUGIN_DIR)/data/regions/de/"
-	@cp data/regions/de/airport_vrps.json      "$(PLUGIN_DIR)/data/regions/de/"
-	@cp data/regions/de/intent_rules.json      "$(PLUGIN_DIR)/data/regions/de/"
-	@cp data/regions/de/phraseology_hints.json "$(PLUGIN_DIR)/data/regions/de/"
-	@cp data/regions/de/ui_strings.json        "$(PLUGIN_DIR)/data/regions/de/"
-	@echo "Installed: $(PLUGIN_DIR)/data/regions/de/*.json"
+	@mkdir -p "$(PLUGIN_DIR)/data/atc_profiles/eu" \
+	          "$(PLUGIN_DIR)/data/atc_profiles/us" \
+	          "$(PLUGIN_DIR)/data/atc_profiles/de"
+	@cp data/atc_profiles/eu/atc_templates.json     "$(PLUGIN_DIR)/data/atc_profiles/eu/"
+	@cp data/atc_profiles/eu/flight_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/eu/"
+	@cp data/atc_profiles/eu/intent_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/eu/"
+	@cp data/atc_profiles/eu/phraseology_hints.json "$(PLUGIN_DIR)/data/atc_profiles/eu/"
+	@cp data/atc_profiles/eu/ui_strings.json        "$(PLUGIN_DIR)/data/atc_profiles/eu/"
+	@echo "Installed: $(PLUGIN_DIR)/data/atc_profiles/eu/*.json"
+	@cp data/atc_profiles/us/atc_templates.json     "$(PLUGIN_DIR)/data/atc_profiles/us/"
+	@cp data/atc_profiles/us/flight_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/us/"
+	@cp data/atc_profiles/us/intent_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/us/"
+	@cp data/atc_profiles/us/phraseology_hints.json "$(PLUGIN_DIR)/data/atc_profiles/us/"
+	@cp data/atc_profiles/us/ui_strings.json        "$(PLUGIN_DIR)/data/atc_profiles/us/"
+	@echo "Installed: $(PLUGIN_DIR)/data/atc_profiles/us/*.json"
+	@cp data/atc_profiles/de/atc_templates.json     "$(PLUGIN_DIR)/data/atc_profiles/de/"
+	@cp data/atc_profiles/de/flight_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/de/"
+	@cp data/atc_profiles/de/intent_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/de/"
+	@cp data/atc_profiles/de/phraseology_hints.json "$(PLUGIN_DIR)/data/atc_profiles/de/"
+	@cp data/atc_profiles/de/ui_strings.json        "$(PLUGIN_DIR)/data/atc_profiles/de/"
+	@echo "Installed: $(PLUGIN_DIR)/data/atc_profiles/de/*.json"
+	@mkdir -p "$(PLUGIN_DIR)/data/vrps"
+	@cp data/vrps/airport_vrps.json "$(PLUGIN_DIR)/data/vrps/"
+	@echo "Installed: $(PLUGIN_DIR)/data/vrps/airport_vrps.json"
+	@# Cleanup of legacy paths from pre-Phase-B installs (region-scoped
+	@# data + top-level JSONs from the era before the regions folder).
 	@rm -f "$(PLUGIN_DIR)/data/atc_templates.json" \
 	       "$(PLUGIN_DIR)/data/flight_rules.json" \
 	       "$(PLUGIN_DIR)/data/airport_vrps.json"
+	@rm -rf "$(PLUGIN_DIR)/data/regions"
 	@echo "Installed and signed."
 
 # ── Lint ──────────────────────────────────────────────────────────────────────

@@ -84,7 +84,13 @@ static bool buffers_initialized = false;
 static const char *pattern_dir_names[] = {"left", "right"};
 static int pattern_dir_selection = 0; // default: left
 
-static const char *atc_profile_names[] = {"EU", "US", "DE"};
+// Storage codes persisted in settings.json (single-source for the value
+// the state machine, intent rules, and template loader switch on).
+// Never localised - JSON values must stay stable across UI renames.
+static const char *atc_profile_codes[] = {"EU", "US", "DE"};
+// Display labels for the Combo widget. EU/ICAO, US/FAA, DE/BZF name
+// the actual phraseology standard the pilot is training against.
+static const char *atc_profile_labels[] = {"EU/ICAO", "US/FAA", "DE/BZF"};
 static int atc_profile_selection = 0; // default: EU
 static float region_feedback_timer = 0.0f;
 static char region_feedback_msg[128] = {0};
@@ -1015,8 +1021,8 @@ static void draw_settings_tab() {
     std::string region = settings::atc_profile();
     atc_profile_selection = 0; // default EU
     for (size_t i = 0;
-         i < sizeof(atc_profile_names) / sizeof(atc_profile_names[0]); ++i) {
-      if (region == atc_profile_names[i]) {
+         i < sizeof(atc_profile_codes) / sizeof(atc_profile_codes[0]); ++i) {
+      if (region == atc_profile_codes[i]) {
         atc_profile_selection = static_cast<int>(i);
         break;
       }
@@ -1237,20 +1243,23 @@ static void draw_settings_tab() {
     settings::save();
   }
 
-  // ATC flow region — EU (ICAO) vs US/Canada (FAA/NAV CANADA) vs DE
-  // (ICAO auf Deutsch). Changing this reloads region-scoped config
-  // files at runtime, including the UI string table.
+  // ATC phraseology selector - EU/ICAO vs US/FAA vs DE/BZF. The
+  // displayed labels include the standard name (EU/ICAO etc.) but the
+  // stored value is the bare code (EU/US/DE) so JSON config and the
+  // template/intent-rule loader stay stable across UI renames.
+  // Changing the selection reloads all profile-scoped config files at
+  // runtime, including the UI string table.
   if (ImGui::Combo(ui_strings::tr("settings.region_label"),
-                   &atc_profile_selection, atc_profile_names,
-                   IM_ARRAYSIZE(atc_profile_names))) {
-    settings::set_atc_profile(atc_profile_names[atc_profile_selection]);
+                   &atc_profile_selection, atc_profile_labels,
+                   IM_ARRAYSIZE(atc_profile_labels))) {
+    settings::set_atc_profile(atc_profile_codes[atc_profile_selection]);
     settings::save();
     atc_templates::reload();
     flight_phase::reload();
     phraseology_hints::reload();
     ui_strings::reload();
     airport_vrps::reload();
-    // Local mode: switching region also switches the Whisper model
+    // Local mode: switching profile also switches the Whisper model
     // variant and Piper voice — restart the loader so the new
     // language's models get verified + loaded. OpenAI mode reads
     // settings::backend_language() per request, so no reload needed.
@@ -1260,7 +1269,7 @@ static void draw_settings_tab() {
     }
     std::snprintf(region_feedback_msg, sizeof(region_feedback_msg),
                   ui_strings::tr("settings.region_feedback_format"),
-                  atc_profile_names[atc_profile_selection]);
+                  atc_profile_labels[atc_profile_selection]);
     region_feedback_timer = 3.0f;
   }
   if (ImGui::IsItemHovered()) {
