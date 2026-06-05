@@ -60,7 +60,7 @@
     },
 
     { "intent": "UNABLE",      "confidence": 0.95, "any": ["unable", "nicht moeglich", "nicht möglich"] },
-    { "intent": "RADIO_CHECK", "confidence": 0.95, "any": ["radio check", "how do you read", "funkpruefung", "funkprüfung", "wie hoeren sie mich", "wie hören sie mich"] },
+    { "intent": "RADIO_CHECK", "confidence": 0.95, "any": ["radio check", "how do you read", "funkpruefung", "funkprüfung", "funkprobe", "wie hoeren sie mich", "wie hören sie mich"] },
     { "intent": "GO_AROUND",   "confidence": 0.95, "any": ["going around", "go around", "missed approach", "durchstarten", "durchstart", "fehlanflug"] },
 
     {

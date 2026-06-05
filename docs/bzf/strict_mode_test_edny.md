@@ -16,7 +16,33 @@
 
 ---
 
+## Wichtig: EDNY ist tower_only
+
+Friedrichshafen hat **keine separate Bodenkontrolle**. Der Tower auf
+**120.075** macht Boden + Air. Das Plugin erkennt das aus apt.dat
+(`ctx.tower_only=true`) und routet:
+
+- Rollanmeldung direkt an den Tower (kein „Rollkontrolle"-Anruf)
+- Variable `{taxi_controller}` wird auf `"Tower"` gesetzt
+- Nach Landung kein „kontaktieren Sie Rollkontrolle" — Tower gibt die
+  Roll-Anweisung zum GA-Vorfeld direkt
+- COM1 bleibt die ganze Zeit auf der Tower-Frequenz
+
+Das heißt für den Test: **eine Frequenz, eine Funkstelle** — alle
+Strict-Mode-Checks laufen über genau diesen Tower-Channel.
+
+---
+
 ## Vorbereitung
+
+### Plugin bauen & installieren
+
+Das Strict-Mode-Feature ist im aktuellen Working-Tree, noch nicht im
+installierten Plugin:
+
+```bash
+make build && make install
+```
 
 ### Plugin-Settings
 
@@ -25,9 +51,10 @@
 2. **BZF-Strict-Mode** einschalten
    (Settings-Tab → Checkbox „BZF-Strict-Mode (Tower prueft Pflicht-Readback)")
    → Toggle ist **nur sichtbar** wenn Profile=DE.
-3. **Pilot-Callsign** auf D-Format setzen (z. B. `D-EXYZ`)
-   (Settings-Tab → Pilot-Callsign → `D-EXYZ`)
-   → Das Plugin expandiert das beim Sprechen zu `Delta Echo X-Ray Yankee Zulu`.
+3. **Pilot-Callsign** auf `HB-DSV` setzen
+   (Settings-Tab → Pilot-Callsign → `HB-DSV`)
+   → Das Plugin expandiert das beim Sprechen zu
+     `Hotel Bravo Delta Sierra Victor` via `de_phraseology::expand_callsign_phonetic()`.
 4. **Backend-Modus:** beliebig (Lokal oder OpenAI — Strict-Mode ist backend-agnostisch).
 
 ### X-Plane Setup
@@ -35,78 +62,68 @@
 - **Aircraft:** Cessna 172 oder vergleichbare GA-Maschine
 - **Flugplatz:** `EDNY` (Friedrichshafen)
 - **Position:** GA-Vorfeld / Apron (Cold Start)
-- **Engines:** aus (Plugin startet im `IDLE`, du kannst mit Funkprobe oder
-  direkt mit Rollanmeldung beginnen)
+- **Engines:** aus
 - **Wetter:** beliebig — der Tower nutzt das aktuelle X-Plane-Wetter für
   Wind und QNH
 
-### EDNY-Eckdaten (zur Orientierung)
+### EDNY-Eckdaten
 
 | | |
 |---|---|
 | ATIS | 127.575 |
-| Ground / Rollkontrolle | 121.825 |
-| Tower / Turm | 120.075 |
+| Tower / TWR-RDR | **120.075** (kombiniert Tower + Boden + Director) |
 | Pisten | 06 / 24 (beide left-traffic) |
 | Pattern-Höhe | ca. 2500 ft MSL (≈ 1100 ft AGL) |
 | VRPs | November (N), Oscar (NE), Sierra (S), Whiskey (W) |
 
 ---
 
-## Flugverlauf — Platzrunde (Pattern Work)
-
-Dieser Rundflug bleibt komplett in der Platzrunde von EDNY. Wenn du warm
-bist und der Strict-Mode flüssig läuft, kannst du den optionalen
-VRP-Abstecher am Ende dranhängen.
+## Flugverlauf — Platzrunde
 
 Pro Schritt steht:
-- **Du:** was du auf PTT sagen sollst (NfL-konform)
+- **Du:** was du auf PTT sagen sollst
 - **Tower:** was du als Antwort erwartest
 - **Pflicht-Readback:** was du zurücklesen MUSST, damit Strict-Mode zufrieden ist
 
-Wind und QNH sind dynamisch — die Werte unten sind Beispiele.
+Wind, QNH und ATIS-Letter sind dynamisch — die Werte unten sind Beispiele.
+Du musst die Werte aus der jeweiligen ATIS-Aussendung oder Tower-Clearance übernehmen.
+
+COM1 die ganze Zeit auf **120.075** (Tower).
 
 ---
 
-### Phase 1 — Funkprobe (optional, aber gute Warm-up-Übung)
+### Phase 1 — Funkprobe (optional, gute Warm-up-Übung)
 
-COM1 auf **127.575** (ATIS) oder **121.825** (Ground) tunen.
-
-**Schritt 1 — Funkprobe**
-- **Du:** „Friedrichshafen Rollkontrolle, Delta Echo X-Ray Yankee Zulu, Funkprobe 121,825."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, Friedrichshafen Tower, Hoere Sie fuenf."
+**Schritt 1**
+- **Du:** „Friedrichshafen Tower, Hotel Bravo Delta Sierra Victor, Funkprobe 120,075."
+- **Tower:** „Hotel Bravo Delta Sierra Victor, Friedrichshafen Tower, Hoere Sie fuenf."
 - **Pflicht-Readback:** keiner (RADIO_CHECK braucht kein Readback).
 - **NfL-Anker:** §17 a) + §17 b/c).
 
-> **Hinweis:** Aktuell antwortet das Tower-Template mit `Tower` statt `Rollkontrolle`,
-> auch wenn du Ground tunst. Das ist eine Audit-Notiz für Bucket B Phase-2.
-
 ---
 
-### Phase 2 — Rollanmeldung & Rollfreigabe
+### Phase 2 — Rollanmeldung & Rollfreigabe (direkt am Tower)
 
-COM1 auf **121.825** (Ground) tunen.
+**Schritt 2 — Erstanruf Tower + Rollanmeldung**
 
-**Schritt 2 — Erstanruf Ground + Rollanmeldung**
-
-- **Du:** „Friedrichshafen Rollkontrolle, Delta Echo X-Ray Yankee Zulu, Cessna 172,
+- **Du:** „Friedrichshafen Tower, Hotel Bravo Delta Sierra Victor, Cessna 172,
   GA-Vorfeld, Information Alfa, erbitte Rollen."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, Friedrichshafen Rollkontrolle, guten Tag,
+- **Tower:** „Hotel Bravo Delta Sierra Victor, Friedrichshafen Tower, guten Tag,
   rollen Sie zum Rollhalt Piste 24 ueber Alpha, QNH 1013."
 - **Pflicht-Readback (NfL §25 b) Nr. 1):**
-  - Callsign — `Delta Echo X-Ray Yankee Zulu` (oder verkürzt, **erst nachdem der Tower verkürzt**)
+  - Callsign — `Hotel Bravo Delta Sierra Victor` (oder verkürzt, **erst nachdem der Tower verkürzt**)
   - Piste — `Piste 24`
   - QNH — `QNH 1013`
-- **Du:** „Rollen zum Rollhalt Piste 24 ueber Alpha, QNH 1013, Delta Echo X-Ray Yankee Zulu."
+- **Du:** „Rollen zum Rollhalt Piste 24 ueber Alpha, QNH 1013, Hotel Bravo Delta Sierra Victor."
 - **Tower (silent absorb):** kein Audio — Plugin geht in `TAXI_CLEARED`.
 - **NfL-Anker:** §14, ANLAGE 1.4.7, §25 b) Nr. 1.
 
 > **🧪 Negativ-Test 1 — QNH absichtlich weglassen**
 >
-> Lies stattdessen zurück: „Rollen Piste 24 ueber Alpha, Delta Echo X-Ray Yankee Zulu."
+> Lies stattdessen zurück: „Rollen Piste 24 ueber Alpha, Hotel Bravo Delta Sierra Victor."
 >
 > Strict-Mode-Erwartung: Tower antwortet
-> `"Delta Echo X-Ray Yankee Zulu, wiederholen Sie vollstaendig mit QNH."`
+> `"Hotel Bravo Delta Sierra Victor, wiederholen Sie vollstaendig mit QNH."`
 > und der State bleibt `IDLE` (kein Advance zu `TAXI_CLEARED`). Du musst nochmal
 > sauber zurücklesen.
 >
@@ -114,147 +131,113 @@ COM1 auf **121.825** (Ground) tunen.
 
 > **🧪 Negativ-Test 2 — Piste UND QNH weglassen**
 >
-> Lies zurück: „Verstanden, rollen, Delta Echo X-Ray Yankee Zulu."
+> Lies zurück: „Verstanden, rollen, Hotel Bravo Delta Sierra Victor."
 >
 > Strict-Mode-Erwartung: Tower antwortet
-> `"Delta Echo X-Ray Yankee Zulu, wiederholen Sie die vollstaendige Freigabe."`
-> (Multi-Missing-Template). Log: `BZF strict: readback missing runway,qnh`.
+> `"Hotel Bravo Delta Sierra Victor, wiederholen Sie die vollstaendige Freigabe."`
+> (`missing_multi`-Template). Log: `BZF strict: readback missing runway,qnh`.
+
+> **🧪 Negativ-Test 3 — Callsign weglassen**
+>
+> Lies zurück: „Rollen Piste 24 ueber Alpha, QNH 1013."
+>
+> Strict-Mode-Erwartung: Tower antwortet
+> `"Hotel Bravo Delta Sierra Victor, lesen Sie immer mit vollem Rufzeichen zurueck."`
+> Log: `BZF strict: readback missing callsign`.
 
 ---
 
-### Phase 3 — Frequenzwechsel zum Tower
+### Phase 3 — Startbereit & Startfreigabe (gleiche Frequenz)
 
-**Schritt 3 — Am Rollhalt: Frequenzwechsel anfordern (optional, manche Lotsen
-geben den Wechsel mit der Rollfreigabe schon mit; das aktuelle Template
-weist dich beim Erreichen des Rollhalts an).**
+Am Rollhalt angekommen — kein Frequenzwechsel nötig, du bist schon am Tower.
 
-Wenn du am Rollhalt bist:
+**Schritt 3 — Startbereit-Meldung**
 
-- **Du:** „Friedrichshafen Rollkontrolle, Delta Echo X-Ray Yankee Zulu, am Rollhalt
-  Piste 24, abflugbereit."
-
-Das Plugin erkennt das als `READY_FOR_DEPARTURE` und sendet dich auf die Tower-Frequenz:
-
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, verstanden, kontaktieren Sie Tower auf 120,075."
-- **Pflicht-Readback (NfL §25 b) Nr. 1):**
-  - Callsign — `Delta Echo X-Ray Yankee Zulu`
-  - Frequenz — `120,075`
-- **Du:** „120,075, Delta Echo X-Ray Yankee Zulu."
-
-> **🧪 Negativ-Test 3 — Frequenz weglassen**
->
-> Lies zurück: „Verstanden, Delta Echo X-Ray Yankee Zulu."
->
-> Strict-Mode-Erwartung:
-> `"Delta Echo X-Ray Yankee Zulu, wiederholen Sie vollstaendig mit Frequenz."`
-
-COM1 auf **120.075** (Tower) tunen.
-
----
-
-### Phase 4 — Erstanruf Tower & Startfreigabe
-
-**Schritt 4 — Erstanruf Tower**
-
-- **Du:** „Friedrichshafen Turm, Delta Echo X-Ray Yankee Zulu, Rollhalt Piste 24,
+- **Du:** „Friedrichshafen Tower, Hotel Bravo Delta Sierra Victor, Rollhalt Piste 24,
   abflugbereit."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, Friedrichshafen Tower, Piste 24,
+- **Tower:** „Hotel Bravo Delta Sierra Victor, Friedrichshafen Tower, Piste 24,
   Start frei, Wind 240 Grad 8 Knoten, melden Sie im Gegenanflug."
 - **Pflicht-Readback:**
-  - Callsign — `Delta Echo X-Ray Yankee Zulu`
+  - Callsign — `Hotel Bravo Delta Sierra Victor`
   - Piste — `Piste 24`
-- **Du:** „Piste 24, Start frei, Delta Echo X-Ray Yankee Zulu."
+- **Du:** „Piste 24, Start frei, Hotel Bravo Delta Sierra Victor."
 - **NfL-Anker:** ANLAGE 1.4.10/1.4.11, §25 b) Nr. 1 ii.
 
 > **🧪 Negativ-Test 4 — Pistennummer im Startfreigabe-Readback weglassen**
 >
-> Lies zurück: „Start frei, Delta Echo X-Ray Yankee Zulu."
+> Lies zurück: „Start frei, Hotel Bravo Delta Sierra Victor."
 >
 > Strict-Mode-Erwartung:
-> `"Delta Echo X-Ray Yankee Zulu, wiederholen Sie vollstaendig mit Pistennummer."`
+> `"Hotel Bravo Delta Sierra Victor, wiederholen Sie vollstaendig mit Pistennummer."`
 
 Jetzt **starten**.
 
 ---
 
-### Phase 5 — Platzrundenmeldungen
+### Phase 4 — Platzrundenmeldungen
 
-Wenn du im Gegenanflug bist (Pattern Höhe ≈ 2500 ft MSL):
+Wenn du im Gegenanflug bist (Pattern-Höhe ≈ 2500 ft MSL):
 
-**Schritt 5 — Gegenanflug melden**
-- **Du:** „Friedrichshafen Turm, Delta Echo X-Ray Yankee Zulu, Gegenanflug Piste 24."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, Nummer eins, Piste 24, weiter Anflug,
+**Schritt 4 — Gegenanflug melden**
+- **Du:** „Friedrichshafen Tower, Hotel Bravo Delta Sierra Victor, Gegenanflug Piste 24."
+- **Tower:** „Hotel Bravo Delta Sierra Victor, Nummer eins, Piste 24, weiter Anflug,
   melden Sie Endanflug." (oder Variante)
 - **Pflicht-Readback:** Callsign + Piste (keine neue QNH/Freq-Vergabe)
 
-**Schritt 6 — Endanflug melden**
-- **Du:** „Endanflug Piste 24, Delta Echo X-Ray Yankee Zulu."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, Piste 24, Landung frei, Wind 240 Grad 8 Knoten."
+**Schritt 5 — Endanflug melden**
+- **Du:** „Endanflug Piste 24, Hotel Bravo Delta Sierra Victor."
+- **Tower:** „Hotel Bravo Delta Sierra Victor, Piste 24, Landung frei, Wind 240 Grad 8 Knoten."
 - **Pflicht-Readback:**
-  - Callsign — `Delta Echo X-Ray Yankee Zulu`
+  - Callsign — `Hotel Bravo Delta Sierra Victor`
   - Piste — `Piste 24`
-- **Du:** „Piste 24, Landung frei, Delta Echo X-Ray Yankee Zulu."
+- **Du:** „Piste 24, Landung frei, Hotel Bravo Delta Sierra Victor."
 - **NfL-Anker:** ANLAGE 1.4.16 a).
 
 > **🧪 Negativ-Test 5 — Pistennummer im Landefreigabe-Readback weglassen**
 >
-> Lies zurück: „Landung frei, Delta Echo X-Ray Yankee Zulu."
+> Lies zurück: „Landung frei, Hotel Bravo Delta Sierra Victor."
 >
 > Strict-Mode-Erwartung:
-> `"Delta Echo X-Ray Yankee Zulu, wiederholen Sie vollstaendig mit Pistennummer."`
+> `"Hotel Bravo Delta Sierra Victor, wiederholen Sie vollstaendig mit Pistennummer."`
 >
 > Die Landefreigabe gilt **erst** wenn du sauber zurückgelesen hast (Plugin
 > hält den State bei `LANDING_CLEARED`-Vorbereitung).
 
 ---
 
-### Phase 6 — Pistenverlassen & zurück zum Vorfeld
+### Phase 5 — Pistenverlassen & zurück zum Vorfeld (Tower-Only-Flow)
 
-**Schritt 7 — Piste verlassen**
-- **Du (nach dem Aufsetzen, beim Verlassen der Piste):** „Delta Echo X-Ray Yankee Zulu, Piste verlassen."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, verstanden, kontaktieren Sie Rollkontrolle
-  auf 121,825, auf Wiederhoeren."
-- **Pflicht-Readback:**
-  - Callsign — `Delta Echo X-Ray Yankee Zulu`
-  - Frequenz — `121,825`
-- **Du:** „121,825, Delta Echo X-Ray Yankee Zulu."
+**Schritt 6 — Piste verlassen**
+- **Du (nach dem Aufsetzen, beim Verlassen der Piste):** „Hotel Bravo Delta Sierra Victor, Piste verlassen."
+- **Tower (Tower-Only-Template):** „Hotel Bravo Delta Sierra Victor, verstanden,
+  rollen Sie zum GA-Vorfeld ueber Alpha, auf Wiederhoeren."
+- **Pflicht-Readback:** Callsign — keine Frequenz, keine Piste, kein QNH in diesem Template.
+- **Du:** „Rollen GA-Vorfeld ueber Alpha, Hotel Bravo Delta Sierra Victor."
 - **NfL-Anker:** ANLAGE 1.4.7 *z), ANLAGE 1.4.20.
 
-> **🧪 Negativ-Test 6 — Frequenz im Pistenfrei-Readback weglassen**
->
-> Lies zurück: „Verstanden, Delta Echo X-Ray Yankee Zulu."
->
-> Strict-Mode-Erwartung:
-> `"Delta Echo X-Ray Yankee Zulu, wiederholen Sie vollstaendig mit Frequenz."`
+> Beachte: Weil EDNY `tower_only=true` ist, kommt **kein** „kontaktieren Sie
+> Rollkontrolle auf 121,825" wie bei einem 2-stufigen Platz (z. B. EDDS / EDDF).
+> Das `RUNWAY_VACATED_TOWER_ONLY`-Template in `atc_templates.json:71/300/327`
+> wird automatisch gewählt sobald `ctx.tower_only=true` ist.
 
-COM1 auf **121.825** (Ground) tunen.
-
-**Schritt 8 — Rollanforderung zur Abstellposition**
-- **Du:** „Friedrichshafen Rollkontrolle, Delta Echo X-Ray Yankee Zulu, Piste verlassen,
-  erbitte Rollen zum GA-Vorfeld."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, rollen Sie zum GA-Vorfeld ueber Alpha."
-- **Pflicht-Readback:** Callsign — keine QNH/Freq-Neuvergabe in diesem Template.
-- **Du:** „Rollen GA-Vorfeld ueber Alpha, Delta Echo X-Ray Yankee Zulu."
-
-**Schritt 9 — Frequenz verlassen**
-- **Du (am Abstellplatz, Engines aus):** „Friedrichshafen Rollkontrolle,
-  Delta Echo X-Ray Yankee Zulu, verlasse Frequenz."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, Verlassen der Frequenz genehmigt,
+**Schritt 7 — Frequenz verlassen (am Abstellplatz)**
+- **Du:** „Friedrichshafen Tower, Hotel Bravo Delta Sierra Victor, verlasse Frequenz."
+- **Tower:** „Hotel Bravo Delta Sierra Victor, Verlassen der Frequenz genehmigt,
   auf Wiederhoeren."
 - **Pflicht-Readback:** keiner (`LEAVING_FREQUENCY` ist self-terminating).
 
 ---
 
-## Touch-and-Go-Variante (statt Schritt 6)
+## Touch-and-Go-Variante (statt Schritt 5)
 
 Wenn du nicht voll landen willst, sondern Touch-and-Go für mehr Übung:
 
 - **Du (anstelle der Landefreigabe-Anfrage):** „Endanflug Piste 24, aufsetzen und durchstarten,
-  Delta Echo X-Ray Yankee Zulu."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, Piste 24, frei zum Aufsetzen und Durchstarten,
+  Hotel Bravo Delta Sierra Victor."
+- **Tower:** „Hotel Bravo Delta Sierra Victor, Piste 24, frei zum Aufsetzen und Durchstarten,
   Wind 240 Grad 8 Knoten."
 - **Pflicht-Readback:** Callsign + Piste.
-- **Du:** „Piste 24, frei zum Aufsetzen und Durchstarten, Delta Echo X-Ray Yankee Zulu."
+- **Du:** „Piste 24, frei zum Aufsetzen und Durchstarten, Hotel Bravo Delta Sierra Victor."
 - **NfL-Anker:** ANLAGE 1.4.16 c).
 
 Pattern fortsetzen — Gegenanflug → Queranflug → Endanflug.
@@ -266,24 +249,26 @@ Pattern fortsetzen — Gegenanflug → Queranflug → Endanflug.
 Statt direkt landen: in den Gegenanflug zum VRP Whiskey ausfliegen, ein paar Minuten
 herumfliegen, dann via Sierra wieder einfliegen.
 
-**Departure-Variante in Schritt 4:**
-- **Du:** „Friedrichshafen Turm, Delta Echo X-Ray Yankee Zulu, Rollhalt Piste 24,
+**Departure-Variante in Schritt 3 (Startbereit):**
+- **Du:** „Friedrichshafen Tower, Hotel Bravo Delta Sierra Victor, Rollhalt Piste 24,
   abflugbereit, VFR ueberlandflug Richtung Whiskey."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, Friedrichshafen Tower, Piste 24, Start frei,
+- **Tower:** „Hotel Bravo Delta Sierra Victor, Friedrichshafen Tower, Piste 24, Start frei,
   Wind 240 Grad 8 Knoten, Kurs nach Plan freigegeben, Frequenzwechsel nach Start genehmigt."
 
-→ Plugin geht in `XC/DEPARTURE_CLEARED`. Du kannst frei fliegen.
+→ Plugin geht in `XC/DEPARTURE_CLEARED`. Du kannst frei fliegen und brauchst
+   nicht beim Tower bleiben (Frequenzwechsel nach Start ist genehmigt).
 
 **Rückflug-Variante über VRP Sierra:**
 
 Position bei Sierra (ca. 47.61° N, 9.59° E, 3000 ft):
-- **Du:** „Friedrichshafen Turm, Delta Echo X-Ray Yankee Zulu, Cessna 172, ueber Sierra,
+- COM1 zurück auf **120.075**.
+- **Du:** „Friedrichshafen Tower, Hotel Bravo Delta Sierra Victor, Cessna 172, ueber Sierra,
   3000 Fuss, Information Alfa, zur Landung."
-- **Tower:** „Delta Echo X-Ray Yankee Zulu, Friedrichshafen Tower, frei zum Einflug in die
+- **Tower:** „Hotel Bravo Delta Sierra Victor, Friedrichshafen Tower, frei zum Einflug in die
   Kontrollzone ueber Sierra, Piste 24, melden Sie im Gegenanflug."
 - **Pflicht-Readback:** Callsign + Piste.
 
-Dann Phase 5 + 6 wie oben.
+Dann Phase 4 + 5 wie oben.
 
 ---
 
@@ -294,6 +279,7 @@ Strict-Mode loggt jede Verletzung:
 ```
 [xp_wellys_atc] BZF strict: readback missing qnh
 [xp_wellys_atc] BZF strict: readback missing runway,qnh
+[xp_wellys_atc] BZF strict: readback missing callsign
 [xp_wellys_atc] BZF strict: readback missing frequency
 ```
 
@@ -323,6 +309,7 @@ Folgendes ist im Phase-2-MVP bewusst **noch nicht** implementiert und kann den T
 | **Konditionelle Freigaben** („BEHIND landendem Verkehr") | Pflichtelement-Wiederholung der Bedingung ist nicht modelliert. | [`bzf_coverage.md`](bzf_coverage.md) §3.4/4.3 |
 | **„Lesbarkeit X"-Variante** (variabel statt konstant 5) | Verständlichkeitsskala 1–5 als Daten-Tabelle ist nicht hinterlegt — aktuell konstant „Hoere Sie fuenf". | [`bzf_coverage.md`](bzf_coverage.md) §2.3 |
 | **Strict-Mode-Filter auf Sim-Mode-Keywords** („startbereit", „piste frei") | Bei Strict-Mode aktiv akzeptiert das Plugin diese umgangssprachlichen Varianten trotzdem — der Tower antwortet zwar in NfL-Form, aber das Pilot-Eingangs-Vokabular bleibt tolerant. | [`bzf_coverage.md`](bzf_coverage.md) §4.1/7.1 |
+| **`taxi_controller`="Tower" statt "Turm" bei tower_only DE** | `ground_operations.cpp:181` setzt bei tower_only immer "Tower", auch im DE-Profil. NfL §34 erlaubt beide („TOWER" und „TURM"), aber konsistent wäre für DE → „Turm". | nicht in coverage.md — eigener Mini-Fix |
 
 ---
 
@@ -333,8 +320,9 @@ Folgendes ist im Phase-2-MVP bewusst **noch nicht** implementiert und kann den T
    - `[xp_wellys_atc] BACKEND MODE: ...` — Plugin überhaupt aktiv?
    - `BZF strict: readback missing ...` — Strict-Check läuft?
    - Wenn das Plugin den READBACK gar nicht erkennt: prüfe ob `Verstanden` / `Roger` / Callsign im Pilot-Transkript sind (`intent_rules.json:98`).
-3. **Tower wiederholt sich endlos** → State-Machine ist auf Konformitäts-Wartezeit. Setze Disregard (`atc_session::disregard()` über UI-Reset-Button) und versuche nochmal.
-4. **Korrektive Tower-Antwort ist generisch** („wiederholen Sie die vollstaendige Freigabe") statt spezifisch → 2 oder mehr Elemente fehlen, das ist `missing_multi`-Template (`atc_templates.json :: bzf_strict.missing_multi`). Funktion korrekt.
+3. **Tower wiederholt sich endlos** → State-Machine wartet auf sauberen Readback. Setze Disregard (UI-Reset-Button) und versuche nochmal.
+4. **Korrektive Tower-Antwort ist generisch** („wiederholen Sie die vollstaendige Freigabe") statt spezifisch → 2 oder mehr Elemente fehlen, das ist das `missing_multi`-Template. Funktion korrekt.
+5. **Plugin gibt mir trotz Tower-Only eine Ground-Frequenz raus** → `ctx.tower_only` wird aus apt.dat abgeleitet. Wenn EDNY in deinem X-Plane mit einem benutzerdefinierten Szenenpaket eine künstliche Ground-Frequenz hat, kann das Plugin sie sehen. Prüfe Log.txt auf den airport_freqs-Dump beim Plugin-Start.
 
 ---
 

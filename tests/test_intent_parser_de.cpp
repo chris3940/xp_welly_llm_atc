@@ -128,6 +128,22 @@ TEST_CASE("DE: Funkpruefung -> RADIO_CHECK",
     REQUIRE(m.confidence >= 0.85f);
 }
 
+// "Funkprobe" is the colloquial BZF variant of "Funkpruefung". Whisper
+// reliably transcribes it that way and pilots in real DACH operation
+// say it interchangeably — must classify as RADIO_CHECK and not fall
+// through to INITIAL_CALL_TOWER via the facility-keyword "Tower".
+// Regression fix from user test 2026-06-05 (EDNY tower_only).
+TEST_CASE("DE: Funkprobe -> RADIO_CHECK (not INITIAL_CALL_TOWER)",
+          "[intent][de][radio_check]") {
+    DeRegionGuard g;
+    auto ctx = ground_ctx();
+    auto m = parse(
+        "Friedrichshafen Tower, Hotel Bravo Delta Sierra Victor, Funkprobe 120,075.",
+        ctx);
+    REQUIRE(m.intent == PilotIntent::RADIO_CHECK);
+    REQUIRE(m.confidence >= 0.85f);
+}
+
 // ── Pattern phase (airborne) ─────────────────────────────────────────
 
 TEST_CASE("DE: Im Gegenanflug -> REPORT_POSITION_DOWNWIND",

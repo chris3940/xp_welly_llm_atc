@@ -179,7 +179,7 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
 
   std::string taxi_controller;
   if (ctx.tower_only)
-    taxi_controller = "Tower";
+    taxi_controller = region_de ? "Turm" : "Tower";
   else
     taxi_controller = region_de ? "Rollkontrolle" : "Ground";
 
