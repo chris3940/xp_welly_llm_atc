@@ -152,6 +152,35 @@ TEST_CASE("check_pilot_readback: Whisper Juliet->Juliett tolerated",
     REQUIRE(missing.empty());
 }
 
+// Whisper welds German compounds: "Rollhalt Piste 06" gets transcribed
+// as "Rollhaltpiste 06" (no space). The runway matcher must still
+// recognise it — otherwise the pilot's correct readback is flagged
+// as missing runway. Regression fix from user EDNY test 2026-06-05:
+// "Rollen zur Rollhaltpiste 06 über Alfa QNH 1020 Hotel Bravo Delta
+// Sierra Victor".
+TEST_CASE("check_pilot_readback: Whisper-welded compound Rollhaltpiste",
+          "[bzf_compliance][check][whisper]") {
+    std::vector<Element> required{Element::Callsign, Element::Runway,
+                                  Element::QNH};
+    auto missing = check_pilot_readback(
+        "Rollen zur Rollhaltpiste 06 über Alfa QNH 1020 Hotel Bravo Delta "
+        "Sierra Victor",
+        required, "Hotel Bravo Delta Sierra Victor");
+    REQUIRE(missing.empty());
+}
+
+TEST_CASE("extract_required: welded compound also detected on tower side",
+          "[bzf_compliance][extract][whisper]") {
+    // Even if a template (or future LLM-generated tower text) emits a
+    // welded form, the extractor must still recognise the runway.
+    auto out = extract_required("D-EXYZ, rollen Sie zur Rollhaltpiste 06.");
+    bool has_runway = false;
+    for (auto e : out)
+        if (e == Element::Runway)
+            has_runway = true;
+    REQUIRE(has_runway);
+}
+
 // ── build_correction_response: template rendering ──────────────────
 
 TEST_CASE("build_correction_response: empty missing yields empty string",

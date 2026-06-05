@@ -43,15 +43,27 @@ std::string to_lower(const std::string &s) {
 // — the goal is to discover what the tower asked the pilot to confirm,
 // not to validate the controller's own wording.
 
+// NOTE: Whisper does German compound-word welding on the fly. We have
+// observed "Rollhalt Piste" → "Rollhaltpiste", "Endanflug Piste" →
+// "Endanflugpiste", and similar in actual transcripts. To stay
+// useful as a BZF trainer (rather than punishing pronunciation that
+// only Whisper would dislike) the runway matcher therefore drops the
+// leading word boundary on "piste" — any token that ENDS in "piste"
+// followed by a runway designator counts as a runway mention. The
+// QNH / squawk / frequency tokens do not have a known compound-form
+// in the German aviation register and keep the stricter boundary.
+
 bool tower_has_qnh(const std::string &lc) {
-  // "qnh 1013" / "qnh 998" — case-insensitive, optional separator
+  // "qnh 1013" / "qnh 998" — case-insensitive
   static const std::regex re(R"(\bqnh\s+\d{3,4}\b)");
   return std::regex_search(lc, re);
 }
 
 bool tower_has_runway(const std::string &lc) {
-  // "piste 25" / "piste 07L" — case-insensitive
-  static const std::regex re(R"(\bpiste\s+\d{1,2}[lrc]?\b)");
+  // Match "piste 25" / "piste 07L" with NO leading boundary, so Whisper-
+  // welded compounds like "rollhaltpiste 06" or "endanflugpiste 24"
+  // are still recognised. Trailing boundary stays for "06" vs. "067".
+  static const std::regex re(R"(piste\s+\d{1,2}[lrc]?\b)");
   return std::regex_search(lc, re);
 }
 
