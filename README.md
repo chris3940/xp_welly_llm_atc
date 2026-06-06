@@ -44,6 +44,26 @@ low-confidence fallback to a local Llama 3.2 3B classifier, OpenAI's
 responses synthesised locally with Piper or via OpenAI's / Mistral's
 TTS API.
 
+## Table of Contents
+
+- [Features](#features)
+- [Hardware Requirements](#hardware-requirements)
+- [Software Requirements](#software-requirements)
+- [Quick Start](#quick-start-pre-built-release)
+- [Backend Modes](#backend-modes)
+- [Radio glitch recovery (TTS-failure guard)](#radio-glitch-recovery-tts-failure-guard)
+- [Build From Source](#build-from-source)
+- [Local Inference Models](#local-inference-models)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Make Targets](#make-targets)
+- [Known Limitations](#known-limitations)
+- [FAQ](#faq)
+- [Project Structure](#project-structure)
+- [Third-Party Dependencies](#third-party-dependencies)
+- [Development Workflow](#development-workflow)
+- [License](#license)
+
 ## Features
 
 - **Push-to-Talk** — bound via X-Plane command binding (keyboard or joystick)
