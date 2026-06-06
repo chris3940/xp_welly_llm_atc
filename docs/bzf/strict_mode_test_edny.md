@@ -176,13 +176,58 @@ Jetzt **starten**.
 
 ### Phase 4 — Platzrundenmeldungen
 
-Wenn du im Gegenanflug bist (Pattern-Höhe ≈ 2500 ft MSL):
+EDNY-Pattern Piste 24: **linke Platzrunde**, Pattern-Höhe ca. 2500 ft MSL
+(≈ 1100 ft AGL). Geometrie nacheinander: Pistenheading 240° → Querabflug
+(Crosswind) 150° → Gegenanflug (Downwind) 060° → Queranflug (Base) 330°
+→ Endanflug (Final) 240°. Bei Piste 06 alles spiegelverkehrt (Pattern
+ebenfalls links).
 
-**Schritt 4 — Gegenanflug melden**
+**Wann genau „Mitte Gegenanflug" melden — die kurze Antwort:**
+
+Ja, genau richtig — **abeam der Pistenmitte**. Konkret:
+
+- Du fliegst parallel zur Piste in entgegengesetzter Richtung (bei Piste 24 also Heading ~060°).
+- Du bist seitlich der **Pistenmitte / des Aufsetzpunkts** (Querversatz typisch
+  0,5–1 NM, ca. 0,9–1,9 km — nicht weiter, sonst wird der Queranflug zu lang).
+- Höhe stabil auf Pattern-Höhe (~2500 ft MSL), Drehzahl/Geschwindigkeit für
+  Downwind eingestellt.
+- Konfiguration: bei der DV20 typisch Klappen 0 oder T/O, Speed ~80 kt.
+
+Faustregel: Sobald du den **Pistenanfang querab links unter Dir hast** (du
+schaust zum linken Fenster raus und siehst Piste 24's Schwelle abeam), bist
+Du in der Mitte des Gegenanflugs.
+
+Praktisch im X-Plane: schau auf die G1000 / NAV-Map. Wenn der Pistenpunkt im
+Karten-Overlay 90° links neben deinem Flugzeug-Symbol liegt, bist Du am
+Meldepunkt.
+
+**Schritt 4 — Gegenanflug melden (an der Pistenmitte abeam)**
 - **Du:** „Friedrichshafen Tower, Hotel Bravo Delta Sierra Victor, Gegenanflug Piste 24."
 - **Tower:** „Hotel Bravo Delta Sierra Victor, Nummer eins, Piste 24, weiter Anflug,
   melden Sie Endanflug." (oder Variante)
 - **Pflicht-Readback:** Callsign + Piste (keine neue QNH/Freq-Vergabe)
+- **Du:** „Endanflug melden, Piste 24, Hotel Bravo Delta Sierra Victor."
+- **NfL-Anker:** ANLAGE 1.4.16 a) — Position- und Meldung-Sequenz.
+
+> **Was wenn Du den Meldepunkt verpasst?** Wenn Du erst spät im
+> Gegenanflug merkst, dass Du nicht gemeldet hast, melde trotzdem — sag
+> dann *„später Gegenanflug, Piste 24"* statt *„Mitte Gegenanflug"*. Strict-
+> Mode ist toleriert hier: REPORT_POSITION_DOWNWIND akzeptiert
+> early/mid/late ohne Korrektur.
+
+**Wann genau „Endanflug" melden:**
+
+Endanflug ist die Position **nach der 4. Kurve auf der Pistenmittellinie**,
+typisch **1,5–2 NM vor der Schwelle**. Konkret:
+
+- Du hast die letzte Kurve geflogen und bist auf Pisten-Heading (240°).
+- Du bist auf der verlängerten Pistenmittellinie.
+- Höhe sinkend auf Anflugprofil (ca. 3°-Gleitpfad — bei 1,5 NM out
+  ≈ 700 ft AGL).
+- Konfiguration: Klappen Landing, Speed Approach.
+
+Faustregel: Sobald Du nach der 4. Kurve **die Piste vor Dir hast und die
+Achse stabil ist**, bist Du im Endanflug.
 
 **Schritt 5 — Endanflug melden**
 - **Du:** „Endanflug Piste 24, Hotel Bravo Delta Sierra Victor."

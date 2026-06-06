@@ -96,7 +96,7 @@
     { "intent": "SELF_ANNOUNCE", "confidence": 0.90, "any": ["traffic", "verkehr"] },
 
     {
-      "_note": "Readback. DE phrases: 'verstanden', 'rollen Sie' (ATC instruction echo), 'Rollhalt'/'Haltepunkt', 'kontaktiere', 'Startfreigabe'/'Landefreigabe'.",
+      "_note": "Readback. DE phrases: 'verstanden', 'rollen Sie' (ATC instruction echo), 'Rollhalt'/'Haltepunkt', 'kontaktiere', 'Startfreigabe'/'Landefreigabe'. Also the compact Tower echo phrases 'Start frei' (take-off clearance readback) and 'Landung frei' (landing clearance readback) — Whisper renders the Tower's wording verbatim, so the pilot's repeat-back shows up as the same short tokens. A post-landing adjustment below demotes 'Landung frei' to RUNWAY_VACATED when at_airport_after_landing fires.",
       "intent": "READBACK",
       "confidence": 0.90,
       "any": [
@@ -132,6 +132,8 @@
         "hold position",
         "halte position",
         "position halten",
+        "landung frei",
+        "start frei",
         { "all": ["rollen sie", { "any": ["ueber", "über", "via"] }] },
         { "all": ["rollen sie", { "any": ["haltepunkt", "rollhalt"] }] },
         { "all": ["taxi", " via "] },
@@ -218,7 +220,7 @@
     },
 
     {
-      "_note": "Runway-vacated. DE: 'Piste frei' (free), 'Piste verlassen' (left), 'Piste geraeumt' (cleared). Guards prevent 'Startfreigabe Piste 24' from matching.",
+      "_note": "Runway-vacated. DE: 'Piste frei' (free), 'Piste verlassen' (left), 'Piste geraeumt' (cleared). Pilots in real BZF traffic say 'Piste 06 frei' with the runway number in between, so we also accept 'piste' + 'frei' as separate tokens. 'landung'/'start' guards keep the Tower-echo readbacks ('Landung frei', 'Start frei') out — those are handled by READBACK above.",
       "intent": "RUNWAY_VACATED",
       "confidence": 0.90,
       "any": [
@@ -228,6 +230,10 @@
         "piste geraeumt",
         "piste geräumt",
         "habe die piste verlassen",
+        { "all": ["piste", "frei"],
+          "none": ["landung", "start"] },
+        { "all": ["piste", "verlassen"],
+          "none": ["landung", "start"] },
         { "all": ["clear", "runway"],
           "none": ["for take", "takeoff", "landing", "land"] },
         { "all": ["left", "runway"], "none": ["downwind", "base", "gegenanflug", "queranflug"] }
@@ -430,6 +436,12 @@
       "_note": "Post-landing 'request taxi' / 'rollen' is a taxi-to-apron request after just_landed window.",
       "if": { "intent": "REQUEST_TAXI", "require_context_flag": "just_landed" },
       "set_intent": "REQUEST_TAXI_PARKING"
+    },
+    {
+      "_note": "Post-landing Whisper mishearing: the Tower's 'Landung frei' clearance bleeds into the audio context and Whisper renders the pilot's 'Piste frei' vacated call as 'Landung frei' instead. While we are on the ground after a landing without a new departure cycle, treat the READBACK match on 'landung frei' as a fumbled vacated report and demote to RUNWAY_VACATED. State window (at_airport_after_landing) instead of the 120 s just_landed clock so a long roll-out plus taxi-back to a far exit still hits the demotion.",
+      "if": { "intent": "READBACK", "text_contains": "landung frei",
+              "require_context_flag": "at_airport_after_landing" },
+      "set_intent": "RUNWAY_VACATED"
     }
   ]
 }
