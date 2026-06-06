@@ -29,28 +29,23 @@ size_t write_to_string(char *ptr, size_t size, size_t nmemb, void *userdata) {
   return bytes;
 }
 
-std::string trim(const std::string &s) {
-  size_t lo = 0;
-  size_t hi = s.size();
-  while (lo < hi && std::isspace(static_cast<unsigned char>(s[lo])))
-    ++lo;
-  while (hi > lo && std::isspace(static_cast<unsigned char>(s[hi - 1])))
-    --hi;
-  return s.substr(lo, hi - lo);
-}
-
-// Split airport_context on commas, drop empty tokens, trim whitespace.
+// Split airport_context on commas and whitespace, drop empty tokens.
 // Each non-empty token becomes a separate context_bias[] multipart
 // field. Keeps short, distinct tokens (ICAO code, runway, city) as
 // independent bias hints rather than one long string.
+// Mistral requires each context_bias entry to match ^[^,\s]+$, so a
+// single token must not contain whitespace either.
 std::vector<std::string> split_context(const std::string &s) {
   std::vector<std::string> out;
   size_t lo = 0;
   for (size_t i = 0; i <= s.size(); ++i) {
-    if (i == s.size() || s[i] == ',') {
-      std::string token = trim(s.substr(lo, i - lo));
-      if (!token.empty())
-        out.push_back(std::move(token));
+    const bool at_end = (i == s.size());
+    const bool is_delim =
+        !at_end && (s[i] == ',' ||
+                    std::isspace(static_cast<unsigned char>(s[i])));
+    if (at_end || is_delim) {
+      if (i > lo)
+        out.emplace_back(s.substr(lo, i - lo));
       lo = i + 1;
     }
   }
