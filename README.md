@@ -545,10 +545,32 @@ Das DE-Profil orientiert sich an der NfL Sprechfunk 2024 (DACH-VFR-Phraseologie)
 Keine offizielle Zertifizierung, kein Prüfungsersatz — Korrekturen von BZF-Inhabern
 ausdrücklich willkommen.
 
+**Stand der Umsetzung** (BZF-Coverage-Matrix Re-Anchor 2026-06-05):
+
+- **Wortlaut-Korrekturen (Bucket B)** — fünf NfL-Patches im `de`-Profil: Funkprobe-
+  Antwort „Höre Sie fünf.", Touch-and-Go-Templates „frei zum Aufsetzen und
+  Durchstarten" (3×), Pilot-Keyword „aufsetzen und durchstarten", Frequenzwechsel-
+  Genehmigung „Verlassen der Frequenz genehmigt" (2×), Fallback „wiederholen Sie"
+  statt „sagen Sie nochmals" (3×, NfL §18 c) Nr. 4).
+- **Callsign-Aussprache verifiziert (Bucket C)** — `de_phraseology::expand_callsign_phonetic()`
+  expandiert D-/HB-/N-prefix ziffernweise (z. B. `N123AB` → „November eins zwo
+  drei Alfa Bravo"), abgesichert durch 7 Catch2-Tests in `tests/test_de_phraseology.cpp`.
+- **Strict-Mode-MVP (Bucket A)** — Settings-Toggle `bzf_strict_mode` (DE-only, Default
+  aus), neuer SDK-freier `src/atc/bzf_compliance.{hpp,cpp}`, `apply_bzf_strict_check()`-
+  Hook im State-Machine mit `last_clearance_text_`-Tracking. Greift beim READBACK-
+  Intent gegen die NfL §25 b) Nr. 1 Pflichtliste (Piste, QNH, Frequenz, Squawk,
+  Rufzeichen) — 18 Catch2-Tests in `tests/test_bzf_compliance.cpp`.
+
 → Die [BZF-Coverage-Matrix](docs/bzf/bzf_coverage.md) listet 60 Pflichtelemente in 16
-Sektionen mit `file:line`-Mapping in den Code. **BZF-II-Inhaber gesucht**: pro
-Matrix-Zeile ein GitHub-Issue (z. B. „Row 1.2: …") mit NfL-§-Verweis und ggf.
-Wortlaut-Vorschlag genügt als Beitrag — kein Code-Wissen nötig.
+Sektionen mit `file:line`-Mapping in den Code und führt den offenen Bucket-Backlog.
+NfL-Quelltexte (DFS Sprechfunk 2024, BNetzA-Prüfungsfragen 2024, NfL Funk Teil B
+2010) liegen unter [`docs/bzf/`](docs/bzf/) als reine Text-Dumps zur Verifikation;
+ein dokumentierter Strict-Mode-Bug-Repro für EDNY Friedrichshafen steht in
+[`docs/bzf/strict_mode_test_edny.md`](docs/bzf/strict_mode_test_edny.md).
+
+**BZF-II-Inhaber gesucht**: pro Matrix-Zeile ein GitHub-Issue (z. B. „Row 1.2: …")
+mit NfL-§-Verweis und ggf. Wortlaut-Vorschlag genügt als Beitrag — kein Code-Wissen
+nötig.
 
 | Limitation | Impact | Effort |
 |---|---|---|
