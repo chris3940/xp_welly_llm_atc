@@ -128,13 +128,20 @@ set(SPIKES_DIR "${CMAKE_SOURCE_DIR}/spikes")
 if(XPWELLYS_USE_LOCAL_INFERENCE)
     message(STATUS "Building with local inference (whisper + llama + Piper)")
 
-    # --- shared ggml / metal options (apply to whichever subdir wins the ggml
-    # add_subdirectory race) ---
+    # --- shared ggml options ---
     set(BUILD_SHARED_LIBS           OFF CACHE BOOL "" FORCE)
-    set(GGML_METAL                  ON  CACHE BOOL "" FORCE)
-    set(GGML_METAL_EMBED_LIBRARY    ON  CACHE BOOL "" FORCE)
-    set(GGML_ACCELERATE             ON  CACHE BOOL "" FORCE)
     set(GGML_BLAS                   OFF CACHE BOOL "" FORCE)
+    if(APPLE)
+        set(GGML_METAL                  ON  CACHE BOOL "" FORCE)
+        set(GGML_METAL_EMBED_LIBRARY    ON  CACHE BOOL "" FORCE)
+        set(GGML_ACCELERATE             ON  CACHE BOOL "" FORCE)
+    else()
+        # Linux: CPU-only, no Metal / Accelerate
+        set(GGML_METAL                  OFF CACHE BOOL "" FORCE)
+        set(GGML_METAL_EMBED_LIBRARY    OFF CACHE BOOL "" FORCE)
+        set(GGML_ACCELERATE             OFF CACHE BOOL "" FORCE)
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    endif()
 
     # --- llama.cpp (provides `ggml`, `llama`, `common`) ---
     set(LLAMA_BUILD_COMMON       ON  CACHE BOOL "" FORCE)
@@ -164,11 +171,17 @@ if(XPWELLYS_USE_LOCAL_INFERENCE)
         "${CMAKE_BINARY_DIR}/espeak_ng-install/share/espeak-ng-data"
         CACHE PATH "Path to espeak-ng-data used at runtime (dev fallback)")
 
-    # Path to onnxruntime prebuilt — we copy the dylib next to the .xpl so it
-    # resolves through @loader_path with no DYLD_LIBRARY_PATH gymnastics.
-    set(ONNXRUNTIME_LIB_DIR
-        "${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/lib/onnxruntime-osx-arm64-1.22.0/lib"
-        CACHE PATH "Directory holding libonnxruntime.<ver>.dylib")
+    # Path to onnxruntime prebuilt — staged next to the .xpl so it
+    # resolves through @loader_path / $ORIGIN with no gymnastics.
+    if(APPLE)
+        set(ONNXRUNTIME_LIB_DIR
+            "${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/lib/onnxruntime-osx-arm64-1.22.0/lib"
+            CACHE PATH "Directory holding libonnxruntime.<ver>.dylib")
+    else()
+        set(ONNXRUNTIME_LIB_DIR
+            "${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/lib/onnxruntime-linux-x64-1.22.0/lib"
+            CACHE PATH "Directory holding libonnxruntime.so")
+    endif()
 else()
     message(STATUS "Building OpenAI-only (no whisper/llama/piper)")
 endif()
