@@ -2134,6 +2134,20 @@ static void draw_airport_tab(const xplane_context::XPlaneContext &ctx) {
 
   // Pilot action buttons
   draw_pilot_actions(ctx);
+
+  // Last ATC response — lives at the bottom of the Main tab so it stays
+  // visible while the pilot picks actions or scans frequencies. Moved
+  // here from the always-visible region below EndTabBar() to avoid
+  // doubling the Tower line under the Transcript tab.
+  ImGui::Separator();
+  ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "%s",
+                     ui_strings::tr("panel.last_atc_header"));
+  std::string last_atc = atc_session::last_atc_response();
+  if (!last_atc.empty()) {
+    ImGui::TextWrapped("%s", last_atc.c_str());
+  } else {
+    ImGui::TextDisabled("%s", ui_strings::tr("panel.no_atc_response"));
+  }
 }
 
 // ── En-Route tab content ────────────────────────────────────────
@@ -2416,8 +2430,10 @@ static void draw_atc_panel() {
 
     // Tab bar
     if (ImGui::BeginTabBar("ATC_Tabs")) {
-      // Airport tab
-      if (ImGui::BeginTabItem(ui_strings::tr("tab.airport"))) {
+      // Main tab — airport overview, frequencies, pilot actions,
+      // last ATC response. Renamed from "Airport" because the content
+      // is broader than just the airport (see plan).
+      if (ImGui::BeginTabItem(ui_strings::tr("tab.main"))) {
         draw_airport_tab(ctx);
         ImGui::EndTabItem();
       }
@@ -2459,18 +2475,6 @@ static void draw_atc_panel() {
       }
 
       ImGui::EndTabBar();
-    }
-
-    ImGui::Separator();
-
-    // Last ATC response (always visible below tabs)
-    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "%s",
-                       ui_strings::tr("panel.last_atc_header"));
-    std::string last_atc = atc_session::last_atc_response();
-    if (!last_atc.empty()) {
-      ImGui::TextWrapped("%s", last_atc.c_str());
-    } else {
-      ImGui::TextDisabled("%s", ui_strings::tr("panel.no_atc_response"));
     }
   }
   ImGui::End();
@@ -2777,6 +2781,25 @@ static int draw_phase_cb(XPLMDrawingPhase, int, void *) {
   if (!visible && !atc_panel_visible_ && window_id) {
     XPLMSetWindowIsVisible(window_id, 0);
     XPLMTakeKeyboardFocus(nullptr);
+  }
+
+  // Dynamic XPLM keyboard focus management. The static
+  // XPLMTakeKeyboardFocus calls in toggle() / toggle_atc_panel() only
+  // run on window open/close — once a text-input widget appears later
+  // (e.g. clicking into Debug-Texteingabe in the ATC panel after the
+  // main window was closed), the capture window has no focus and the
+  // keystrokes never reach wnd_key_cb. Mirror ImGui's per-frame
+  // `WantTextInput` onto the XPLM focus state so the input field works
+  // independently of which window is open, AND so X-Plane command
+  // bindings (PTT, autopilot) keep firing when no text widget is
+  // active.
+  if (window_id && (visible || atc_panel_visible_)) {
+    bool want_text = ImGui::GetIO().WantTextInput;
+    bool have_focus = XPLMHasKeyboardFocus(window_id) != 0;
+    if (want_text && !have_focus)
+      XPLMTakeKeyboardFocus(window_id);
+    else if (!want_text && have_focus)
+      XPLMTakeKeyboardFocus(nullptr);
   }
 
   ImGui::Render();

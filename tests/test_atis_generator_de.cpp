@@ -164,12 +164,12 @@ TEST_CASE("DE ATIS: normalized broadcast carries BZF phrasing",
     auto raw = atis_generator::generate_atis_text(edny_ctx());
     auto spoken = de_phraseology::normalize_for_speech(raw);
 
-    // Piste 25 -> Piste zwo fuenf
-    REQUIRE(contains(spoken, "Piste zwo fuenf in Betrieb"));
+    // Piste 25 -> Piste zwo fünf (UTF-8 umlaut from restore_umlaute pass)
+    REQUIRE(contains(spoken, "Piste zwo fünf in Betrieb"));
     // QNH 1013 -> QNH eins null eins drei Hektopascal (unit auto-appended)
     REQUIRE(contains(spoken, "QNH eins null eins drei Hektopascal"));
-    // 3500 Fuss -> drei tausend fuenfhundert Fuss
-    REQUIRE(contains(spoken, "drei tausend fuenfhundert Fuss"));
+    // 3500 Fuss -> drei tausend fünfhundert Fuß
+    REQUIRE(contains(spoken, "drei tausend fünfhundert Fuß"));
     // Wind 240 Grad 8 Knoten -> ziffernweise both sides
     REQUIRE(contains(spoken,
                      "Wind zwo vier null Grad acht Knoten"));

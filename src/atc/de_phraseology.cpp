@@ -444,6 +444,97 @@ std::string expand_sequence(const std::string &s) {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Pass: restore UTF-8 umlauts on a curated word list. The DE templates
+// and the rest of this normalizer emit ASCII stand-ins ("fuenf",
+// "hoeren", "ueber") to keep XPLMDebugString / ImGui safe. Cloud TTS
+// (Mistral Voxtral, OpenAI tts-1) however reads "hoeren" as
+// "h-o-e-r-e-n" because the digraphs are not pronunciation tokens —
+// sounds like "ein Chinese der Deutsch spricht und die Silben
+// verschluckt" (user feedback). Substituting "hören" yields the
+// proper /ˈhøːʁən/ phoneme.
+//
+// Substitution is word-boundary aware (no inside-word matches) and
+// case-sensitive — both upper- and lower-case forms must be listed
+// explicitly. Idempotent: a second pass finds the UTF-8 forms in the
+// output and matches nothing (the source column is pure ASCII).
+//
+// This pass runs ONLY in the TTS pipeline (via normalize_for_speech).
+// The original ASCII text is what the transcript / Log.txt show, so
+// [[feedback_xplane_log_ascii]] stays intact.
+// ────────────────────────────────────────────────────────────────────
+std::string restore_umlaute(const std::string &s) {
+  // Curated map: every entry must be a complete ASCII word that appears
+  // in DE templates or in normalize_for_speech output. Longer compounds
+  // before their roots so a longest-match-first walk picks them up
+  // before the shorter prefix steals the boundary.
+  struct Entry {
+    const char *ascii;
+    const char *utf8;
+  };
+  static const std::array<Entry, 22> kMap = {{
+      // longest first
+      {"Hoehenmessereinstellung", "Höhenmessereinstellung"},
+      {"Platzrundenhoehe", "Platzrundenhöhe"},
+      {"Wiederhoeren", "Wiederhören"},
+      {"fuenfhundert", "fünfhundert"},
+      {"vollstaendige", "vollständige"},
+      {"zurueckliest", "zurückliest"},
+      {"bestaetigen", "bestätigen"},
+      {"Bestaetigen", "Bestätigen"},
+      {"vollstaendig", "vollständig"},
+      {"Vollstaendig", "Vollständig"},
+      {"zurueck", "zurück"},
+      {"Zurueck", "Zurück"},
+      {"hoeren", "hören"},
+      {"Hoeren", "Hören"},
+      {"Hoehen", "Höhen"},
+      {"Hoehe", "Höhe"},
+      {"fuenf", "fünf"},
+      {"Fuenf", "Fünf"},
+      {"ueber", "über"},
+      {"Ueber", "Über"},
+      {"Fuss", "Fuß"},
+      {"fuer", "für"},
+  }};
+
+  std::string out;
+  out.reserve(s.size() + 16);
+  std::size_t i = 0;
+  while (i < s.size()) {
+    bool matched = false;
+    for (const auto &e : kMap) {
+      std::size_t klen = 0;
+      while (e.ascii[klen])
+        ++klen;
+      if (i + klen > s.size())
+        continue;
+      if (!boundary_before(s, i))
+        continue;
+      bool eq = true;
+      for (std::size_t k = 0; k < klen; ++k) {
+        if (s[i + k] != e.ascii[k]) {
+          eq = false;
+          break;
+        }
+      }
+      if (!eq)
+        continue;
+      if (!boundary_after(s, i + klen))
+        continue;
+      out += e.utf8;
+      i += klen;
+      matched = true;
+      break;
+    }
+    if (!matched) {
+      out += s[i];
+      ++i;
+    }
+  }
+  return out;
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Pass 10: "Alpha" -> "Alfa" at word boundary, only when preceded by
 // "Information " (the only place Alpha legitimately appears in DE
 // templates today is as the ATIS information letter).
@@ -473,6 +564,8 @@ std::string swap_information_alpha(const std::string &s) {
 
 // Lookup spoken digit word -> 0..9; -1 if not a digit word. Accepts
 // case-insensitive "Zwo", "ZWO", "zwo" and the BZF synonym "zwei".
+// Also accepts the UTF-8 umlaut form "fünf" so Debug-Texteingabe input
+// like "Piste zwo fünf" parses identically to "Piste zwo fuenf".
 int spoken_digit_value(const std::string &lc_word) {
   // Order matches kDigitWords (0..9). "zwei" is BZF-tolerant synonym for "zwo".
   static const std::array<const char *, 10> words = {
@@ -483,6 +576,8 @@ int spoken_digit_value(const std::string &lc_word) {
       return i;
   if (lc_word == "zwei")
     return 2;
+  if (lc_word == "fünf")
+    return 5;
   return -1;
 }
 
@@ -729,6 +824,11 @@ std::string normalize_for_speech(const std::string &text) {
   s = expand_clock(s);
   s = expand_sequence(s);
   s = swap_information_alpha(s);
+  // Last pass: ASCII -> UTF-8 umlaut restoration on a curated word
+  // list. TTS-only — the original ASCII output above is what callers
+  // see when they invoke this directly; the umlaut pass produces the
+  // string that actually goes to backends::tts::synthesize_async.
+  s = restore_umlaute(s);
   return s;
 }
 

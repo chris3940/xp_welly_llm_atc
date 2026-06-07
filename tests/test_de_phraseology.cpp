@@ -13,7 +13,7 @@ using de_phraseology::parse_spoken_number;
 // ── Pisten ───────────────────────────────────────────────────────────
 
 TEST_CASE("Piste: two-digit runway", "[de_phraseology][runway]") {
-    REQUIRE(normalize_for_speech("Piste 25") == "Piste zwo fuenf");
+    REQUIRE(normalize_for_speech("Piste 25") == "Piste zwo fünf");
 }
 
 TEST_CASE("Piste: leading-zero runway", "[de_phraseology][runway]") {
@@ -31,7 +31,7 @@ TEST_CASE("Piste: suffix C translates to mitte", "[de_phraseology][runway]") {
 TEST_CASE("Piste: already-German suffix stays intact",
           "[de_phraseology][runway]") {
     REQUIRE(normalize_for_speech("Piste 25 links") ==
-            "Piste zwo fuenf links");
+            "Piste zwo fünf links");
 }
 
 // ── QNH ──────────────────────────────────────────────────────────────
@@ -61,19 +61,19 @@ TEST_CASE("Frequency: 118.300", "[de_phraseology][frequency]") {
 
 TEST_CASE("Frequency: 119.450", "[de_phraseology][frequency]") {
     REQUIRE(normalize_for_speech("119.450") ==
-            "eins eins neun Komma vier fuenf null");
+            "eins eins neun Komma vier fünf null");
 }
 
 TEST_CASE("Frequency: 120.075", "[de_phraseology][frequency]") {
     REQUIRE(normalize_for_speech("auf 120.075") ==
-            "auf eins zwo null Komma null sieben fuenf");
+            "auf eins zwo null Komma null sieben fünf");
 }
 
 // ── Steuerkurse ──────────────────────────────────────────────────────
 
 TEST_CASE("Steuerkurs: 050 (already 3-digit)", "[de_phraseology][heading]") {
     REQUIRE(normalize_for_speech("Steuerkurs 050") ==
-            "Steuerkurs null fuenf null");
+            "Steuerkurs null fünf null");
 }
 
 TEST_CASE("Steuerkurs: 180", "[de_phraseology][heading]") {
@@ -112,29 +112,29 @@ TEST_CASE("Information letter: Alpha becomes Alfa",
 TEST_CASE("Altitude: 3500 Fuss uses tausend/hundert",
           "[de_phraseology][altitude]") {
     REQUIRE(normalize_for_speech("3500 Fuss") ==
-            "drei tausend fuenfhundert Fuss");
+            "drei tausend fünfhundert Fuß");
 }
 
 TEST_CASE("Altitude: 1000 Fuss is einfach tausend",
           "[de_phraseology][altitude]") {
-    REQUIRE(normalize_for_speech("1000 Fuss") == "eins tausend Fuss");
+    REQUIRE(normalize_for_speech("1000 Fuss") == "eins tausend Fuß");
 }
 
 TEST_CASE("Altitude: 2000 Fuss uses zwo tausend",
           "[de_phraseology][altitude]") {
-    REQUIRE(normalize_for_speech("2000 Fuss") == "zwo tausend Fuss");
+    REQUIRE(normalize_for_speech("2000 Fuss") == "zwo tausend Fuß");
 }
 
 TEST_CASE("Altitude: below 1000 falls back to ziffernweise",
           "[de_phraseology][altitude]") {
-    REQUIRE(normalize_for_speech("500 Fuss") == "fuenf null null Fuss");
+    REQUIRE(normalize_for_speech("500 Fuss") == "fünf null null Fuß");
 }
 
 // ── Wind ─────────────────────────────────────────────────────────────
 
 TEST_CASE("Wind: 250 Grad 15 Knoten", "[de_phraseology][wind]") {
     REQUIRE(normalize_for_speech("Wind 250 Grad 15 Knoten") ==
-            "Wind zwo fuenf null Grad eins fuenf Knoten");
+            "Wind zwo fünf null Grad eins fünf Knoten");
 }
 
 TEST_CASE("Wind: 240 Grad 8 Knoten (single-digit speed)",
@@ -162,7 +162,7 @@ TEST_CASE("Composite: initial-call-ground full template",
         "ueber Charlie, QNH 1018.";
     const std::string want =
         "Delta Echo Whiskey Lima Yankee, Friedrichshafen Turm, rollen "
-        "Sie zum Rollhalt Piste zwo vier ueber Charlie, QNH eins null "
+        "Sie zum Rollhalt Piste zwo vier über Charlie, QNH eins null "
         "eins acht Hektopascal.";
     REQUIRE(normalize_for_speech(in) == want);
 }
