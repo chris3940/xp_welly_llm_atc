@@ -256,8 +256,7 @@ bool verify_files() {
           if (counts_against_gate)
             logging::error("verify: %s -> %s (gates readiness)",
                            e.filename.c_str(),
-                           f.message.empty() ? "not ready"
-                                             : f.message.c_str());
+                           f.message.empty() ? "not ready" : f.message.c_str());
           break;
         }
       }
@@ -646,9 +645,8 @@ std::vector<ReadinessBlocker> Status::readiness_blockers() const {
                    {},
                    "STT backend not registered"});
   if (!backends::lm_ready())
-    out.push_back({ReadinessBlocker::Source::LmBackend,
-                   {},
-                   "LM backend not registered"});
+    out.push_back(
+        {ReadinessBlocker::Source::LmBackend, {}, "LM backend not registered"});
   if (!backends::tts_ready())
     out.push_back({ReadinessBlocker::Source::TtsBackend,
                    {},

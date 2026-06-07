@@ -292,8 +292,8 @@ static void dispatch_pilot_transcript(const std::string &text, float quality) {
 
   engine::process_transcript(
       std::move(in),
-      [freq_str_copy, is_pilot_row_written, pre_snap = std::move(pre_snap)](
-          const engine::Output &out) mutable {
+      [freq_str_copy, is_pilot_row_written,
+       pre_snap = std::move(pre_snap)](const engine::Output &out) mutable {
         last_pilot_message_ = out.parsed;
         if (out.response_text.empty()) {
           state_ = PTTState::IDLE;

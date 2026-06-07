@@ -1,7 +1,14 @@
 {
   "_comment": "Data-driven intent classification rules for EU/ICAO phraseology. Loaded by src/atc/intent_rules.cpp. Schema: see intent_rules.hpp. Order of `rules` is priority order — first match wins. `normalize` patches Whisper transcription quirks before matching. `adjustments` apply post-match overrides (intent reassignment + confidence mutation) in array order.",
 
-  "normalize": [],
+  "normalize": [
+    { "_note": "Whisper drops the first 'r' in 'departure' (observed LSZB log 2026-06-07).",
+      "from": "depature", "to": "departure" },
+    { "_note": "Whisper occasional slurred contraction of 'departure'.",
+      "from": "depatchure", "to": "departure" },
+    { "_note": "Whisper sometimes drops one 'n' in 'runway'.",
+      "from": "ruway", "to": "runway" }
+  ],
 
   "rules": [
     {
@@ -289,9 +296,15 @@
     },
 
     {
+      "_note": "Pure initial contact only. If the transmission already carries a clear follow-up token (ready / request taxi/landing/touch / downwind / base / final / vacated / leaving / wilco / roger / going around), the specific rule above must win. Without this guard 'Bern Tower N172SP ready for departure' in TOWER_CONTACT was misclassified as a fresh initial call.",
       "intent": "INITIAL_CALL_TOWER",
       "confidence": 0.85,
-      "any": [{ "has_facility": "tower" }]
+      "any": [{ "has_facility": "tower" }],
+      "none": [
+        "ready", "request taxi", "request landing", "request touch",
+        "downwind", "base", "final", "vacated",
+        "leaving", "wilco", "roger", "going around"
+      ]
     },
 
     {
@@ -345,6 +358,14 @@
       "_note": "Post-landing 'request taxi' is a taxi-to-apron request, not a pre-departure clearance request. State machine has just seen LANDING_CLEARED (or TOUCH_AND_GO_CLEARED) within the just_landed window.",
       "if": { "intent": "REQUEST_TAXI", "require_context_flag": "just_landed" },
       "set_intent": "REQUEST_TAXI_PARKING"
+    },
+    {
+      "_note": "Defense in depth: an INITIAL_CALL_* intent only makes phraseological sense in the initial-contact window (IDLE / GROUND_CONTACT / TAXI_CLEARED — the latter to cover the tower_only auto-advance hop). Outside it (TOWER_CONTACT, PATTERN_ENTRY, LANDING_CLEARED, EN_ROUTE, ...) the matcher landed on the wrong rule; demote confidence so the LM can reclassify.",
+      "if": {
+        "intent_in": ["INITIAL_CALL", "INITIAL_CALL_TOWER", "INITIAL_CALL_INBOUND"],
+        "current_state_not_in": ["IDLE", "GROUND_CONTACT", "TAXI_CLEARED"]
+      },
+      "set_confidence": 0.3
     }
   ]
 }

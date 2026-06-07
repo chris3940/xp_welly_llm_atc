@@ -973,17 +973,18 @@ static void draw_transcript_tab() {
                             ? cx.nearest_airport_name
                             : cx.nearest_airport_id;
       std::string prefix = apt.empty() ? "ATC" : apt + " ATC";
-      ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f),
-                         "[%02d:%02d%s] %s: %s", mins, secs, freq_tag.c_str(),
-                         prefix.c_str(), entry.text.c_str());
+      ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "[%02d:%02d%s] %s: %s",
+                         mins, secs, freq_tag.c_str(), prefix.c_str(),
+                         entry.text.c_str());
       break;
     }
     case atc_session::TranscriptKind::System:
       // Plugin-side notice (e.g. radio glitch / TTS failure). Distinct
       // dim-amber colour so the user reads "this is the plugin
       // talking" instead of "ATC just said something".
-      ImGui::TextColored(ImVec4(0.85f, 0.65f, 0.20f, 1.0f), "[%02d:%02d] -- %s --",
-                         mins, secs, entry.text.c_str());
+      ImGui::TextColored(ImVec4(0.85f, 0.65f, 0.20f, 1.0f),
+                         "[%02d:%02d] -- %s --", mins, secs,
+                         entry.text.c_str());
       break;
     }
   }
@@ -1012,7 +1013,8 @@ static void draw_transcript_tab() {
     // the chat-style typing UX without re-focusing while the tower is
     // still speaking.
     static bool refocus_input = false;
-    const bool can_send = atc_session::ptt_state() == atc_session::PTTState::IDLE;
+    const bool can_send =
+        atc_session::ptt_state() == atc_session::PTTState::IDLE;
     // InputText shrinks to leave room for [Paste] + [Send] on the right.
     // Cmd+V into an X-Plane ImGui InputText is unreliable (the sim's
     // command bindings swallow the event), so the Paste button reads

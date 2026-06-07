@@ -86,6 +86,14 @@ struct Adjustment {
   // "at_airport_after_landing" (state window: on ground, last landing in
   // history, no DEPARTURE_CLEARED since — survives long roll-out).
   std::string require_context_flag;
+  // Current ATC state conditions, read via atc_state_machine::get_state().
+  // Empty list = no constraint; non-empty list = state must (not) be in
+  // the list. Both lists empty by default → no-op for profiles that
+  // don't set them. Unknown state names are dropped at parse time with
+  // a warning; an empty parsed list after dropping behaves like the
+  // condition was never set.
+  std::vector<atc_state_machine::ATCState> current_state_in;
+  std::vector<atc_state_machine::ATCState> current_state_not_in;
   // Actions
   std::optional<PI> set_intent;
   std::optional<float> set_confidence;
@@ -372,6 +380,36 @@ static Adjustment parse_adjustment(const nlohmann::json &node) {
     if (cond.contains("require_context_flag") &&
         cond["require_context_flag"].is_string())
       a.require_context_flag = cond["require_context_flag"].get<std::string>();
+    auto parse_state_list = [](const nlohmann::json &arr,
+                               std::vector<atc_state_machine::ATCState> &out,
+                               const char *field) {
+      for (const auto &k : arr) {
+        if (!k.is_string())
+          continue;
+        const std::string name = k.get<std::string>();
+        atc_state_machine::ATCState s =
+            atc_state_machine::state_from_name(name);
+        // state_from_name returns IDLE for unknown strings — guard
+        // against typos so a malformed JSON entry can't silently
+        // match every adjustment via the IDLE fallback.
+        if (s == atc_state_machine::ATCState::IDLE && name != "IDLE") {
+          logging::info(
+              "Warning: unknown ATCState '%s' in adjustment %s — entry "
+              "dropped",
+              name.c_str(), field);
+          continue;
+        }
+        out.push_back(s);
+      }
+    };
+    if (cond.contains("current_state_in") &&
+        cond["current_state_in"].is_array())
+      parse_state_list(cond["current_state_in"], a.current_state_in,
+                       "current_state_in");
+    if (cond.contains("current_state_not_in") &&
+        cond["current_state_not_in"].is_array())
+      parse_state_list(cond["current_state_not_in"], a.current_state_not_in,
+                       "current_state_not_in");
   }
   if (node.contains("set_intent") && node["set_intent"].is_string()) {
     a.set_intent =
@@ -510,6 +548,24 @@ static bool adjustment_applies(const Adjustment &a,
       // Unknown flag — be conservative and reject so a typo in JSON
       // doesn't silently turn the rule into an unconditional match.
       return false;
+    }
+  }
+  if (!a.current_state_in.empty() || !a.current_state_not_in.empty()) {
+    const atc_state_machine::ATCState current = atc_state_machine::get_state();
+    if (!a.current_state_in.empty()) {
+      bool found = false;
+      for (auto s : a.current_state_in)
+        if (s == current) {
+          found = true;
+          break;
+        }
+      if (!found)
+        return false;
+    }
+    if (!a.current_state_not_in.empty()) {
+      for (auto s : a.current_state_not_in)
+        if (s == current)
+          return false;
     }
   }
   return true;
