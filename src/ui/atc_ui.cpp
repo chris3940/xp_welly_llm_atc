@@ -41,9 +41,11 @@
 #include "ui/clipboard.hpp"
 #include "ui/ui_strings.hpp"
 
+#if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/task.h>
 #include <mach/task_info.h>
+#endif
 
 #include <XPLMDataAccess.h>
 #include <XPLMDisplay.h>
@@ -197,10 +199,9 @@ static std::string format_bytes(uint64_t b) {
   return buf;
 }
 
-// Resident set size in bytes via Mach. Polled at most once a second
-// from the Models tab — the call itself is cheap (microseconds) but
-// not worth running every frame.
+// Resident set size in bytes. Polled at most once a second from the Models tab.
 static uint64_t resident_bytes() {
+#if defined(__APPLE__)
   mach_task_basic_info_data_t info{};
   mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
   if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
@@ -208,6 +209,24 @@ static uint64_t resident_bytes() {
     return info.resident_size;
   }
   return 0;
+#elif defined(__linux__)
+  // Read VmRSS from /proc/self/status
+  FILE *f = std::fopen("/proc/self/status", "r");
+  if (!f) return 0;
+  char line[128];
+  uint64_t rss = 0;
+  while (std::fgets(line, sizeof(line), f)) {
+    if (std::strncmp(line, "VmRSS:", 6) == 0) {
+      std::sscanf(line + 6, " %llu", (unsigned long long *)&rss);
+      rss *= 1024; // kB → bytes
+      break;
+    }
+  }
+  std::fclose(f);
+  return rss;
+#else
+  return 0;
+#endif
 }
 
 static const char *file_state_label(backends::loader::FileState s) {
@@ -1214,15 +1233,8 @@ static void draw_settings_tab() {
                    kBackendModeCount)) {
     settings::set_backend_mode(backend_mode_keys[backend_mode_selection]);
     settings::save();
-    // Tear down whatever was registered and re-run the loader so the
-    // newly-selected pipeline comes up. loader::stop() unregisters
-    // the backend pointers; start() reads settings::backend_mode()
-    // and instantiates accordingly.
     backends::loader::stop();
     backends::loader::start();
-    // A backend switch is an explicit "test the new pipeline" signal —
-    // drop the ATIS cooldown so the next tune-in plays immediately
-    // instead of waiting up to 120 s on the previous backend's timer.
     atc_session::reset_atis_cooldown();
   }
   if (ImGui::IsItemHovered()) {

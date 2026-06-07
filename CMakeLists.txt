@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.26)
-project(xp_wellys_atc CXX OBJCXX)
+# Objective-C++ is only available on macOS (for .mm sources).
+# Detect before project() to avoid requesting it on Linux.
+if(APPLE)
+    project(xp_wellys_atc CXX OBJCXX)
+else()
+    project(xp_wellys_atc CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -122,13 +128,25 @@ set(SPIKES_DIR "${CMAKE_SOURCE_DIR}/spikes")
 if(XPWELLYS_USE_LOCAL_INFERENCE)
     message(STATUS "Building with local inference (whisper + llama + Piper)")
 
-    # --- shared ggml / metal options (apply to whichever subdir wins the ggml
+    # Linux: all static libs linked into the shared .xpl need -fPIC.
+    if(UNIX AND NOT APPLE)
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    endif()
+
+    # --- shared ggml options (apply to whichever subdir wins the ggml
     # add_subdirectory race) ---
     set(BUILD_SHARED_LIBS           OFF CACHE BOOL "" FORCE)
-    set(GGML_METAL                  ON  CACHE BOOL "" FORCE)
-    set(GGML_METAL_EMBED_LIBRARY    ON  CACHE BOOL "" FORCE)
-    set(GGML_ACCELERATE             ON  CACHE BOOL "" FORCE)
     set(GGML_BLAS                   OFF CACHE BOOL "" FORCE)
+    if(APPLE)
+        set(GGML_METAL                  ON  CACHE BOOL "" FORCE)
+        set(GGML_METAL_EMBED_LIBRARY    ON  CACHE BOOL "" FORCE)
+        set(GGML_ACCELERATE             ON  CACHE BOOL "" FORCE)
+    else()
+        # Linux: CPU-only, no Metal / Accelerate
+        set(GGML_METAL                  OFF CACHE BOOL "" FORCE)
+        set(GGML_METAL_EMBED_LIBRARY    OFF CACHE BOOL "" FORCE)
+        set(GGML_ACCELERATE             OFF CACHE BOOL "" FORCE)
+    endif()
 
     # --- llama.cpp (provides `ggml`, `llama`, `common`) ---
     set(LLAMA_BUILD_COMMON       ON  CACHE BOOL "" FORCE)
@@ -158,13 +176,30 @@ if(XPWELLYS_USE_LOCAL_INFERENCE)
         "${CMAKE_BINARY_DIR}/espeak_ng-install/share/espeak-ng-data"
         CACHE PATH "Path to espeak-ng-data used at runtime (dev fallback)")
 
-    # Path to onnxruntime prebuilt — we copy the dylib next to the .xpl so it
-    # resolves through @loader_path with no DYLD_LIBRARY_PATH gymnastics.
-    set(ONNXRUNTIME_LIB_DIR
-        "${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/lib/onnxruntime-osx-arm64-1.22.0/lib"
-        CACHE PATH "Directory holding libonnxruntime.<ver>.dylib")
+    # Path to onnxruntime prebuilt — staged next to the .xpl so it
+    # resolves through @loader_path / $ORIGIN with no LD_LIBRARY_PATH gymnastics.
+    if(APPLE)
+        set(ONNXRUNTIME_LIB_DIR
+            "${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/lib/onnxruntime-osx-arm64-1.22.0/lib"
+            CACHE PATH "Directory holding libonnxruntime.<ver>.dylib")
+    else()
+        set(ONNXRUNTIME_LIB_DIR
+            "${SPIKES_DIR}/spike_piper/third_party/piper1-gpl/libpiper/lib/onnxruntime-linux-x64-1.22.0/lib"
+            CACHE PATH "Directory holding libonnxruntime.so")
+    endif()
 else()
     message(STATUS "Building OpenAI-only (no whisper/llama/piper)")
+endif()
+
+# ── Platform-specific plugin sources ─────────────────────────────────────────
+# Select the correct mic-permission and clipboard TUs for each platform.
+# On macOS these are Objective-C++ .mm files; on Linux they are plain .cpp stubs.
+if(APPLE)
+    set(MIC_PERMISSION_SRC src/audio/mic_permission.mm)
+    set(CLIPBOARD_SRC      src/ui/clipboard.mm)
+elseif(UNIX AND NOT APPLE)
+    set(MIC_PERMISSION_SRC src/audio/mic_permission_linux.cpp)
+    set(CLIPBOARD_SRC      src/ui/clipboard_linux.cpp)
 endif()
 
 # ── Engine OBJECT library (X-Plane SDK-frei) ─────────────────────────────────
@@ -218,11 +253,14 @@ target_include_directories(xp_atc_engine PRIVATE
 target_compile_definitions(xp_atc_engine PRIVATE
     XP_WELLYS_ATC_VERSION="${VERSION_STRING}"
 )
-if(APPLE)
+if(UNIX)
     target_compile_options(xp_atc_engine PRIVATE
         -Wall -Wextra -Wno-unused-parameter
         -fvisibility=hidden
     )
+endif()
+if(UNIX AND NOT APPLE)
+    set_target_properties(xp_atc_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 if(XP_WELLYS_ATC_SANITIZE)
     target_compile_options(xp_atc_engine PRIVATE
@@ -240,12 +278,12 @@ add_library(xp_wellys_atc MODULE
     src/audio/ptt_input.cpp
     src/audio/audio_recorder.cpp
     src/audio/audio_player.cpp
-    src/audio/mic_permission.mm
+    ${MIC_PERMISSION_SRC}
     # OpenAI cloud clients — libcurl + nlohmann/json, never include
     # any local backend header. Each TU carries a kBackendTag
     # constant so every inference call shows up under
     # [STT-OPENAI] / [LM-OPENAI] / [TTS-OPENAI] in Log.txt.
-    # Always compiled — even in the Intel slice that does not have
+    # Always compiled — even in slices that do not have
     # the local backends, OpenAI is the only available path.
     src/backends/openai_common.cpp
     src/backends/openai_stt.cpp
@@ -273,10 +311,9 @@ add_library(xp_wellys_atc MODULE
     src/persistence/keychain.cpp
     src/ui/atc_ui.cpp
     src/ui/ui_strings.cpp
-    # NSPasteboard bridge — the ImGui platform backend in this
-    # plugin does not wire up a clipboard connector, so the Paste
-    # button has to read the system pasteboard via AppKit directly.
-    src/ui/clipboard.mm
+    # Platform clipboard bridge. On macOS reads NSPasteboard (AppKit);
+    # on Linux returns empty (stub) — see clipboard_linux.cpp.
+    ${CLIPBOARD_SRC}
     ${IMGUI_SOURCES}
 )
 
@@ -419,6 +456,66 @@ if(APPLE)
     endif()
 endif()
 
+# ── Linux plugin link + compile block ────────────────────────────────────────
+if(UNIX AND NOT APPLE)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PULSE REQUIRED libpulse-simple)
+    find_package(OpenSSL REQUIRED)
+
+    target_compile_definitions(xp_wellys_atc PRIVATE
+        APL=0 IBM=0 LIN=1
+        XPLM200=1 XPLM210=1 XPLM300=1 XPLM301=1 XPLM400=1
+        XP_WELLYS_ATC_VERSION="${VERSION_STRING}"
+    )
+    target_compile_options(xp_wellys_atc PRIVATE
+        -Wall -Wextra -Wno-unused-parameter
+        -fvisibility=hidden
+    )
+    target_include_directories(xp_wellys_atc PRIVATE
+        ${PULSE_INCLUDE_DIRS}
+    )
+
+    set(SDK_LIN_LIBS "${CMAKE_SOURCE_DIR}/sdk/Libraries/Lin")
+    target_link_libraries(xp_wellys_atc PRIVATE
+        "${SDK_LIN_LIBS}/XPLM_64.so"
+        CURL::libcurl
+        OpenSSL::Crypto
+        ${PULSE_LIBRARIES}
+    )
+
+    # $ORIGIN rpath: the plugin finds libpiper.so staged next to the .xpl.
+    if(XPWELLYS_USE_LOCAL_INFERENCE)
+        set_target_properties(xp_wellys_atc PROPERTIES
+            BUILD_WITH_INSTALL_RPATH FALSE
+            BUILD_RPATH "\$ORIGIN:${CMAKE_BINARY_DIR}:${ONNXRUNTIME_LIB_DIR}"
+            INSTALL_RPATH "\$ORIGIN"
+        )
+        target_link_libraries(xp_wellys_atc PRIVATE
+            whisper common llama piper
+        )
+        add_custom_command(TARGET xp_wellys_atc POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:piper>"
+                "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:piper>"
+            COMMENT "Staging libpiper.so alongside xp_wellys_atc.xpl"
+        )
+        add_custom_command(TARGET xp_wellys_atc POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_LIB_DIR}/libonnxruntime.so.1.22.0"
+                "${CMAKE_BINARY_DIR}/libonnxruntime.so.1.22.0"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_LIB_DIR}/libonnxruntime.so"
+                "${CMAKE_BINARY_DIR}/libonnxruntime.so"
+            COMMENT "Staging libonnxruntime.so alongside xp_wellys_atc.xpl"
+        )
+    else()
+        set_target_properties(xp_wellys_atc PROPERTIES
+            BUILD_WITH_INSTALL_RPATH FALSE
+            INSTALL_RPATH "\$ORIGIN"
+        )
+    endif()
+endif()
+
 # ── CLI Executable (ohne X-Plane) ────────────────────────────────────────────
 # Host-arch only — no need for universal binary on a dev tool. The
 # x_atc_engine OBJECT library is compiled for whatever
@@ -458,10 +555,18 @@ target_include_directories(atc_repl PRIVATE
 # though it never actually performs an HTTP transfer (no concrete
 # backend ever registers in the CLI).
 target_link_libraries(atc_repl PRIVATE CURL::libcurl)
-if(APPLE)
+if(UNIX AND NOT APPLE)
+    find_package(OpenSSL QUIET)
+    if(OpenSSL_FOUND)
+        target_link_libraries(atc_repl PRIVATE OpenSSL::Crypto)
+    endif()
+endif()
+if(UNIX)
     target_compile_options(atc_repl PRIVATE
         -Wall -Wextra -Wno-unused-parameter
     )
+endif()
+if(APPLE)
     set_target_properties(atc_repl PROPERTIES
         OSX_ARCHITECTURES "${CMAKE_HOST_SYSTEM_PROCESSOR}"
     )

@@ -65,6 +65,8 @@ static json default_config() {
       {"start_mode", "engines_running"},
       {"backend_mode", "local"},
       {"api_key_saved", false},
+      {"mistral_api_key_saved", false},
+      {"mistral_lm_model", "mistral-small-latest"},
       {"openai_stt_model", "whisper-1"},
       {"openai_lm_model", "gpt-4o-mini"},
       {"openai_tts_model", "tts-1"},
@@ -450,7 +452,7 @@ void set_start_mode(const std::string &v) {
     cfg["start_mode"] = "engines_running";
 }
 
-// ── Dual-backend settings ─────────────────────────────────────
+// ── Backend settings ───────────────────────────────────────────
 
 void set_backend_mode(const std::string &v) {
   if (v == "openai" || v == "mistral")
@@ -474,19 +476,17 @@ void set_openai_tts_voice_ground(const std::string &v) {
     cfg["openai_tts_voice_ground"] = v;
 }
 
+// OpenAI key
 bool save_api_key(const std::string &key) {
   if (!persistence::keychain::save(key)) {
-    XPLMDebugString("[xp_wellys_atc] Error: failed to save API key to "
-                    "Keychain\n");
+    XPLMDebugString("[xp_wellys_atc] Error: failed to save OpenAI API key\n");
     return false;
   }
   cfg["api_key_saved"] = true;
   save();
   return true;
 }
-
 std::string load_api_key() { return persistence::keychain::load(); }
-
 void delete_api_key() {
   persistence::keychain::remove();
   cfg["api_key_saved"] = false;

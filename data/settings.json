@@ -13,6 +13,8 @@
   "start_mode": "engines_running",
   "backend_mode": "local",
   "api_key_saved": false,
+  "mistral_api_key_saved": false,
+  "mistral_lm_model": "mistral-small-latest",
   "openai_stt_model": "whisper-1",
   "openai_lm_model": "gpt-4o-mini",
   "openai_tts_model": "tts-1",

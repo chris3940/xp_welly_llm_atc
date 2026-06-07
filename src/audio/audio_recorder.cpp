@@ -25,11 +25,15 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #if defined(__APPLE__)
 #include <AudioToolbox/AudioToolbox.h>
 #include <AudioUnit/AudioUnit.h>
+#elif defined(__linux__)
+#include <pulse/error.h>
+#include <pulse/simple.h>
 #endif
 
 namespace audio_recorder {
@@ -363,6 +367,10 @@ void stop_recording() {
     }
   }
 }
+
+#elif defined(__linux__)
+
+#include "audio/audio_recorder_linux.cpp"
 
 #else
 

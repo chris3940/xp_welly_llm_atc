@@ -1,7 +1,16 @@
 SHELL := /bin/bash
 
-XPLANE_ROOT := /Users/robertw/X-Plane 12
-PLUGIN_DIR  := $(XPLANE_ROOT)/Resources/available plugins/xp_wellys_atc
+OS := $(shell uname -s)
+
+ifeq ($(OS),Darwin)
+    XPLANE_ROOT ?= /Users/$(USER)/X-Plane 12
+    PLUGIN_DIR  := $(XPLANE_ROOT)/Resources/available plugins/xp_wellys_atc
+    PLUGIN_BIN_DIR := $(PLUGIN_DIR)/mac_x64
+else
+    XPLANE_ROOT ?= $(HOME)/X-Plane 12
+    PLUGIN_DIR  := $(XPLANE_ROOT)/Resources/plugins/xp_wellys_atc
+    PLUGIN_BIN_DIR := $(PLUGIN_DIR)/lin_x64
+endif
 
 SDK_SENTINEL    := sdk/XPLM/XPLMPlugin.h
 IMGUI_SENTINEL  := vendor/imgui/imgui.h
@@ -30,7 +39,8 @@ help:
 	@echo "  make                   Show this help (default)"
 	@echo "  make all               clean + format + build + lint"
 	@echo "  make setup             Init submodules + download X-Plane SDK, Dear ImGui, nlohmann/json, Catch2"
-	@echo "  make build             Build universal plugin (arm64 local+cloud, x86_64 cloud-only) -> build/xp_wellys_atc.xpl"
+	@echo "  make build             Build plugin -> build/xp_wellys_atc.xpl"
+	@echo "  make build CUDA=1      Linux only: build with NVIDIA CUDA GPU acceleration (requires cuda toolkit)"
 	@echo "  make repl              Build headless CLI -> build/atc_repl"
 	@echo "  make run-repl          Build + run the CLI (stdin transcripts)"
 	@echo "  make test              Run unit tests + scenario tests"
@@ -76,13 +86,14 @@ $(SDK_SENTINEL):
 	curl -fsSL "https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK430.zip" \
 	     -o "$$TMP/sdk.zip"; \
 	unzip -q "$$TMP/sdk.zip" -d "$$TMP/sdk_extracted"; \
-	mkdir -p sdk/XPLM sdk/XPWidgets sdk/Libraries/Win sdk/Libraries/Mac; \
+	mkdir -p sdk/XPLM sdk/XPWidgets sdk/Libraries/Win sdk/Libraries/Mac sdk/Libraries/Lin; \
 	find "$$TMP/sdk_extracted" -path "*/CHeaders/XPLM/*.h"   -exec cp {} sdk/XPLM/ \;; \
 	find "$$TMP/sdk_extracted" -path "*/CHeaders/Widgets/*.h" -exec cp {} sdk/XPWidgets/ \;; \
 	find "$$TMP/sdk_extracted" -path "*/Libraries/Win/*.lib"  -exec cp {} sdk/Libraries/Win/ \;; \
+	find "$$TMP/sdk_extracted" -path "*/Libraries/Lin/*.so"   -exec cp {} sdk/Libraries/Lin/ \;; \
 	cp -R "$$TMP/sdk_extracted"/*/Libraries/Mac/*.framework sdk/Libraries/Mac/ 2>/dev/null || \
 	find "$$TMP/sdk_extracted" -name "*.framework" -exec cp -R {} sdk/Libraries/Mac/ \;
-	@echo "SDK headers installed."
+	@echo "SDK headers and libraries installed."
 
 $(IMGUI_SENTINEL):
 	@echo "Downloading Dear ImGui v1.91.9..."
@@ -121,26 +132,25 @@ $(CATCH2_SENTINEL):
 	@echo "Catch2 installed."
 
 # ── Build ─────────────────────────────────────────────────────────────────────
-# Always produces a universal xp_wellys_atc.xpl that contains both an
-# arm64 slice (whisper.cpp + llama.cpp + Piper + OpenAI) and an x86_64
-# slice (OpenAI only — Metal + the onnxruntime prebuilt are Apple
-# Silicon only). The two slices share src/ and CMakeLists.txt but
-# differ via -DXPWELLYS_USE_LOCAL_INFERENCE.
+# macOS: produces a universal binary (arm64 local+cloud + x86_64 cloud-only)
+#        via two CMake configures + lipo merge.
+# Linux: single CMake configure (local+cloud), outputs lin_x64 .xpl.
 #
-# Strategy: two separate CMake configures (build-arm64/, build-x86_64/),
-# each producing its own .xpl, then lipo-merged into build/xp_wellys_atc.xpl.
-# The arm64 slice ships libpiper.dylib + libonnxruntime.dylib next to the
-# .xpl so they're picked up by @loader_path; the x86_64 slice has no
-# such dylibs to ship.
-#
-# `make install` copies build/xp_wellys_atc.xpl into the plugin dir
-# together with the staged dylibs.
-# `RELEASE_FLAG` is passed through to both CMake configure calls so the
-# GitHub Actions workflow can flip `-DRELEASE=ON` for tag-driven
-# release builds without duplicating the logic. Empty by default
-# (regular dev build); `release-build` sets it to `-DRELEASE=ON`.
+# RELEASE_FLAG is passed through to CMake so the GitHub Actions workflow
+# can flip -DRELEASE=ON for tag builds. Empty by default (dev build).
 RELEASE_FLAG ?=
 
+# GPU acceleration for Linux (NVIDIA CUDA). Set CUDA=1 on machines with an
+# NVIDIA GPU + CUDA toolkit installed (e.g. `make build CUDA=1`).
+# Required on the runtime machine — do not set when cross-compiling for a
+# different GPU. Leave unset for CPU-only builds (safe on any Linux machine).
+ifeq ($(CUDA),1)
+    CUDA_FLAG := -DGGML_CUDA=ON
+else
+    CUDA_FLAG :=
+endif
+
+ifeq ($(OS),Darwin)
 build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@echo "=== Building universal xp_wellys_atc (arm64 local+cloud, x86_64 cloud-only) ==="
 	@echo ""
@@ -166,9 +176,6 @@ build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
 	    build-arm64/xp_wellys_atc.xpl \
 	    build-x86_64/xp_wellys_atc.xpl \
 	    -output build/xp_wellys_atc.xpl
-	@# Stage the arm64 slice's dylibs next to the merged binary so
-	@# `make install` finds them where it expects. The x86_64 slice
-	@# has no dylib dependencies (cloud-only build).
 	@cp build-arm64/libpiper.dylib              build/
 	@cp build-arm64/libonnxruntime.1.22.0.dylib build/
 	@cp build-arm64/libonnxruntime.dylib        build/
@@ -177,6 +184,18 @@ build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
 	@file build/xp_wellys_atc.xpl
 	@lipo -info build/xp_wellys_atc.xpl
 	@echo "Done. Run 'make install' to deploy the universal .xpl."
+else
+build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+	@echo "=== Building xp_wellys_atc for Linux (local+cloud) ==="
+	cmake -B build -DCMAKE_BUILD_TYPE=Release $(RELEASE_FLAG) $(CUDA_FLAG) \
+	    -DXPWELLYS_USE_LOCAL_INFERENCE=ON \
+	    -DBUILD_TESTS=OFF \
+	    -Wno-dev
+	cmake --build build --parallel
+	@echo ""
+	@file build/xp_wellys_atc.xpl
+	@echo "Done. Run 'make install' to deploy the .xpl."
+endif
 
 # ── REPL (headless CLI) ───────────────────────────────────────────────────────
 repl: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
@@ -206,50 +225,8 @@ test-scenarios: repl
 	./build/atc_repl run testscripts/*.json
 
 # ── Install ───────────────────────────────────────────────────────────────────
-install:
-	@if [ ! -f "build/xp_wellys_atc.xpl" ]; then \
-	    echo "Plugin not built yet. Run 'make build' first."; exit 1; \
-	fi
-	@if [ ! -f "build/libpiper.dylib" ] || [ ! -f "build/libonnxruntime.1.22.0.dylib" ]; then \
-	    echo "Runtime dylibs missing in build/. Did 'make build' succeed?"; exit 1; \
-	fi
-	@echo "=== Installing xp_wellys_atc ==="
-	@mkdir -p "$(PLUGIN_DIR)/mac_x64"
-	@cp build/xp_wellys_atc.xpl "$(PLUGIN_DIR)/mac_x64/"
-	@cp build/libpiper.dylib "$(PLUGIN_DIR)/mac_x64/"
-	@cp build/libonnxruntime.1.22.0.dylib "$(PLUGIN_DIR)/mac_x64/"
-	@cp build/libonnxruntime.dylib "$(PLUGIN_DIR)/mac_x64/"
-	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl" 2>/dev/null || true
-	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/mac_x64/libpiper.dylib" 2>/dev/null || true
-	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/mac_x64/libonnxruntime.1.22.0.dylib" 2>/dev/null || true
-	@# Strip the dev-time rpaths (build/, source-tree onnxruntime path)
-	@# baked in by CMake and replace with @loader_path so the .xpl finds
-	@# the dylibs we just copied next to it.
-	@for rp in $$(otool -l "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl" \
-	    | awk '/LC_RPATH/{flag=1; next} flag && /path/ {print $$2; flag=0}'); do \
-	    install_name_tool -delete_rpath "$$rp" "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl" 2>/dev/null || true; \
-	done
-	@install_name_tool -add_rpath "@loader_path" "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl"
-	@codesign --force --deep --sign - "$(PLUGIN_DIR)/mac_x64/libonnxruntime.1.22.0.dylib"
-	@codesign --force --deep --sign - "$(PLUGIN_DIR)/mac_x64/libpiper.dylib"
-	@codesign --force --deep --sign - "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl"
-	@# Bundle espeak-ng-data (~19 MB) inside the plugin so Piper's
-	@# phonemizer finds its dictionary at runtime via the plugin-relative
-	@# path resolved by model_paths::espeakng_data_dir(). Models live in
-	@# Resources/models/ and are downloaded by the user on first launch
-	@# (P5); espeak-ng-data is part of the .xpl bundle, NOT downloaded.
-	@if [ -d "build/espeak_ng-install/share/espeak-ng-data" ]; then \
-	    mkdir -p "$(PLUGIN_DIR)/Resources/espeak-ng-data"; \
-	    rsync -a --delete \
-	        "build/espeak_ng-install/share/espeak-ng-data/" \
-	        "$(PLUGIN_DIR)/Resources/espeak-ng-data/"; \
-	    echo "Installed: $(PLUGIN_DIR)/Resources/espeak-ng-data/"; \
-	else \
-	    echo "WARNING: build/espeak_ng-install/share/espeak-ng-data missing — run make build first"; \
-	fi
-	@# Models live under Resources/models/. Created empty here so the
-	@# in-plugin downloader has a target dir on first launch even
-	@# before the user has downloaded anything.
+# Shared data install helper — copies JSON data files into the plugin dir.
+define INSTALL_DATA
 	@mkdir -p "$(PLUGIN_DIR)/Resources/models"
 	@mkdir -p "$(PLUGIN_DIR)/data"
 	@if [ ! -f "$(PLUGIN_DIR)/data/settings.json" ]; then \
@@ -275,29 +252,83 @@ install:
 	@cp data/atc_profiles/eu/intent_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/eu/"
 	@cp data/atc_profiles/eu/phraseology_hints.json "$(PLUGIN_DIR)/data/atc_profiles/eu/"
 	@cp data/atc_profiles/eu/ui_strings.json        "$(PLUGIN_DIR)/data/atc_profiles/eu/"
-	@echo "Installed: $(PLUGIN_DIR)/data/atc_profiles/eu/*.json"
 	@cp data/atc_profiles/us/atc_templates.json     "$(PLUGIN_DIR)/data/atc_profiles/us/"
 	@cp data/atc_profiles/us/flight_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/us/"
 	@cp data/atc_profiles/us/intent_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/us/"
 	@cp data/atc_profiles/us/phraseology_hints.json "$(PLUGIN_DIR)/data/atc_profiles/us/"
 	@cp data/atc_profiles/us/ui_strings.json        "$(PLUGIN_DIR)/data/atc_profiles/us/"
-	@echo "Installed: $(PLUGIN_DIR)/data/atc_profiles/us/*.json"
 	@cp data/atc_profiles/de/atc_templates.json     "$(PLUGIN_DIR)/data/atc_profiles/de/"
 	@cp data/atc_profiles/de/flight_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/de/"
 	@cp data/atc_profiles/de/intent_rules.json      "$(PLUGIN_DIR)/data/atc_profiles/de/"
 	@cp data/atc_profiles/de/phraseology_hints.json "$(PLUGIN_DIR)/data/atc_profiles/de/"
 	@cp data/atc_profiles/de/ui_strings.json        "$(PLUGIN_DIR)/data/atc_profiles/de/"
-	@echo "Installed: $(PLUGIN_DIR)/data/atc_profiles/de/*.json"
 	@mkdir -p "$(PLUGIN_DIR)/data/vrps"
 	@cp data/vrps/airport_vrps.json "$(PLUGIN_DIR)/data/vrps/"
-	@echo "Installed: $(PLUGIN_DIR)/data/vrps/airport_vrps.json"
-	@# Cleanup of legacy paths from pre-Phase-B installs (region-scoped
-	@# data + top-level JSONs from the era before the regions folder).
 	@rm -f "$(PLUGIN_DIR)/data/atc_templates.json" \
 	       "$(PLUGIN_DIR)/data/flight_rules.json" \
 	       "$(PLUGIN_DIR)/data/airport_vrps.json"
 	@rm -rf "$(PLUGIN_DIR)/data/regions"
+endef
+
+ifeq ($(OS),Darwin)
+install:
+	@if [ ! -f "build/xp_wellys_atc.xpl" ]; then \
+	    echo "Plugin not built yet. Run 'make build' first."; exit 1; \
+	fi
+	@if [ ! -f "build/libpiper.dylib" ] || [ ! -f "build/libonnxruntime.1.22.0.dylib" ]; then \
+	    echo "Runtime dylibs missing in build/. Did 'make build' succeed?"; exit 1; \
+	fi
+	@echo "=== Installing xp_wellys_atc (macOS) ==="
+	@mkdir -p "$(PLUGIN_BIN_DIR)"
+	@cp build/xp_wellys_atc.xpl "$(PLUGIN_BIN_DIR)/"
+	@cp build/libpiper.dylib "$(PLUGIN_BIN_DIR)/"
+	@cp build/libonnxruntime.1.22.0.dylib "$(PLUGIN_BIN_DIR)/"
+	@cp build/libonnxruntime.dylib "$(PLUGIN_BIN_DIR)/"
+	@xattr -dr com.apple.quarantine "$(PLUGIN_BIN_DIR)/xp_wellys_atc.xpl" 2>/dev/null || true
+	@xattr -dr com.apple.quarantine "$(PLUGIN_BIN_DIR)/libpiper.dylib" 2>/dev/null || true
+	@xattr -dr com.apple.quarantine "$(PLUGIN_BIN_DIR)/libonnxruntime.1.22.0.dylib" 2>/dev/null || true
+	@for rp in $$(otool -l "$(PLUGIN_BIN_DIR)/xp_wellys_atc.xpl" \
+	    | awk '/LC_RPATH/{flag=1; next} flag && /path/ {print $$2; flag=0}'); do \
+	    install_name_tool -delete_rpath "$$rp" "$(PLUGIN_BIN_DIR)/xp_wellys_atc.xpl" 2>/dev/null || true; \
+	done
+	@install_name_tool -add_rpath "@loader_path" "$(PLUGIN_BIN_DIR)/xp_wellys_atc.xpl"
+	@codesign --force --deep --sign - "$(PLUGIN_BIN_DIR)/libonnxruntime.1.22.0.dylib"
+	@codesign --force --deep --sign - "$(PLUGIN_BIN_DIR)/libpiper.dylib"
+	@codesign --force --deep --sign - "$(PLUGIN_BIN_DIR)/xp_wellys_atc.xpl"
+	@if [ -d "build/espeak_ng-install/share/espeak-ng-data" ]; then \
+	    mkdir -p "$(PLUGIN_DIR)/Resources/espeak-ng-data"; \
+	    rsync -a --delete \
+	        "build/espeak_ng-install/share/espeak-ng-data/" \
+	        "$(PLUGIN_DIR)/Resources/espeak-ng-data/"; \
+	    echo "Installed: $(PLUGIN_DIR)/Resources/espeak-ng-data/"; \
+	else \
+	    echo "WARNING: build/espeak_ng-install/share/espeak-ng-data missing — run make build first"; \
+	fi
+	$(INSTALL_DATA)
 	@echo "Installed and signed."
+else
+install:
+	@if [ ! -f "build/xp_wellys_atc.xpl" ]; then \
+	    echo "Plugin not built yet. Run 'make build' first."; exit 1; \
+	fi
+	@echo "=== Installing xp_wellys_atc (Linux) ==="
+	@mkdir -p "$(PLUGIN_BIN_DIR)"
+	@cp build/xp_wellys_atc.xpl "$(PLUGIN_BIN_DIR)/"
+	@[ -f "build/libpiper.so" ] && cp build/libpiper.so "$(PLUGIN_BIN_DIR)/" || true
+	@[ -f "build/libonnxruntime.so.1.22.0" ] && cp build/libonnxruntime.so.1.22.0 "$(PLUGIN_BIN_DIR)/" || true
+	@[ -f "build/libonnxruntime.so" ] && cp build/libonnxruntime.so "$(PLUGIN_BIN_DIR)/" || true
+	@if [ -d "build/espeak_ng-install/share/espeak-ng-data" ]; then \
+	    mkdir -p "$(PLUGIN_DIR)/Resources/espeak-ng-data"; \
+	    rsync -a --delete \
+	        "build/espeak_ng-install/share/espeak-ng-data/" \
+	        "$(PLUGIN_DIR)/Resources/espeak-ng-data/"; \
+	    echo "Installed: $(PLUGIN_DIR)/Resources/espeak-ng-data/"; \
+	else \
+	    echo "WARNING: espeak-ng-data missing in build/ — run make build first"; \
+	fi
+	$(INSTALL_DATA)
+	@echo "Installed."
+endif
 
 # ── Lint ──────────────────────────────────────────────────────────────────────
 format:
@@ -309,11 +340,17 @@ format:
 
 lint: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
 	@command -v clang-tidy >/dev/null 2>&1 || { \
-	    echo "clang-tidy not found. Install with: brew install llvm"; \
-	    echo "Then add to PATH: export PATH=\"$$(brew --prefix llvm)/bin:$$PATH\""; \
+	    echo "clang-tidy not found."; \
+	    echo "  macOS: brew install llvm && export PATH=\"\$$(brew --prefix llvm)/bin:\$$PATH\""; \
+	    echo "  Linux: sudo apt install clang-tidy"; \
 	    exit 1; }
+ifeq ($(OS),Darwin)
 	cmake -B build-lint -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_OSX_ARCHITECTURES=arm64 -Wno-dev
 	clang-tidy -p build-lint --extra-arg="-isysroot" --extra-arg="$(shell xcrun --show-sdk-path)" src/main.cpp src/*/*.cpp
+else
+	cmake -B build-lint -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -Wno-dev
+	clang-tidy -p build-lint src/main.cpp src/*/*.cpp
+endif
 
 # ── Sanitize ──────────────────────────────────────────────────────────────────
 # AddressSanitizer + UBSan on the SDK-free engine OBJECT lib + atc_repl +

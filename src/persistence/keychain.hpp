@@ -12,21 +12,25 @@
 
 namespace persistence::keychain {
 
-// macOS Keychain wrapper for the OpenAI API key. The single-argument
-// overloads use the production service/account
-// ("com.xp_wellys_atc.openai" / "default"); the explicit overloads
-// take a service+account pair and exist so unit tests can target a
-// dedicated test entry without clobbering the user's real key.
-//
-// load() returns an empty string when no entry exists or when the
-// Keychain call fails — callers must treat empty as "no key".
-// On non-macOS builds all calls are stubbed and report no key.
+// Secure credential store for API keys.
+// macOS: wraps SecKeychain. Linux: stores in ~/.config/xp_wellys_atc/<service>.key (mode 0600).
+// The single-argument overloads target the OpenAI service; use the
+// explicit (service, account, key) overloads for other providers.
+// load() returns "" when no entry exists — callers must treat "" as "no key".
 
+// OpenAI convenience overloads ("com.xp_wellys_atc.openai" / "default").
 bool save(const std::string &api_key);
 std::string load();
 bool remove();
 bool has();
 
+// Mistral convenience overloads ("com.xp_wellys_atc.mistral" / "default").
+bool save_mistral(const std::string &api_key);
+std::string load_mistral();
+bool remove_mistral();
+bool has_mistral();
+
+// Generic overloads — service + account are the key into the store.
 bool save(const std::string &service, const std::string &account,
           const std::string &api_key);
 std::string load(const std::string &service, const std::string &account);

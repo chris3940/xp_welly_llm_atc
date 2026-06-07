@@ -9,7 +9,11 @@
 
 #include "persistence/models_catalog.hpp"
 
+#if defined(__APPLE__)
 #include <CommonCrypto/CommonDigest.h>
+#elif defined(__linux__)
+#include <openssl/evp.h>
+#endif
 #include <sys/stat.h>
 
 #include <cstdio>
@@ -239,28 +243,25 @@ std::string sha256_file(const std::string &path) {
   if (!f)
     return {};
 
-  CC_SHA256_CTX ctx;
-  CC_SHA256_Init(&ctx);
-
   // 1 MB chunks: large enough to amortise read syscalls, small enough
   // to avoid a single big allocation that competes with model load.
-  // **Heap-allocated**: macOS pthreads default to a 512 KB stack, so a
-  // 1 MB std::array<> on the stack would SIGSEGV the moment this
-  // function is called from a worker thread (downloader/loader).
+  // **Heap-allocated**: pthreads may have limited stack (512 KB on macOS),
+  // so a 1 MB std::array<> on the stack would SIGSEGV from a worker thread.
   static constexpr size_t kChunkBytes = 1024ULL * 1024;
   std::vector<unsigned char> buf(kChunkBytes);
+
+#if defined(__APPLE__)
+  CC_SHA256_CTX ctx;
+  CC_SHA256_Init(&ctx);
   size_t n = 0;
-  while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0) {
+  while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0)
     CC_SHA256_Update(&ctx, buf.data(), static_cast<CC_LONG>(n));
-  }
   bool eof_clean = std::feof(f) != 0;
   std::fclose(f);
   if (!eof_clean)
-    return {}; // read error
-
+    return {};
   unsigned char digest[CC_SHA256_DIGEST_LENGTH];
   CC_SHA256_Final(digest, &ctx);
-
   static const char hex[] = "0123456789abcdef";
   std::string out(static_cast<size_t>(2) * CC_SHA256_DIGEST_LENGTH, '\0');
   for (size_t i = 0; i < CC_SHA256_DIGEST_LENGTH; ++i) {
@@ -268,6 +269,33 @@ std::string sha256_file(const std::string &path) {
     out[(2 * i) + 1] = hex[digest[i] & 0xF];
   }
   return out;
+#elif defined(__linux__)
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+  size_t n = 0;
+  while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0)
+    EVP_DigestUpdate(ctx, buf.data(), n);
+  bool eof_clean = std::feof(f) != 0;
+  std::fclose(f);
+  if (!eof_clean) {
+    EVP_MD_CTX_free(ctx);
+    return {};
+  }
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int digest_len = 0;
+  EVP_DigestFinal_ex(ctx, digest, &digest_len);
+  EVP_MD_CTX_free(ctx);
+  static const char hex[] = "0123456789abcdef";
+  std::string out(static_cast<size_t>(2) * digest_len, '\0');
+  for (size_t i = 0; i < digest_len; ++i) {
+    out[(2 * i)] = hex[(digest[i] >> 4) & 0xF];
+    out[(2 * i) + 1] = hex[digest[i] & 0xF];
+  }
+  return out;
+#else
+  std::fclose(f);
+  return {};
+#endif
 }
 
 bool size_matches(const Entry &e, const std::string &full_path) {

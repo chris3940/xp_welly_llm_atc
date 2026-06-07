@@ -190,10 +190,10 @@ bool verify_one(const model_manifest::Entry &e) {
 // files that pass the size check. Updates `g_status` as it goes so
 // the UI can reflect "Verifying… llama-3.2-3B (45%)" etc.
 //
-// Returns true if all *required* entries (Whisper, Llama, plus the
-// four assigned voices' .onnx + .json) reach Verified. Optional
-// voices that are missing do not count against this gate.
-bool verify_files() {
+// Returns true if all *required* entries reach Verified.
+// When require_llama is false (Mistral mode), the LlamaModel entry
+// is skipped entirely — only Whisper + Piper gate the result.
+bool verify_files(bool require_llama = true) {
   bool all_required_ok = true;
   auto wanted_voices = assigned_voice_ids();
   const std::string active_lang = settings::backend_language();
@@ -476,6 +476,7 @@ void process_one(const model_manifest::Entry &e) {
 }
 #endif // XPWELLYS_USE_LOCAL_INFERENCE
 
+
 // Construct the three OpenAI cloud backends and register them with the
 // manager. Skips the local-model verification entirely: no files on
 // disk, only an API key in the Keychain. On a missing/empty key we
@@ -605,7 +606,7 @@ void run_worker() {
 #ifdef XPWELLYS_USE_LOCAL_INFERENCE
       logging::info("[xp_wellys_atc] BACKEND MODE: LOCAL (whisper.cpp + "
                     "llama.cpp + Piper). No network traffic to AI APIs.");
-      bool all_files_verified = verify_files();
+      bool all_files_verified = verify_files(/*require_llama=*/true);
       if (g_should_exit.load()) {
         g_running = false;
         return;
@@ -618,12 +619,9 @@ void run_worker() {
             "loaded; open the plugin window to download.");
       }
 #else
-      // Cloud-only slice (e.g. x86_64 of the universal binary) but
-      // settings still ask for Local. Surface this clearly — the
-      // user has to switch to OpenAI in Settings.
       logging::error("[xp_wellys_atc] BACKEND MODE: LOCAL requested but this "
                      "build has no local-inference backends. Switch to "
-                     "OpenAI in Settings (Apple Silicon required for Local).");
+                     "OpenAI in Settings.");
 #endif
     }
   } catch (const std::exception &e) {
@@ -657,6 +655,7 @@ std::vector<ReadinessBlocker> Status::readiness_blockers() const {
   const std::string mode = settings::backend_mode();
   if (mode == "openai" || mode == "mistral")
     return out;
+
 
   std::unordered_set<std::string> wanted;
   for (auto role : model_manifest::all_roles())
