@@ -30,10 +30,16 @@ and Apple Accelerate framework. Source is vendored as a git submodule
 under `spikes/spike_whisper/third_party/whisper.cpp` and linked
 statically into the plugin module.
 
-The bundled Whisper *model* (`ggml-small.en-q5_1.bin`) is downloaded by
-the user at first launch from
-[`huggingface.co/ggerganov/whisper.cpp`](https://huggingface.co/ggerganov/whisper.cpp);
-the model is licensed under MIT in line with whisper.cpp itself.
+The Whisper *model files* are downloaded by the user at first launch
+from [`huggingface.co/ggerganov/whisper.cpp`](https://huggingface.co/ggerganov/whisper.cpp);
+both are licensed under MIT in line with whisper.cpp itself.
+
+- `ggml-small.en-q5_1.bin` — English-only, used by the EU and US ATC profiles.
+- `ggml-small-q5_1.bin` — multilingual, used by the DE ATC profile (added in M6).
+
+The Models tab filters by `settings::backend_language()` so only the
+file matching the active profile is downloaded by default; a *Show all
+languages* toggle exposes both.
 
 ### llama.cpp — MIT
 
@@ -64,11 +70,24 @@ Source is vendored under
 configuration uses libpiper's own CMake which fetches espeak-ng via
 ExternalProject and downloads the prebuilt onnxruntime arm64 release.
 
-The bundled *voice model* (`en_US-lessac-medium.onnx` + `.onnx.json`)
-comes from the [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)
-collection. The Piper voices are licensed under MIT
-(see <https://github.com/rhasspy/piper/blob/master/VOICES.md>). The
-underlying voice recordings are CC0 / public-domain.
+The bundled *voice models* come from the
+[rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)
+collection. Each voice ships as a paired `.onnx` + `.onnx.json` and is
+downloaded by the user at first launch:
+
+- `en_US-lessac-medium` — English, used by the EU and US ATC profiles
+  (and as Piper's neutral baseline voice).
+- `de_DE-thorsten-medium` — German, used by the DE ATC profile (added in M6).
+  Finetuned from the same `lessac` baseline; source dataset
+  [thorstenMueller/Thorsten-Voice](https://github.com/thorstenMueller/Thorsten-Voice)
+  (CC0).
+
+Both Piper voice models are MIT-licensed
+(see <https://github.com/rhasspy/piper/blob/master/VOICES.md>); the
+underlying recordings are CC0 / public-domain. The Models tab filters
+by `settings::backend_language()` so only the voice matching the active
+profile is downloaded by default; a *Show all languages* toggle exposes
+both.
 
 The `espeak-ng-data/` directory (~19 MB of phonemizer dictionaries)
 ships **inside the plugin bundle** at
