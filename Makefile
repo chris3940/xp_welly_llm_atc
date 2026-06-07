@@ -5,13 +5,17 @@ OS := $(shell uname -s)
 
 # XPLANE_ROOT can be overridden: `make install XPLANE_ROOT=/path/to/xplane`
 ifeq ($(OS),Darwin)
-    XPLANE_ROOT ?= /Users/robertw/X-Plane 12
+    XPLANE_ROOT     ?= /Users/robertw/X-Plane 12
     PLUGIN_ARCH_DIR := mac_x64
+    # X-Plane 12 macOS historical default. Do NOT change to "plugins/" —
+    # existing users have the plugin under this name; both directories
+    # would coexist silently after a rename.
+    PLUGIN_DIR      := $(XPLANE_ROOT)/Resources/available plugins/xp_wellys_atc
 else
-    XPLANE_ROOT ?= $(HOME)/X-Plane 12
+    XPLANE_ROOT     ?= $(HOME)/X-Plane 12
     PLUGIN_ARCH_DIR := lin_x64
+    PLUGIN_DIR      := $(XPLANE_ROOT)/Resources/plugins/xp_wellys_atc
 endif
-PLUGIN_DIR := $(XPLANE_ROOT)/Resources/plugins/xp_wellys_atc
 
 SDK_SENTINEL    := sdk/XPLM/XPLMPlugin.h
 IMGUI_SENTINEL  := vendor/imgui/imgui.h
@@ -27,7 +31,7 @@ SUBMODULES_SENTINEL := spikes/spike_whisper/third_party/whisper.cpp/CMakeLists.t
 
 CATCH2_VERSION := 3.7.1
 
-.PHONY: all help setup build install clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs repl run-repl test test-unit test-scenarios
+.PHONY: all help setup build install install-mac install-linux _install-check _install-data clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs repl run-repl test test-unit test-scenarios
 
 .DEFAULT_GOAL := help
 
@@ -86,10 +90,11 @@ $(SDK_SENTINEL):
 	curl -fsSL "https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK430.zip" \
 	     -o "$$TMP/sdk.zip"; \
 	unzip -q "$$TMP/sdk.zip" -d "$$TMP/sdk_extracted"; \
-	mkdir -p sdk/XPLM sdk/XPWidgets sdk/Libraries/Win sdk/Libraries/Mac; \
-	find "$$TMP/sdk_extracted" -path "*/CHeaders/XPLM/*.h"   -exec cp {} sdk/XPLM/ \;; \
-	find "$$TMP/sdk_extracted" -path "*/CHeaders/Widgets/*.h" -exec cp {} sdk/XPWidgets/ \;; \
-	find "$$TMP/sdk_extracted" -path "*/Libraries/Win/*.lib"  -exec cp {} sdk/Libraries/Win/ \;; \
+	mkdir -p sdk/XPLM sdk/XPWidgets sdk/Libraries/Win sdk/Libraries/Mac sdk/Libraries/Lin; \
+	find "$$TMP/sdk_extracted" -path "*/CHeaders/XPLM/*.h"    -exec cp {} sdk/XPLM/ \;; \
+	find "$$TMP/sdk_extracted" -path "*/CHeaders/Widgets/*.h"  -exec cp {} sdk/XPWidgets/ \;; \
+	find "$$TMP/sdk_extracted" -path "*/Libraries/Win/*.lib"   -exec cp {} sdk/Libraries/Win/ \;; \
+	find "$$TMP/sdk_extracted" -path "*/Libraries/Lin/*.so"    -exec cp {} sdk/Libraries/Lin/ \;; \
 	cp -R "$$TMP/sdk_extracted"/*/Libraries/Mac/*.framework sdk/Libraries/Mac/ 2>/dev/null || \
 	find "$$TMP/sdk_extracted" -name "*.framework" -exec cp -R {} sdk/Libraries/Mac/ \;
 	@echo "SDK headers installed."
@@ -225,14 +230,25 @@ test-scenarios: repl
 	./build/atc_repl run testscripts/*.json
 
 # ── Install ───────────────────────────────────────────────────────────────────
+# `install` dispatches to the platform-specific target so plain `make install`
+# always uses the correct plugin directory for the current OS.
+# Developers can also call install-mac or install-linux explicitly.
 install:
+ifeq ($(OS),Darwin)
+	@$(MAKE) --no-print-directory install-mac
+else
+	@$(MAKE) --no-print-directory install-linux
+endif
+
+_install-check:
 	@if [ ! -f "build/xp_wellys_atc.xpl" ]; then \
 	    echo "Plugin not built yet. Run 'make build' first."; exit 1; \
 	fi
-	@echo "=== Installing xp_wellys_atc ==="
+
+install-mac: _install-check
+	@echo "=== Installing xp_wellys_atc (macOS -> $(PLUGIN_DIR)) ==="
 	@mkdir -p "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)"
 	@cp build/xp_wellys_atc.xpl "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"
-ifeq ($(OS),Darwin)
 	@cp build/libpiper.dylib "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"
 	@cp build/libonnxruntime.1.22.0.dylib "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"
 	@cp build/libonnxruntime.dylib "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"
@@ -247,7 +263,12 @@ ifeq ($(OS),Darwin)
 	@codesign --force --deep --sign - "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/libonnxruntime.1.22.0.dylib"
 	@codesign --force --deep --sign - "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/libpiper.dylib"
 	@codesign --force --deep --sign - "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/xp_wellys_atc.xpl"
-else
+	@$(MAKE) --no-print-directory _install-data
+
+install-linux: _install-check
+	@echo "=== Installing xp_wellys_atc (Linux -> $(PLUGIN_DIR)) ==="
+	@mkdir -p "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)"
+	@cp build/xp_wellys_atc.xpl "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"
 	@if [ -f "build/libpiper.so" ]; then \
 	    cp build/libpiper.so "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"; \
 	fi
@@ -259,7 +280,9 @@ else
 	@if [ -f "build/libonnxruntime_providers_shared.so" ]; then \
 	    cp build/libonnxruntime_providers_shared.so "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"; \
 	fi
-endif
+	@$(MAKE) --no-print-directory _install-data
+
+_install-data:
 	@# Bundle espeak-ng-data (~19 MB) inside the plugin so Piper's
 	@# phonemizer finds its dictionary at runtime via the plugin-relative
 	@# path resolved by model_paths::espeakng_data_dir(). Models live in

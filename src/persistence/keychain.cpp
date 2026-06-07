@@ -18,6 +18,7 @@
 #elif defined(__linux__)
 #include <cstdio>
 #include <cstdlib>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -132,12 +133,20 @@ bool save(const std::string &service, const std::string &account,
   std::string path = key_path(service, account);
   if (path.empty())
     return false;
-  FILE *f = std::fopen(path.c_str(), "w");
-  if (!f)
+  // Open with O_CREAT|0600 so the file is never visible with wider
+  // permissions. fopen("w") would create it at umask (typically 0644)
+  // and only tighten it after the fact — a race window. O_NOFOLLOW
+  // guards against a symlink swap on the path before the open.
+  int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+  if (fd < 0)
     return false;
-  fchmod(fileno(f), 0600);
+  FILE *f = ::fdopen(fd, "w");
+  if (!f) {
+    ::close(fd);
+    return false;
+  }
   bool ok = std::fwrite(api_key.data(), 1, api_key.size(), f) == api_key.size();
-  std::fclose(f);
+  std::fclose(f); // also closes fd
   return ok;
 }
 
