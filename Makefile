@@ -1,7 +1,17 @@
 SHELL := /bin/bash
 
-XPLANE_ROOT := /Users/robertw/X-Plane 12
-PLUGIN_DIR  := $(XPLANE_ROOT)/Resources/available plugins/xp_wellys_atc
+# ── Platform detection ────────────────────────────────────────────────────────
+OS := $(shell uname -s)
+
+# XPLANE_ROOT can be overridden: `make install XPLANE_ROOT=/path/to/xplane`
+ifeq ($(OS),Darwin)
+    XPLANE_ROOT ?= /Users/robertw/X-Plane 12
+    PLUGIN_ARCH_DIR := mac_x64
+else
+    XPLANE_ROOT ?= $(HOME)/X-Plane 12
+    PLUGIN_ARCH_DIR := lin_x64
+endif
+PLUGIN_DIR := $(XPLANE_ROOT)/Resources/plugins/xp_wellys_atc
 
 SDK_SENTINEL    := sdk/XPLM/XPLMPlugin.h
 IMGUI_SENTINEL  := vendor/imgui/imgui.h
@@ -142,6 +152,7 @@ $(CATCH2_SENTINEL):
 RELEASE_FLAG ?=
 
 build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+ifeq ($(OS),Darwin)
 	@echo "=== Building universal xp_wellys_atc (arm64 local+cloud, x86_64 cloud-only) ==="
 	@echo ""
 	@echo "--- arm64 slice (local + cloud) ---"
@@ -166,9 +177,6 @@ build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
 	    build-arm64/xp_wellys_atc.xpl \
 	    build-x86_64/xp_wellys_atc.xpl \
 	    -output build/xp_wellys_atc.xpl
-	@# Stage the arm64 slice's dylibs next to the merged binary so
-	@# `make install` finds them where it expects. The x86_64 slice
-	@# has no dylib dependencies (cloud-only build).
 	@cp build-arm64/libpiper.dylib              build/
 	@cp build-arm64/libonnxruntime.1.22.0.dylib build/
 	@cp build-arm64/libonnxruntime.dylib        build/
@@ -177,6 +185,17 @@ build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL)
 	@file build/xp_wellys_atc.xpl
 	@lipo -info build/xp_wellys_atc.xpl
 	@echo "Done. Run 'make install' to deploy the universal .xpl."
+else
+	@echo "=== Building xp_wellys_atc for Linux ==="
+	cmake -B build -DCMAKE_BUILD_TYPE=Release $(RELEASE_FLAG) \
+	    -DXPWELLYS_USE_LOCAL_INFERENCE=ON \
+	    -DBUILD_TESTS=OFF \
+	    -Wno-dev
+	cmake --build build --parallel
+	@echo ""
+	@file build/xp_wellys_atc.xpl
+	@echo "Done. Run 'make install' to deploy."
+endif
 
 # ── REPL (headless CLI) ───────────────────────────────────────────────────────
 repl: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
@@ -210,29 +229,37 @@ install:
 	@if [ ! -f "build/xp_wellys_atc.xpl" ]; then \
 	    echo "Plugin not built yet. Run 'make build' first."; exit 1; \
 	fi
-	@if [ ! -f "build/libpiper.dylib" ] || [ ! -f "build/libonnxruntime.1.22.0.dylib" ]; then \
-	    echo "Runtime dylibs missing in build/. Did 'make build' succeed?"; exit 1; \
-	fi
 	@echo "=== Installing xp_wellys_atc ==="
-	@mkdir -p "$(PLUGIN_DIR)/mac_x64"
-	@cp build/xp_wellys_atc.xpl "$(PLUGIN_DIR)/mac_x64/"
-	@cp build/libpiper.dylib "$(PLUGIN_DIR)/mac_x64/"
-	@cp build/libonnxruntime.1.22.0.dylib "$(PLUGIN_DIR)/mac_x64/"
-	@cp build/libonnxruntime.dylib "$(PLUGIN_DIR)/mac_x64/"
-	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl" 2>/dev/null || true
-	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/mac_x64/libpiper.dylib" 2>/dev/null || true
-	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/mac_x64/libonnxruntime.1.22.0.dylib" 2>/dev/null || true
-	@# Strip the dev-time rpaths (build/, source-tree onnxruntime path)
-	@# baked in by CMake and replace with @loader_path so the .xpl finds
-	@# the dylibs we just copied next to it.
-	@for rp in $$(otool -l "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl" \
+	@mkdir -p "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)"
+	@cp build/xp_wellys_atc.xpl "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"
+ifeq ($(OS),Darwin)
+	@cp build/libpiper.dylib "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"
+	@cp build/libonnxruntime.1.22.0.dylib "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"
+	@cp build/libonnxruntime.dylib "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"
+	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/xp_wellys_atc.xpl" 2>/dev/null || true
+	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/libpiper.dylib" 2>/dev/null || true
+	@xattr -dr com.apple.quarantine "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/libonnxruntime.1.22.0.dylib" 2>/dev/null || true
+	@for rp in $$(otool -l "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/xp_wellys_atc.xpl" \
 	    | awk '/LC_RPATH/{flag=1; next} flag && /path/ {print $$2; flag=0}'); do \
-	    install_name_tool -delete_rpath "$$rp" "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl" 2>/dev/null || true; \
+	    install_name_tool -delete_rpath "$$rp" "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/xp_wellys_atc.xpl" 2>/dev/null || true; \
 	done
-	@install_name_tool -add_rpath "@loader_path" "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl"
-	@codesign --force --deep --sign - "$(PLUGIN_DIR)/mac_x64/libonnxruntime.1.22.0.dylib"
-	@codesign --force --deep --sign - "$(PLUGIN_DIR)/mac_x64/libpiper.dylib"
-	@codesign --force --deep --sign - "$(PLUGIN_DIR)/mac_x64/xp_wellys_atc.xpl"
+	@install_name_tool -add_rpath "@loader_path" "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/xp_wellys_atc.xpl"
+	@codesign --force --deep --sign - "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/libonnxruntime.1.22.0.dylib"
+	@codesign --force --deep --sign - "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/libpiper.dylib"
+	@codesign --force --deep --sign - "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/xp_wellys_atc.xpl"
+else
+	@if [ -f "build/libpiper.so" ]; then \
+	    cp build/libpiper.so "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"; \
+	fi
+	@if [ -f "build/libonnxruntime.so.1.22.0" ]; then \
+	    cp build/libonnxruntime.so.1.22.0 "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"; \
+	    cp build/libonnxruntime.so        "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"; \
+	    ln -sf libonnxruntime.so.1.22.0   "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/libonnxruntime.so.1"; \
+	fi
+	@if [ -f "build/libonnxruntime_providers_shared.so" ]; then \
+	    cp build/libonnxruntime_providers_shared.so "$(PLUGIN_DIR)/$(PLUGIN_ARCH_DIR)/"; \
+	fi
+endif
 	@# Bundle espeak-ng-data (~19 MB) inside the plugin so Piper's
 	@# phonemizer finds its dictionary at runtime via the plugin-relative
 	@# path resolved by model_paths::espeakng_data_dir(). Models live in

@@ -74,6 +74,15 @@ if(APPLE)
     # Inherit OSX_ARCHITECTURES from the top-level project so the architectures
     # of the reused xp_atc_engine objects match the test executable.
 endif()
+if(UNIX AND NOT APPLE)
+    target_compile_options(xp_wellys_atc_tests PRIVATE
+        -Wall -Wextra -Wno-unused-parameter
+    )
+    # OpenSSL::Crypto is needed by model_manifest.cpp (SHA256 on Linux).
+    # Already found in the top-level CMakeLists via xp_atc_engine, but
+    # we link here explicitly so the test executable resolves the symbol.
+    target_link_libraries(xp_wellys_atc_tests PRIVATE OpenSSL::Crypto)
+endif()
 if(XP_WELLYS_ATC_SANITIZE)
     target_compile_options(xp_wellys_atc_tests PRIVATE
         ${XP_WELLYS_ATC_SANITIZER_FLAGS} -O1 -g

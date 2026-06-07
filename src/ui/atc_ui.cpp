@@ -41,9 +41,11 @@
 #include "ui/clipboard.hpp"
 #include "ui/ui_strings.hpp"
 
+#if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/task.h>
 #include <mach/task_info.h>
+#endif
 
 #include <XPLMDataAccess.h>
 #include <XPLMDisplay.h>
@@ -197,10 +199,11 @@ static std::string format_bytes(uint64_t b) {
   return buf;
 }
 
-// Resident set size in bytes via Mach. Polled at most once a second
-// from the Models tab — the call itself is cheap (microseconds) but
-// not worth running every frame.
+// Resident set size in bytes. Polled at most once a second from the
+// Models tab — the call itself is cheap (microseconds) but not worth
+// running every frame.
 static uint64_t resident_bytes() {
+#if defined(__APPLE__)
   mach_task_basic_info_data_t info{};
   mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
   if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
@@ -208,6 +211,21 @@ static uint64_t resident_bytes() {
     return info.resident_size;
   }
   return 0;
+#else
+  // Linux: read VmRSS from /proc/self/status
+  FILE *f = std::fopen("/proc/self/status", "r");
+  if (!f) return 0;
+  char line[128];
+  uint64_t kb = 0;
+  while (std::fgets(line, sizeof(line), f)) {
+    if (std::strncmp(line, "VmRSS:", 6) == 0) {
+      std::sscanf(line + 6, " %llu", (unsigned long long *)&kb);
+      break;
+    }
+  }
+  std::fclose(f);
+  return kb * 1024;
+#endif
 }
 
 static const char *file_state_label(backends::loader::FileState s) {
