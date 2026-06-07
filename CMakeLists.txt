@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.26)
-project(xp_wellys_atc CXX OBJCXX)
+# Objective-C++ is only available on macOS (for .mm sources).
+# Detect before project() to avoid requesting it on Linux.
+if(APPLE)
+    project(xp_wellys_atc CXX OBJCXX)
+else()
+    project(xp_wellys_atc CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -218,16 +224,33 @@ target_include_directories(xp_atc_engine PRIVATE
 target_compile_definitions(xp_atc_engine PRIVATE
     XP_WELLYS_ATC_VERSION="${VERSION_STRING}"
 )
-if(APPLE)
+if(UNIX)
     target_compile_options(xp_atc_engine PRIVATE
         -Wall -Wextra -Wno-unused-parameter
         -fvisibility=hidden
     )
 endif()
+if(UNIX AND NOT APPLE)
+    set_target_properties(xp_atc_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    # OpenSSL::Crypto is needed by model_manifest.cpp (SHA256 on Linux).
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(xp_atc_engine PUBLIC OpenSSL::Crypto)
+endif()
 if(XP_WELLYS_ATC_SANITIZE)
     target_compile_options(xp_atc_engine PRIVATE
         ${XP_WELLYS_ATC_SANITIZER_FLAGS} -O1 -g
     )
+endif()
+
+# ── Platform-specific plugin sources ─────────────────────────────────────────
+# Select the correct mic-permission and clipboard TUs per platform.
+# On macOS these are Objective-C++ .mm files; on Linux they are plain .cpp stubs.
+if(APPLE)
+    set(MIC_PERMISSION_SRC src/audio/mic_permission.mm)
+    set(CLIPBOARD_SRC      src/ui/clipboard.mm)
+elseif(UNIX AND NOT APPLE)
+    set(MIC_PERMISSION_SRC src/audio/mic_permission_linux.cpp)
+    set(CLIPBOARD_SRC      src/ui/clipboard_linux.cpp)
 endif()
 
 # ── Plugin MODULE (Engine + X-Plane-spezifisch) ──────────────────────────────
@@ -240,7 +263,7 @@ add_library(xp_wellys_atc MODULE
     src/audio/ptt_input.cpp
     src/audio/audio_recorder.cpp
     src/audio/audio_player.cpp
-    src/audio/mic_permission.mm
+    ${MIC_PERMISSION_SRC}
     # OpenAI cloud clients — libcurl + nlohmann/json, never include
     # any local backend header. Each TU carries a kBackendTag
     # constant so every inference call shows up under
@@ -273,10 +296,9 @@ add_library(xp_wellys_atc MODULE
     src/persistence/keychain.cpp
     src/ui/atc_ui.cpp
     src/ui/ui_strings.cpp
-    # NSPasteboard bridge — the ImGui platform backend in this
-    # plugin does not wire up a clipboard connector, so the Paste
-    # button has to read the system pasteboard via AppKit directly.
-    src/ui/clipboard.mm
+    # Platform clipboard bridge. On macOS reads NSPasteboard (AppKit);
+    # on Linux shells out to wl-paste (Wayland) or xclip (X11).
+    ${CLIPBOARD_SRC}
     ${IMGUI_SOURCES}
 )
 
@@ -293,12 +315,17 @@ if(XPWELLYS_USE_LOCAL_INFERENCE)
 endif()
 
 # IAudioInput concrete implementation — picked per platform. On macOS
-# we use the CoreAudio HAL; the Linux slice will swap in
-# audio_input_portaudio.cpp here. audio_recorder.cpp itself stays in
-# the unconditional sources above as the platform-neutral façade.
+# the CoreAudio HAL; on Linux the PulseAudio pa_simple API (works
+# transparently on both PipeWire and PulseAudio servers).
+# audio_recorder.cpp itself stays unconditional as the platform-neutral
+# façade.
 if(APPLE)
     target_sources(xp_wellys_atc PRIVATE
         src/audio/audio_input_coreaudio.cpp
+    )
+elseif(UNIX AND NOT APPLE)
+    target_sources(xp_wellys_atc PRIVATE
+        src/audio/audio_input_pulseaudio.cpp
     )
 endif()
 
@@ -429,6 +456,65 @@ if(APPLE)
     endif()
 endif()
 
+# ── Linux plugin link + compile block ────────────────────────────────────────
+if(UNIX AND NOT APPLE)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PULSE REQUIRED libpulse-simple)
+
+    target_compile_definitions(xp_wellys_atc PRIVATE
+        APL=0 IBM=0 LIN=1
+        XPLM200=1 XPLM210=1 XPLM300=1 XPLM301=1 XPLM400=1
+        XP_WELLYS_ATC_VERSION="${VERSION_STRING}"
+    )
+    target_compile_options(xp_wellys_atc PRIVATE
+        -Wall -Wextra -Wno-unused-parameter
+        -fvisibility=hidden
+    )
+    target_include_directories(xp_wellys_atc PRIVATE
+        ${PULSE_INCLUDE_DIRS}
+    )
+
+    set(SDK_LIN_LIBS "${CMAKE_SOURCE_DIR}/sdk/Libraries/Lin")
+    target_link_libraries(xp_wellys_atc PRIVATE
+        "${SDK_LIN_LIBS}/XPLM_64.so"
+        CURL::libcurl
+        ${PULSE_LIBRARIES}
+    )
+
+    if(XPWELLYS_USE_LOCAL_INFERENCE)
+        # $ORIGIN rpath: the plugin finds libpiper.so and libonnxruntime.so
+        # staged next to the .xpl.
+        set_target_properties(xp_wellys_atc PROPERTIES
+            BUILD_WITH_INSTALL_RPATH FALSE
+            BUILD_RPATH "\$ORIGIN:${CMAKE_BINARY_DIR}:${ONNXRUNTIME_LIB_DIR}"
+            INSTALL_RPATH "\$ORIGIN"
+        )
+        target_link_libraries(xp_wellys_atc PRIVATE
+            whisper common llama piper
+        )
+        add_custom_command(TARGET xp_wellys_atc POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:piper>"
+                "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:piper>"
+            COMMENT "Staging libpiper.so alongside xp_wellys_atc.xpl"
+        )
+        add_custom_command(TARGET xp_wellys_atc POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_LIB_DIR}/libonnxruntime.so.1.22.0"
+                "${CMAKE_BINARY_DIR}/libonnxruntime.so.1.22.0"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${ONNXRUNTIME_LIB_DIR}/libonnxruntime.so"
+                "${CMAKE_BINARY_DIR}/libonnxruntime.so"
+            COMMENT "Staging libonnxruntime.so alongside xp_wellys_atc.xpl"
+        )
+    else()
+        set_target_properties(xp_wellys_atc PROPERTIES
+            BUILD_WITH_INSTALL_RPATH FALSE
+            INSTALL_RPATH "\$ORIGIN"
+        )
+    endif()
+endif()
+
 # ── CLI Executable (ohne X-Plane) ────────────────────────────────────────────
 # Host-arch only — no need for universal binary on a dev tool. The
 # x_atc_engine OBJECT library is compiled for whatever
@@ -475,6 +561,13 @@ if(APPLE)
     set_target_properties(atc_repl PROPERTIES
         OSX_ARCHITECTURES "${CMAKE_HOST_SYSTEM_PROCESSOR}"
     )
+endif()
+if(UNIX AND NOT APPLE)
+    target_compile_options(atc_repl PRIVATE
+        -Wall -Wextra -Wno-unused-parameter
+    )
+    # OpenSSL::Crypto already required above for xp_atc_engine.
+    target_link_libraries(atc_repl PRIVATE OpenSSL::Crypto)
 endif()
 if(XP_WELLYS_ATC_SANITIZE)
     target_compile_options(atc_repl PRIVATE
