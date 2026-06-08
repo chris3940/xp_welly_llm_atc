@@ -28,6 +28,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 namespace ground_ops {
@@ -153,6 +154,35 @@ static std::string extract_position(const PilotMessage &msg,
   return "in the pattern at " + apt;
 }
 
+// ── Squawk generation ────────────────────────────────────────────────
+
+// Generate a random 4-digit octal squawk within the IFR range, avoiding
+// reserved codes (7700 emergency, 7600 comm failure, 7500 hijack,
+// 7000 VFR conspicuity Europe, 2000 IFR conspicuity).
+static std::string generate_squawk() {
+  const auto &d = flight_phase::get_ifr_defaults();
+  int lo = d.squawk_range_min;
+  int hi = d.squawk_range_max;
+  static const int kReserved[] = {7700, 7600, 7500, 7000, 2000, 0};
+
+  for (int attempts = 0; attempts < 50; ++attempts) {
+    // Each digit 0-7 independently (octal).
+    int sq = ((std::rand() & 7) * 1000) + ((std::rand() & 7) * 100) +
+             ((std::rand() & 7) * 10) + (std::rand() & 7);
+    if (sq < lo || sq > hi)
+      continue;
+    bool reserved = false;
+    for (int i = 0; kReserved[i] != 0; ++i)
+      if (sq == kReserved[i]) { reserved = true; break; }
+    if (reserved)
+      continue;
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "%04d", sq);
+    return buf;
+  }
+  return "2341"; // deterministic fallback
+}
+
 // ── build_vars: template variable map ───────────────────────────────
 
 std::map<std::string, std::string> build_vars(const PilotMessage &msg,
@@ -258,6 +288,41 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
       {"seq_number", ""},
       {"seq_type", ""},
       {"seq_position", ""},
+      // ── IFR clearance variables ──────────────────────────────────
+      // {squawk}: assigned on first REQUEST_IFR_CLEARANCE, stored in
+      // state_storage so every subsequent build_vars() returns the same code.
+      {"squawk", [&]() -> std::string {
+        std::string sq = internal::ifr_squawk_ref();
+        if (sq.empty() &&
+            msg.intent == intent_parser::PilotIntent::REQUEST_IFR_CLEARANCE) {
+          sq = generate_squawk();
+          internal::set_ifr_squawk(sq);
+        }
+        return sq;
+      }()},
+      // {ifr_destination}: destination ICAO from X-Plane flight plan DataRef,
+      // or "your destination" if no plan is filed.
+      {"ifr_destination", ctx.ifr_destination.empty()
+                               ? std::string("your destination")
+                               : ctx.ifr_destination},
+      // {ifr_initial_altitude}: first clearance limit from ifr_defaults.
+      {"ifr_initial_altitude", [&]() -> std::string {
+        int alt = flight_phase::get_ifr_defaults().initial_altitude_ft;
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%d feet", alt);
+        return buf;
+      }()},
+      // {ifr_ground_handoff}: ", contact Ground on X.XXX when ready"
+      // appended to the startup-approved readback, or empty at tower-only airports.
+      {"ifr_ground_handoff", [&]() -> std::string {
+        if (ctx.tower_only) return "";
+        float gf = ctx.airport_freqs.first_mhz(
+            xplane_context::FrequencyType::GROUND);
+        if (gf < 100.0f) return "";
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), ", contact Ground on %.3f when ready", gf);
+        return buf;
+      }()},
   };
 }
 

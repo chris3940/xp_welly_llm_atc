@@ -92,6 +92,7 @@ struct XPlaneContext {
   float com2_standby_mhz = 0.0f;
   int active_com = 1;
   std::string aircraft_icao;
+  std::string ifr_destination; // filed destination ICAO (empty if no plan)
   std::string nearest_airport_id;   // active airport (may be frequency-tuned)
   std::string geometric_nearest_id; // raw geographic nearest from XPLM
   std::string nearest_airport_name; // from apt.dat, e.g. "Grenchen"

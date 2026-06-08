@@ -148,18 +148,61 @@ freq_type_from_name(const std::string &name);
 
 // ── JSON loading ─────────────────────────────────────────────────
 
-static void load_from_file() {
-  std::string path = settings::atc_profile_data_dir() + "/flight_rules.json";
+static IfrDefaults ifr_defaults_;
+
+// Deep-merge overlay into base (same strategy as atc_templates.cpp):
+// objects recurse, arrays append, primitives — base wins.
+static void merge_into(nlohmann::json &base, const nlohmann::json &overlay) {
+  if (!overlay.is_object())
+    return;
+  for (auto &[key, val] : overlay.items()) {
+    if (key.rfind("_comment", 0) == 0)
+      continue;
+    if (!base.contains(key)) {
+      base[key] = val;
+    } else if (base[key].is_object() && val.is_object()) {
+      merge_into(base[key], val);
+    } else if (base[key].is_array() && val.is_array()) {
+      for (auto &item : val)
+        base[key].push_back(item);
+    }
+  }
+}
+
+static bool try_load_json(const std::string &path, nlohmann::json &out) {
   std::ifstream in(path);
-  if (!in.good()) {
+  if (!in.good())
+    return false;
+  try {
+    in >> out;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+static void load_from_file() {
+  std::string base_dir = settings::atc_profile_data_dir();
+
+  // Try split layout (vfr/ + optional ifr/) first, then fall back to legacy
+  // flat file so that profiles without a vfr/ subdir (DE, US) still work.
+  nlohmann::json j;
+  bool has_vfr = try_load_json(base_dir + "/vfr/flight_rules.json", j);
+  if (!has_vfr)
+    has_vfr = try_load_json(base_dir + "/flight_rules.json", j);
+
+  if (!has_vfr) {
     logging::info("Warning: flight_rules.json not found");
     loaded_ = false;
     return;
   }
 
+  nlohmann::json j_ifr;
+  bool has_ifr = try_load_json(base_dir + "/ifr/flight_rules.json", j_ifr);
+  if (has_ifr)
+    merge_into(j, j_ifr);
+
   try {
-    nlohmann::json j;
-    in >> j;
 
     // Phase thresholds
     if (j.contains("phase_thresholds")) {
@@ -348,13 +391,26 @@ static void load_from_file() {
       frequency_hint_set_ = true;
     }
 
+    // IFR defaults (only present after IFR overlay merge)
+    ifr_defaults_ = {};
+    if (j.contains("ifr_defaults") && j["ifr_defaults"].is_object()) {
+      auto &id = j["ifr_defaults"];
+      ifr_defaults_.initial_altitude_ft =
+          id.value("initial_altitude_ft", 5000);
+      ifr_defaults_.squawk_range_min = id.value("squawk_range_min", 1001);
+      ifr_defaults_.squawk_range_max = id.value("squawk_range_max", 6776);
+    }
+
     loaded_ = true;
-    logging::info("Flight rules loaded");
+    logging::info(has_ifr ? "Flight rules loaded (VFR + IFR merged)"
+                          : "Flight rules loaded (VFR only)");
   } catch (...) {
     logging::info("Warning: failed to parse flight_rules.json");
     loaded_ = false;
   }
 }
+
+const IfrDefaults &get_ifr_defaults() { return ifr_defaults_; }
 
 // ── Raw phase detection (no hysteresis) ──────────────────────────
 

@@ -61,6 +61,8 @@ ActiveFlow active() {
   case ATCState::UNICOM_ACTIVE:
   case ATCState::EN_ROUTE:
   case ATCState::APPROACH_CONTACT:
+  case ATCState::IFR_PREDEP_CLEARANCE:
+  case ATCState::IFR_CLEARED:
     return ActiveFlow::GroundOps;
   }
   return ActiveFlow::GroundOps;

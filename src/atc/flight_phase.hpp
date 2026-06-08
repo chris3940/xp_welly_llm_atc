@@ -101,6 +101,13 @@ struct FrequencyHint {
   std::string tower_response;
 };
 
+// IFR configuration loaded from ifr/flight_rules.json.
+struct IfrDefaults {
+  int initial_altitude_ft = 5000;
+  int squawk_range_min    = 1001;
+  int squawk_range_max    = 6776;
+};
+
 void init();
 void stop();
 void update(const xplane_context::XPlaneContext &ctx, float dt);
@@ -163,6 +170,9 @@ std::string get_tower_only_auto_advance(const std::string &state);
 // Wrong-frequency hint configuration (UNKNOWN freq at towered airport).
 // Returns nullptr when not configured.
 const FrequencyHint *get_frequency_hint();
+
+// IFR defaults (initial altitude, squawk range) loaded from ifr/flight_rules.json.
+const IfrDefaults &get_ifr_defaults();
 
 } // namespace flight_phase
 

@@ -46,7 +46,8 @@ static XPLMDataRef dr_onground_any = nullptr;
 static XPLMDataRef dr_com1_freq = nullptr;
 static XPLMDataRef dr_com2_freq = nullptr;
 static XPLMDataRef dr_active_com = nullptr;
-static XPLMDataRef dr_aircraft_icao = nullptr;
+static XPLMDataRef dr_aircraft_icao    = nullptr;
+static XPLMDataRef dr_ifr_destination  = nullptr;
 static XPLMDataRef dr_avionics_on = nullptr;
 static XPLMDataRef dr_com1_power = nullptr;
 static XPLMDataRef dr_com2_power = nullptr;
@@ -511,7 +512,8 @@ void init() {
       XPLMFindDataRef("sim/cockpit2/radios/actuators/com2_frequency_hz_833");
   dr_active_com =
       XPLMFindDataRef("sim/cockpit2/radios/actuators/audio_com_selection");
-  dr_aircraft_icao = XPLMFindDataRef("sim/aircraft/view/acf_ICAO");
+  dr_aircraft_icao   = XPLMFindDataRef("sim/aircraft/view/acf_ICAO");
+  dr_ifr_destination = XPLMFindDataRef("sim/flightmodel/misc/destination_airport_id");
   dr_avionics_on = XPLMFindDataRef("sim/cockpit/electrical/avionics_on");
   dr_com1_power = XPLMFindDataRef("sim/cockpit2/radios/actuators/com1_power");
   dr_com2_power = XPLMFindDataRef("sim/cockpit2/radios/actuators/com2_power");
@@ -598,6 +600,11 @@ void update() {
     char buf[64] = {};
     XPLMGetDatab(dr_aircraft_icao, buf, 0, sizeof(buf) - 1);
     ctx.aircraft_icao = buf;
+  }
+  if (dr_ifr_destination) {
+    char buf[8] = {};
+    XPLMGetDatab(dr_ifr_destination, buf, 0, sizeof(buf) - 1);
+    ctx.ifr_destination = buf;
   }
 
   if (dr_avionics_on)

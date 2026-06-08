@@ -156,6 +156,10 @@ struct AtcMachineState {
 
   internal::DepartureType departure_type_ = internal::DepartureType::PATTERN;
 
+  // Squawk code assigned during IFR pre-departure clearance.
+  // Empty until first IFR clearance is issued this session.
+  std::string ifr_squawk_;
+
   // Bounded chronological log of state transitions. Front = oldest,
   // back = most recent past state. Filled by transition_to(); read
   // by downstream consumers (LM-classify prompt, hint filter, intent
@@ -245,6 +249,10 @@ const char *state_name(ATCState state) {
     return "XC/EN_ROUTE";
   case ATCState::APPROACH_CONTACT:
     return "XC/APPROACH_CONTACT";
+  case ATCState::IFR_PREDEP_CLEARANCE:
+    return "IFR/PREDEP_CLEARANCE";
+  case ATCState::IFR_CLEARED:
+    return "IFR/CLEARED";
   }
   return "UNKNOWN";
 }
@@ -273,6 +281,10 @@ ATCState state_from_name(const std::string &name) {
       {"XC/EN_ROUTE", ATCState::EN_ROUTE},
       {"APPROACH_CONTACT", ATCState::APPROACH_CONTACT},
       {"XC/APPROACH_CONTACT", ATCState::APPROACH_CONTACT},
+      {"IFR/PREDEP_CLEARANCE", ATCState::IFR_PREDEP_CLEARANCE},
+      {"IFR_PREDEP_CLEARANCE", ATCState::IFR_PREDEP_CLEARANCE},
+      {"IFR/CLEARED", ATCState::IFR_CLEARED},
+      {"IFR_CLEARED", ATCState::IFR_CLEARED},
   };
   auto it = kMap.find(name);
   return it != kMap.end() ? it->second : ATCState::IDLE;
@@ -356,6 +368,18 @@ void set_departure_type(DepartureType t) {
 void set_last_now_secs(double t) { g_state.last_now_secs_ = t; }
 double last_now_secs() { return g_state.last_now_secs_; }
 
+const std::string &ifr_squawk_ref() { return g_state.ifr_squawk_; }
+void set_ifr_squawk(const std::string &sq) {
+  assert_flight_loop_thread();
+  bump_gen();
+  g_state.ifr_squawk_ = sq;
+}
+void clear_ifr_squawk() {
+  assert_flight_loop_thread();
+  bump_gen();
+  g_state.ifr_squawk_.clear();
+}
+
 } // namespace internal
 
 // ── Lifecycle ───────────────────────────────────────────────────────
@@ -402,6 +426,7 @@ void stop() {
   g_state.assigned_runway_.clear();
   g_state.session_callsign_.clear();
   g_state.departure_type_ = internal::DepartureType::PATTERN;
+  g_state.ifr_squawk_.clear();
   g_state.history_.clear();
   g_state.last_now_secs_ = 0.0;
   g_state.last_clearance_text_.clear();

@@ -59,6 +59,31 @@
     { "intent": "GO_AROUND",   "confidence": 0.95, "any": ["going around", "go around", "missed approach"] },
 
     {
+      "_note": "IFR clearance request to Delivery. Must come before REQUEST_TAXI / INITIAL_CALL_GROUND to prevent 'request taxi IFR' from being swallowed by the taxi rule.",
+      "intent": "REQUEST_IFR_CLEARANCE",
+      "confidence": 0.93,
+      "any": [
+        { "all": ["request", "ifr", "clearance"] },
+        { "all": ["request", "clearance", { "any": ["delivery", "clears"] }] },
+        { "all": ["ifr", "clearance"] }
+      ]
+    },
+
+    {
+      "_note": "Engine startup request — after IFR clearance readback, before taxi.",
+      "intent": "REQUEST_STARTUP",
+      "confidence": 0.92,
+      "any": [
+        "request startup",
+        "request start up",
+        "request start-up",
+        { "all": ["startup", "pushback"] },
+        { "all": ["start up", "pushback"] }
+      ],
+      "none": ["engine running", "engines running"]
+    },
+
+    {
       "_note": "Pilot-initiated frequency change announcement (not a request, not ATC's own 'approved' readback). Either an unconditional sign-off phrase, OR a 'frequency change' phrase that is NOT a request and NOT ATC's approval ack.",
       "intent": "LEAVING_FREQUENCY",
       "confidence": 0.85,

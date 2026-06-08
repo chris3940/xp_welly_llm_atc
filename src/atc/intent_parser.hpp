@@ -58,6 +58,9 @@ enum class PilotIntent {
   TRAFFIC_NEGATIVE_CONTACT,
   TRAFFIC_LOOKING,
   REQUEST_REPEAT, // NfL §18 c) Nr. 4 — "WIEDERHOLEN SIE / SAY AGAIN"
+  // IFR Phase 4
+  REQUEST_IFR_CLEARANCE, // "request IFR clearance to [destination]"
+  REQUEST_STARTUP,       // "request startup [and pushback]"
 };
 
 struct PilotMessage {

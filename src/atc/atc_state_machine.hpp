@@ -47,6 +47,9 @@ enum class ATCState {
   UNICOM_ACTIVE,
   EN_ROUTE,
   APPROACH_CONTACT,
+  // IFR Phase 4
+  IFR_PREDEP_CLEARANCE, // clearance issued, awaiting full readback
+  IFR_CLEARED,          // readback correct, startup approved
 };
 
 struct ATCResponse {

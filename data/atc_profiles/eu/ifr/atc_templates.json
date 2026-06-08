@@ -1,0 +1,57 @@
+{
+  "_comment": "IFR ATC response templates — Eurocontrol ICAO English phraseology. Merged with eu/vfr/atc_templates.json at load time; keys here extend (never override) VFR entries. Phase 4, Slice 1: Delivery clearance + startup flow.",
+
+  "towered": {
+    "IDLE": {
+      "_comment_ifr": "IFR clearance request handled by Delivery. Added to VFR IDLE block on merge.",
+      "REQUEST_IFR_CLEARANCE": {
+        "response": "{callsign}, {airport} Delivery, cleared to {ifr_destination}, own navigation, climb to {ifr_initial_altitude}, squawk {squawk}, QNH {qnh}, information {atis_letter} current.",
+        "next_state": "IFR/PREDEP_CLEARANCE",
+        "requires_readback": true
+      }
+    },
+
+    "IFR/PREDEP_CLEARANCE": {
+      "_comment": "Clearance issued. ATC waits for full readback before approving startup.",
+      "READBACK": {
+        "response": "{callsign}, readback correct, startup approved{ifr_ground_handoff}.",
+        "next_state": "IFR/CLEARED",
+        "requires_readback": false
+      },
+      "_INVALID": {
+        "response": "{callsign}, read back IFR clearance in full.",
+        "next_state": "IFR/PREDEP_CLEARANCE",
+        "requires_readback": true
+      }
+    },
+
+    "IFR/CLEARED": {
+      "_comment": "Startup approved. Pilot may request taxi or call Ground.",
+      "REQUEST_STARTUP": {
+        "response": "{callsign}, startup approved.",
+        "next_state": "IFR/CLEARED",
+        "requires_readback": false
+      },
+      "INITIAL_CALL_GROUND": {
+        "response": "{callsign}, {airport} Ground, taxi to holding point runway {runway} via Alpha, QNH {qnh}.",
+        "next_state": "TAXI_CLEARED",
+        "requires_readback": true
+      },
+      "REQUEST_TAXI": {
+        "response": "{callsign}, taxi to holding point runway {runway} via Alpha, QNH {qnh}.",
+        "next_state": "TAXI_CLEARED",
+        "requires_readback": true
+      },
+      "READBACK": {
+        "response": "",
+        "next_state": "IFR/CLEARED",
+        "requires_readback": false
+      },
+      "_INVALID": {
+        "response": "{callsign}, startup approved, request taxi when ready.",
+        "next_state": "IFR/CLEARED",
+        "requires_readback": false
+      }
+    }
+  }
+}
