@@ -34,15 +34,24 @@ struct CifpAlt {
 
 // Returns the initial climb altitude from the first SID waypoint for
 // the given runway, parsed from <cifp_dir>/<icao>.dat.
+// If no SID is found for active_runway, the reciprocal runway is tried as a
+// fallback (e.g. calm-wind active="04" but SIDs only coded for "22").
 //
 // Returns {0, false} when:
 //   - cifp_dir is empty (headless / atc_repl)
 //   - the CIFP file doesn't exist for this airport
 //   - the airport has no SIDs (general aviation, uncontrolled)
-//   - no SID with an altitude constraint is found for the active runway
+//   - no SID with an altitude constraint is found for any runway
 CifpAlt initial_altitude(const std::string &cifp_dir,
                          const std::string &icao,
                          const std::string &active_runway);
+
+// Returns the runway designator (without "RW" prefix, e.g. "22") that has the
+// most SID procedures in the CIFP file for the given airport.  Used by the
+// runway selection logic so calm-wind departures prefer the procedural runway.
+// Returns empty string if the CIFP file is absent or has no SIDs.
+std::string preferred_departure_runway(const std::string &cifp_dir,
+                                       const std::string &icao);
 
 } // namespace cifp_reader
 

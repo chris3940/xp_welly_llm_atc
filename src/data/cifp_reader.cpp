@@ -18,12 +18,16 @@
 
 #include "data/cifp_reader.hpp"
 
+#include "core/logging.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <climits>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace cifp_reader {
@@ -87,8 +91,13 @@ CifpAlt initial_altitude(const std::string &cifp_dir,
   for (char &c : icao_upper)
     c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
 
-  std::ifstream in(dir + icao_upper + ".dat");
-  if (!in.good()) return {};
+  std::string path = dir + icao_upper + ".dat";
+  std::ifstream in(path);
+  if (!in.good()) {
+    logging::debug("[cifp] file not found: %s (icao=%s rwy=%s) -> fallback",
+                   path.c_str(), icao_upper.c_str(), active_runway.c_str());
+    return {};
+  }
 
   // Runway match string: prepend "RW", e.g. "22" → "RW22", "09L" → "RW09L"
   std::string rwy_match = "RW" + active_runway;
@@ -130,6 +139,112 @@ CifpAlt initial_altitude(const std::string &cifp_dir,
     }
   }
 
+  if (best.feet > 0) {
+    logging::debug("[cifp] %s rwy %s -> %d ft (is_fl=%d)",
+                   icao_upper.c_str(), active_runway.c_str(),
+                   best.feet, best.is_fl ? 1 : 0);
+    return best;
+  }
+
+  // No SID found for the requested runway.  Try the reciprocal end as a
+  // fallback (calm-wind selection may have picked the non-procedure end).
+  logging::debug("[cifp] %s rwy %s -> no SID found, trying reciprocal",
+                 icao_upper.c_str(), active_runway.c_str());
+
+  // Compute reciprocal: strip optional L/R/C suffix, flip number by ±18.
+  if (!active_runway.empty()) {
+    std::string digits = active_runway;
+    char suffix = 0;
+    if (!digits.empty() && (digits.back() == 'L' || digits.back() == 'R' ||
+                             digits.back() == 'C')) {
+      suffix = digits.back();
+      digits.pop_back();
+    }
+    try {
+      int num = std::stoi(digits);
+      int recip_num = (num <= 18) ? num + 18 : num - 18;
+      char recip_buf[16];
+      std::snprintf(recip_buf, sizeof(recip_buf), "%02d", recip_num);
+      std::string recip = recip_buf;
+      if (suffix == 'L') recip += 'R';
+      else if (suffix == 'R') recip += 'L';
+      else if (suffix == 'C') recip += 'C';
+
+      // Re-read from the start of the file for the reciprocal runway.
+      in.clear();
+      in.seekg(0);
+      std::string recip_match = "RW" + recip;
+      int recip_best_seq = INT_MAX;
+      CifpAlt recip_best;
+
+      while (std::getline(in, line)) {
+        if (line.size() < 4 || line.compare(0, 4, "SID:") != 0) continue;
+        auto f2 = split_csv(line);
+        if (f2.size() < 26) continue;
+        if (trim(f2[3]) != recip_match) continue;
+        std::string seq_str2 = trim(f2[0]);
+        if (seq_str2.size() <= 4) continue;
+        int seq2 = 0;
+        try { seq2 = std::stoi(seq_str2.substr(4)); } catch (...) { continue; }
+        std::string pterm2 = trim(f2[11]);
+        CifpAlt alt2;
+        if (pterm2 == "CF" && f2.size() > 25) alt2 = parse_alt(f2[25]);
+        else if ((pterm2 == "DF" || pterm2 == "TF") && f2.size() > 23)
+          alt2 = parse_alt(f2[23]);
+        if (alt2.feet > 0 && seq2 < recip_best_seq) {
+          recip_best_seq = seq2;
+          recip_best = alt2;
+        }
+      }
+
+      if (recip_best.feet > 0) {
+        logging::debug("[cifp] %s reciprocal rwy %s -> %d ft (is_fl=%d)",
+                       icao_upper.c_str(), recip.c_str(),
+                       recip_best.feet, recip_best.is_fl ? 1 : 0);
+        return recip_best;
+      }
+    } catch (...) {}
+  }
+
+  logging::debug("[cifp] %s rwy %s -> fallback (no SID on either end)",
+                 icao_upper.c_str(), active_runway.c_str());
+  return {};
+}
+
+std::string preferred_departure_runway(const std::string &cifp_dir,
+                                       const std::string &icao) {
+  if (cifp_dir.empty() || icao.empty()) return {};
+
+  std::string dir = cifp_dir;
+  if (dir.back() != '/') dir += '/';
+
+  std::string icao_upper = icao;
+  for (char &c : icao_upper)
+    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+
+  std::ifstream in(dir + icao_upper + ".dat");
+  if (!in.good()) return {};
+
+  // Count SID records per runway designator, return the one with most entries.
+  std::unordered_map<std::string, int> counts;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.size() < 4 || line.compare(0, 4, "SID:") != 0) continue;
+    auto f = split_csv(line);
+    if (f.size() < 4) continue;
+    std::string rwy = trim(f[3]);
+    if (rwy.size() > 2 && rwy[0] == 'R' && rwy[1] == 'W')
+      counts[rwy.substr(2)]++;
+  }
+
+  std::string best;
+  int best_count = 0;
+  for (auto &kv : counts) {
+    if (kv.second > best_count) {
+      best_count = kv.second;
+      best = kv.first;
+    }
+  }
   return best;
 }
 

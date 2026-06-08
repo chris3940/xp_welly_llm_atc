@@ -10,6 +10,7 @@
 
 #include "core/xplane_context.hpp"
 #include "data/airspace_db.hpp"
+#include "data/cifp_reader.hpp"
 #include "persistence/settings.hpp"
 
 #include <XPLMDataAccess.h>
@@ -113,7 +114,9 @@ static float initial_bearing(double lat1, double lon1, double lat2,
 
 // Forward decl (defined further down).
 static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
-                                        float wind_dir, float wind_speed);
+                                        float wind_dir, float wind_speed,
+                                        const std::string &cifp_dir = {},
+                                        const std::string &icao = {});
 
 // Populate ctx airport fields from caches for a given ICAO.
 // Used for both the locked-airport path and as the tail of update().
@@ -151,7 +154,8 @@ static void populate_ctx_from_cache(const std::string &icao,
   if (rwy_it != runway_cache_.end()) {
     ctx.runways = rwy_it->second;
     ctx.active_runway = select_active_runway(
-        ctx.runways, ctx.wind_direction_deg, ctx.wind_speed_kt);
+        ctx.runways, ctx.wind_direction_deg, ctx.wind_speed_kt,
+        ctx.cifp_dir, icao);
   } else {
     ctx.runways.clear();
     ctx.active_runway.clear();
@@ -225,11 +229,15 @@ static bool is_paved(int surface_code) {
 }
 
 static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
-                                        float wind_dir, float wind_speed) {
+                                        float wind_dir, float wind_speed,
+                                        const std::string &cifp_dir,
+                                        const std::string &icao) {
   if (runways.empty())
     return "";
 
-  // Calm wind (< 3 kt): pick longest paved runway, prefer lower-numbered end
+  // Calm wind (< 3 kt): pick longest paved runway.
+  // Prefer the end that has SID procedures in the CIFP file (IFR convention);
+  // fall back to the lower-numbered end when no CIFP data is available.
   if (wind_speed < 3.0f) {
     const RunwayInfo *best = nullptr;
     for (const auto &rwy : runways) {
@@ -239,7 +247,15 @@ static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
            rwy.length_m > best->length_m))
         best = &rwy;
     }
-    // Return lower-numbered end
+    // CIFP tiebreak: prefer the runway end that has SID procedures.
+    if (!cifp_dir.empty() && !icao.empty()) {
+      std::string pref = cifp_reader::preferred_departure_runway(cifp_dir, icao);
+      if (!pref.empty()) {
+        if (best->end1.number == pref) return best->end1.number;
+        if (best->end2.number == pref) return best->end2.number;
+      }
+    }
+    // Fallback: lower-numbered end
     if (best->end1.number < best->end2.number)
       return best->end1.number;
     return best->end2.number;
@@ -853,7 +869,8 @@ void update() {
         if (it != runway_cache_.end()) {
           ctx.runways = it->second;
           ctx.active_runway = select_active_runway(
-              ctx.runways, ctx.wind_direction_deg, ctx.wind_speed_kt);
+              ctx.runways, ctx.wind_direction_deg, ctx.wind_speed_kt,
+              ctx.cifp_dir, ctx.nearest_airport_id);
         } else {
           ctx.runways.clear();
           ctx.active_runway.clear();

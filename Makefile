@@ -374,12 +374,13 @@ DIST_VERSION := $(shell cat VERSION.txt 2>/dev/null | tr -d '[:space:]')
 ifeq ($(DIST_VERSION),)
     DIST_VERSION := dev
 endif
+DIST_GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null)
 ifeq ($(OS),Darwin)
     DIST_PLATFORM := mac
 else
     DIST_PLATFORM := linux
 endif
-DIST_NAME    := xp_wellys_atc-$(DIST_PLATFORM)-$(DIST_VERSION)
+DIST_NAME    := xp_wellys_atc-$(DIST_PLATFORM)-$(DIST_VERSION)-$(DIST_GIT_HASH)
 DIST_STAGE   := dist/$(DIST_NAME)/xp_wellys_atc
 
 package:

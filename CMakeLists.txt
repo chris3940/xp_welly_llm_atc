@@ -522,6 +522,7 @@ if(UNIX AND NOT APPLE)
                 COMMAND ${PATCHELF_EXECUTABLE} --set-rpath "$ORIGIN"
                         "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:piper>"
                 COMMENT "Patching libpiper.so RPATH to $ORIGIN"
+                VERBATIM
             )
         else()
             message(WARNING
