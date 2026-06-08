@@ -100,10 +100,11 @@ $(SDK_SENTINEL):
 	curl -fsSL "https://developer.x-plane.com/wp-content/plugins/code-sample-generation/sdk_zip_files/XPSDK430.zip" \
 	     -o "$$TMP/sdk.zip"; \
 	unzip -q "$$TMP/sdk.zip" -d "$$TMP/sdk_extracted"; \
-	mkdir -p sdk/XPLM sdk/XPWidgets sdk/Libraries/Win sdk/Libraries/Mac; \
-	find "$$TMP/sdk_extracted" -path "*/CHeaders/XPLM/*.h"   -exec cp {} sdk/XPLM/ \;; \
-	find "$$TMP/sdk_extracted" -path "*/CHeaders/Widgets/*.h" -exec cp {} sdk/XPWidgets/ \;; \
-	find "$$TMP/sdk_extracted" -path "*/Libraries/Win/*.lib"  -exec cp {} sdk/Libraries/Win/ \;; \
+	mkdir -p sdk/XPLM sdk/XPWidgets sdk/Libraries/Win sdk/Libraries/Mac sdk/Libraries/Lin; \
+	find "$$TMP/sdk_extracted" -path "*/CHeaders/XPLM/*.h"    -exec cp {} sdk/XPLM/ \;; \
+	find "$$TMP/sdk_extracted" -path "*/CHeaders/Widgets/*.h"  -exec cp {} sdk/XPWidgets/ \;; \
+	find "$$TMP/sdk_extracted" -path "*/Libraries/Win/*.lib"   -exec cp {} sdk/Libraries/Win/ \;; \
+	find "$$TMP/sdk_extracted" -path "*/Libraries/Lin/*.so"    -exec cp {} sdk/Libraries/Lin/ \;; \
 	cp -R "$$TMP/sdk_extracted"/*/Libraries/Mac/*.framework sdk/Libraries/Mac/ 2>/dev/null || \
 	find "$$TMP/sdk_extracted" -name "*.framework" -exec cp -R {} sdk/Libraries/Mac/ \;
 	@echo "SDK headers installed."
