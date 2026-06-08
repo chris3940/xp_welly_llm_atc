@@ -21,12 +21,15 @@
 
   "intent_frequency": {
     "REQUEST_IFR_CLEARANCE": {
-      "allowed": ["DELIVERY", "GROUND"],
-      "rejection": "{callsign}, contact Delivery for IFR clearance."
+      "allowed": ["DELIVERY", "GROUND", "TOWER"],
+      "rejection": "{callsign}, request IFR clearance on Ground or Tower."
     },
     "REQUEST_STARTUP": {
-      "allowed": ["DELIVERY", "GROUND"],
+      "allowed": ["DELIVERY", "GROUND", "TOWER"],
       "rejection": "{callsign}, contact Delivery or Ground for startup."
+    },
+    "REQUEST_TAXI": {
+      "allowed": ["TOWER"]
     },
     "READBACK": {
       "allowed": ["DELIVERY"]
@@ -39,7 +42,7 @@
   "state_frequency_validity": {
     "DELIVERY": ["IDLE", "IFR/PREDEP_CLEARANCE", "IFR/CLEARED"],
     "GROUND":   ["IFR/PREDEP_CLEARANCE", "IFR/CLEARED"],
-    "TOWER":    ["IFR/CLEARED", "IFR/DEPARTURE_CLEARED", "IFR/EN_ROUTE"]
+    "TOWER":    ["IFR/PREDEP_CLEARANCE", "IFR/CLEARED", "IFR/DEPARTURE_CLEARED", "IFR/EN_ROUTE"]
   },
 
   "auto_corrections": {
@@ -74,8 +77,8 @@
   },
 
   "pilot_phraseology": {
-    "REQUEST_IFR_CLEARANCE": "{airport} Delivery, {callsign}{aircraft_type_phrase}, request IFR clearance to {ifr_destination}, information {atis_letter}",
-    "REQUEST_STARTUP": "{airport} Ground, {callsign}, request startup",
+    "REQUEST_IFR_CLEARANCE": "{airport} Tower, {callsign}{aircraft_type_phrase}, request IFR clearance to {ifr_destination}, information {atis_letter}",
+    "REQUEST_STARTUP": "{airport} Tower, {callsign}, request startup",
     "READY_FOR_DEPARTURE_IFR": "{airport} Tower, {callsign}, holding point runway {runway}, ready for departure IFR to {ifr_destination}"
   }
 }
