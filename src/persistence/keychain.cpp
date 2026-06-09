@@ -12,7 +12,9 @@
 #if defined(__linux__)
 #include <cstdio>
 #include <cstdlib>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace persistence::keychain {
@@ -119,13 +121,14 @@ bool save(const std::string &service, const std::string &account,
   std::string path = key_file_path(service);
   if (path.empty() || api_key.empty())
     return false;
-  FILE *f = std::fopen(path.c_str(), "w");
-  if (!f)
+  int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+  if (fd < 0)
     return false;
-  ::chmod(path.c_str(), 0600);
-  std::fwrite(api_key.c_str(), 1, api_key.size(), f);
+  FILE *f = ::fdopen(fd, "w");
+  if (!f) { ::close(fd); return false; }
+  bool ok = std::fwrite(api_key.c_str(), 1, api_key.size(), f) == api_key.size();
   std::fclose(f);
-  return true;
+  return ok;
 }
 
 std::string load(const std::string &service, const std::string &account) {
