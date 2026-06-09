@@ -9,6 +9,14 @@
 
 #include <cstring>
 
+#if defined(__linux__)
+#include <cstdio>
+#include <cstdlib>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace persistence::keychain {
 
 namespace {
@@ -94,6 +102,67 @@ bool has(const std::string &service, const std::string &account) {
 }
 
 #pragma clang diagnostic pop
+
+#elif defined(__linux__)
+
+static std::string key_file_path(const std::string &service) {
+  const char *home = std::getenv("HOME");
+  if (!home)
+    return {};
+  std::string dir = std::string(home) + "/.config/xp_wellys_atc";
+  ::mkdir(dir.c_str(), 0700);
+  return dir + "/" + service + ".key";
+}
+
+bool save(const std::string &service, const std::string &account,
+          const std::string &api_key) {
+  (void)account;
+  std::string path = key_file_path(service);
+  if (path.empty() || api_key.empty())
+    return false;
+  int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return false;
+  FILE *f = ::fdopen(fd, "w");
+  if (!f) { ::close(fd); return false; }
+  bool ok = std::fwrite(api_key.c_str(), 1, api_key.size(), f) == api_key.size();
+  std::fclose(f);
+  return ok;
+}
+
+std::string load(const std::string &service, const std::string &account) {
+  (void)account;
+  std::string path = key_file_path(service);
+  if (path.empty())
+    return {};
+  FILE *f = std::fopen(path.c_str(), "r");
+  if (!f)
+    return {};
+  char buf[512] = {};
+  size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+  std::fclose(f);
+  return std::string(buf, n);
+}
+
+bool remove(const std::string &service, const std::string &account) {
+  (void)account;
+  std::string path = key_file_path(service);
+  if (path.empty())
+    return false;
+  return std::remove(path.c_str()) == 0;
+}
+
+bool has(const std::string &service, const std::string &account) {
+  (void)account;
+  std::string path = key_file_path(service);
+  if (path.empty())
+    return false;
+  FILE *f = std::fopen(path.c_str(), "r");
+  if (!f)
+    return false;
+  std::fclose(f);
+  return true;
+}
 
 #else
 
