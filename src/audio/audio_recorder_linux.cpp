@@ -21,18 +21,32 @@ static constexpr size_t kCaptureFrames = 512;
 
 static void capture_loop() {
   int16_t chunk[kCaptureFrames];
+  constexpr int kMaxConsecutiveErrors = 10;
+  int consecutive_errors = 0;
   while (capture_running_.load()) {
     int error = 0;
     if (pa_simple_read(pa_stream_, chunk, sizeof(chunk), &error) < 0) {
       if (!capture_running_.load())
         break;
-      char log[128];
+      ++consecutive_errors;
+      char log[160];
       std::snprintf(log, sizeof(log),
-                    "[xp_wellys_atc] PulseAudio read error: %s\n",
+                    "[xp_wellys_atc] PulseAudio read error (%d/%d): %s\n",
+                    consecutive_errors, kMaxConsecutiveErrors,
                     pa_strerror(error));
       XPLMDebugString(log);
+      if (consecutive_errors >= kMaxConsecutiveErrors) {
+        XPLMDebugString("[xp_wellys_atc] PulseAudio: stream lost, "
+                        "stopping capture. Restart X-Plane to recover.\n");
+        pa_simple_free(pa_stream_);
+        pa_stream_  = nullptr;
+        initialized_ = false;
+        capture_running_ = false;
+        break;
+      }
       continue;
     }
+    consecutive_errors = 0;
     if (recording_.load()) {
       std::lock_guard<std::mutex> lock(buffer_mutex_);
       buffer_.insert(buffer_.end(), chunk, chunk + kCaptureFrames);
