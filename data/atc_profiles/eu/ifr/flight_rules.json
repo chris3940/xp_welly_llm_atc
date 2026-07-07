@@ -11,7 +11,8 @@
     "sid_deviation_cooldown_sec": 120,
     "ctr_departure_contact_alt_ft": 3000,
     "star_entry_alt_ft": 11000,
-    "approach_entry_alt_ft": 8000
+    "approach_entry_alt_ft": 8000,
+    "sid_handoff_min_alt_ft": 12000
   },
 
   "intent_preconditions": {

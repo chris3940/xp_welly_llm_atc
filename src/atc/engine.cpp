@@ -181,6 +181,13 @@ static bool s_sid_step1_issued = false;
 static bool s_sid_cruise_issued = false;
 static bool s_sid_radar_handoff_issued = false;
 static bool s_sid_initialized = false; // guards one-time init block
+// Intermediate TRACON handoffs already fired during the SID climb — one
+// entry per (kHz) frequency. Prevents retriggering when the aircraft
+// re-enters the same TRACON polygon or crosses back through a stacked
+// sub-polygon boundary. Used only by the "intermediate TRACON entry"
+// check in poll_sid_climb; the final "exited all TMAs" handoff has its
+// own s_sid_radar_handoff_issued flag.
+static std::unordered_set<uint32_t> s_sid_intermediate_tracon_khz_seen;
 // True once the aircraft has been detected INSIDE a CTR or TMA at least once.
 // The TMA-exit handoff is only issued when this transitions from true → false,
 // preventing a spurious handoff when the departure altitude is below the TMA
@@ -195,6 +202,10 @@ static float s_sid_deviation_cooldown_sec = 0.0f;
 // Used to build the direct leg (origin → fix) for post-direct deviation check.
 static double s_sid_direct_origin_lat = 0.0;
 static double s_sid_direct_origin_lon = 0.0;
+// Seconds elapsed since ATC issued the direct-to clearance. Used by the
+// post-direct heading-vs-bearing check (gives the FMS ~3 min to intercept
+// before we start comparing course to bearing_to_fix).
+static float s_sid_direct_elapsed_sec = 0.0f;
 // Departure airport position captured at radar-contact entry.
 // Kept here so nearest_airport_id cannot drift as the aircraft flies away.
 static double s_departure_apt_lat = 0.0;
@@ -246,6 +257,7 @@ void reset() {
   s_sid_deviation_cooldown_sec = 0.0f;
   s_sid_direct_origin_lat = 0.0;
   s_sid_direct_origin_lon = 0.0;
+  s_sid_direct_elapsed_sec = 0.0f;
   s_departure_apt_lat = 0.0;
   s_departure_apt_lon = 0.0;
   s_speed_250_warned = false;
@@ -828,25 +840,17 @@ void process_transcript(Input in, Done done) {
     return;
   }
 
-  // Early approach call while still en-route: pilot proactively contacts
-  // Approach before poll_enroute fires the formal handoff (e.g. TMA entry
-  // not yet detected, or pilot switched frequency ahead of the handoff cue).
-  // Promote state to IFR_APPROACH_CONTACT so the handler below fires the
-  // radar-contact + descent-clearance response immediately.
-  if (parsed.intent == PI::INITIAL_CALL_APPROACH &&
-      (atc_state_machine::get_state() ==
-           atc_state_machine::ATCState::IFR_ENROUTE_CRUISE ||
-       atc_state_machine::get_state() ==
-           atc_state_machine::ATCState::IFR_DESCENT) &&
-      !s_enroute_approach_handoff_issued) {
-    s_enroute_approach_handoff_issued = true;
-    // Leave s_enroute_approach_freq_mhz at 0 — unknown freq, accept any.
-    atc_state_machine::set_state(atc_state_machine::ATCState::IFR_APPROACH_CONTACT);
-    logging::info("IFR: pilot called Approach early (state=%s) -- promoted to APPROACH_CONTACT",
-                  atc_state_machine::state_name(atc_state_machine::get_state()));
-    // Falls through: INITIAL_CALL_APPROACH + IFR_APPROACH_CONTACT handler below
-    // gives the radar-contact + descent-clearance response.
-  }
+  // (removed) "Early approach call while still en-route" promotion.
+  // Reading the pilot's intent word ("Radar" / "Approach") to jump state
+  // to IFR_APPROACH_CONTACT is an anti-pattern: it lets any en-route
+  // ACC/Center check-in ("Milano Radar", "Marseille Control") trigger
+  // the DESTINATION approach clearance mid-cruise. See
+  // feedback_approach_freq_defines_intent — state transitions must be
+  // frequency- and geometry-driven, never phraseology-driven. Approach
+  // state is entered ONLY when the plugin itself issued a "contact
+  // Approach on X" handoff (poll_enroute / poll_descent), setting state
+  // and s_enroute_approach_freq_mhz. The check-in handler below then
+  // fires the full clearance gated on frequency match, not on words.
 
   // IFR Approach check-in: intercept INITIAL_CALL_APPROACH in APPROACH_CONTACT
   // to issue "identified, descend FL[initial]" directly (template cannot hold
@@ -2256,6 +2260,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     s_sid_step1_issued = false;
     s_sid_cruise_issued = false;
     s_sid_radar_handoff_issued = false;
+    s_sid_intermediate_tracon_khz_seen.clear();
     s_sid_was_in_tma = false;
     s_sid_tma_check_sec = 0.0f;
     s_sid_initialized = false;
@@ -2264,6 +2269,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     s_sid_deviation_cooldown_sec = 0.0f;
     s_sid_direct_origin_lat = 0.0;
     s_sid_direct_origin_lon = 0.0;
+    s_sid_direct_elapsed_sec = 0.0f;
     s_departure_apt_lat = 0.0;
     s_departure_apt_lon = 0.0;
     return false;
@@ -2318,6 +2324,98 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
                     floor_ft, cruise_ft, round_to_fl(mid_ft),
                     floor_ft >= cruise_ft
                         ? " [SID min ABOVE cruise - FPL too low]" : "");
+    }
+  }
+
+  // ── Phase 2.8: intermediate APP -> Radar/Center handoff during SID climb
+  // Fires the "contact Milan on 118.675" / "contact Lyon on 123.700" call
+  // mid-climb instead of holding the pilot on the departure Approach
+  // controller all the way to the top of the CTA stack (FL195+ in EU).
+  //
+  // Scenario this fixes: LIMF -> LFLP. Torino APP is the departure
+  // controller (freq 121.100 from apt.dat). Above FL100-FL120 real ATC
+  // hands the pilot to Milan Radar / Milan ACC. Without this check, the
+  // pilot stayed on Torino APP all the way to FL220 (the "exited all
+  // TMAs" Phase 3 primary handoff), which is unrealistic.
+  //
+  // Handoff target: innermost TRACON if any exists in ctx.enclosing_airspaces
+  // (matches sector-change preference); falls back to innermost CTR when
+  // no TRACON polygon covers the position. MILAN RADAR's atc.dat TRACON
+  // polygons are geographically limited to the Milan hub area — for
+  // LIMF -> LFLP the aircraft's climb corridor is NOT inside them, but
+  // MILAN CTR (blanket 0-60000) IS enclosing. Without the CTR fallback,
+  // Phase 2.8 finds no TRACON and never fires. The CTR fallback picks up
+  // MILAN CTR (freq 118.675, different from Torino APP 121.100) and the
+  // handoff fires correctly.
+  //
+  // Guards (order matters):
+  //   1. State = IFR_RADAR_CONTACT + SID init complete (existing block).
+  //   2. Altitude >= sid_handoff_min_alt_ft (ifr_defaults):
+  //      EU default 12000 ft (FL120), US default 10000 ft (FL100).
+  //      Prevents firing during the initial climb where Approach still
+  //      works the aircraft. Struct default 10000; EU JSON overrides to
+  //      12000 via data/atc_profiles/eu/ifr/flight_rules.json.
+  //   3. Best controller's freq differs from s_pending_handoff_freq_mhz.
+  //   4. Fire-once per controller freq (kHz key) via
+  //      s_sid_intermediate_tracon_khz_seen — prevents retrigger on
+  //      polygon re-entry or stacked sub-polygon boundaries.
+  //
+  // Does NOT replace the "exited all TMAs" primary handoff below (Phase 3);
+  // this only ADDS an intermediate handoff between Tower/APP and Centre.
+  if (!s_sid_radar_handoff_issued && s_sid_initialized) {
+    const int handoff_min_ft = defaults.sid_handoff_min_alt_ft > 0
+                                   ? defaults.sid_handoff_min_alt_ft
+                                   : 10000;
+    if (static_cast<int>(ctx.altitude_ft_msl) >= handoff_min_ft) {
+      using CR = airspace_db::ControllerRole;
+      // Innermost TRACON first (matches sector-change logic); CTR fallback
+      // when no TRACON polygon covers the position.
+      const airspace_db::Controller *best = nullptr;
+      for (const auto *c : ctx.enclosing_airspaces) {
+        if (!c || c->freqs_khz.empty()) continue;
+        if (c->role == CR::TRACON) {
+          if (!best || best->role != CR::TRACON ||
+              c->floor_ft > best->floor_ft)
+            best = c;
+        } else if (c->role == CR::CTR) {
+          if (!best || (best->role != CR::TRACON &&
+                        c->floor_ft > best->floor_ft))
+            best = c;
+        }
+      }
+      if (best) {
+        uint32_t new_khz = best->freqs_khz.front();
+        float new_mhz = static_cast<float>(new_khz) / 1000.0f;
+        const bool same_as_pending =
+            s_pending_handoff_freq_mhz > 100.0f &&
+            std::fabs(new_mhz - s_pending_handoff_freq_mhz) < 0.005f;
+        const bool already_seen =
+            s_sid_intermediate_tracon_khz_seen.count(new_khz) > 0;
+        if (!same_as_pending && !already_seen) {
+          std::string new_label = controller_label_for(best);
+          if (new_label.empty())
+            new_label = (best->role == CR::TRACON) ? "Radar" : "Control";
+          const std::string &cs_ir = atc_state_machine::session_callsign();
+          const std::string &callsign_ir =
+              cs_ir.empty() ? settings::pilot_callsign() : cs_ir;
+          if (out_text) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "%s, contact %s on %.3f.",
+                          callsign_ir.c_str(), new_label.c_str(), new_mhz);
+            *out_text = buf;
+          }
+          s_sid_intermediate_tracon_khz_seen.insert(new_khz);
+          s_current_controller_label = new_label;
+          s_pending_handoff_freq_mhz = new_mhz;
+          s_sector_checkin_pending = true;
+          logging::info(
+              "IFR SID climb: intermediate handoff -> %s %.3f MHz "
+              "at %.0f ft MSL (role=%s)",
+              new_label.c_str(), new_mhz, ctx.altitude_ft_msl,
+              best->role == CR::TRACON ? "TRACON" : "CTR");
+          return true;
+        }
+      }
     }
   }
 
@@ -2604,10 +2702,38 @@ skip_tma_check:;
     bool far_enough = dist_nm >= 10.0;
     bool fallback = s_sid_climb_timer > 600.0f;
     if (!s_sid_step1_issued && (far_enough || fallback)) {
+      // 20 % probability: fire the "direct <SID last fix>, climb FL X"
+      // shortcut. 80 % of the time issue a plain "climb FL X" without the
+      // direct-to — models real ATC variability (many controllers let the
+      // aircraft follow the full SID silently). Only gate if we actually
+      // have a valid SID last fix to direct-to; otherwise we always
+      // issue the plain climb (no shortcut possible).
+      const bool have_last_fix = !ctx.ifr_sid_last_fix.empty();
+      const bool fire_direct = have_last_fix && ((std::rand() % 5) == 0);
       s_sid_step1_issued = true;
-      s_sid_direct_issued = true;
-      s_sid_direct_origin_lat = ctx.latitude;
-      s_sid_direct_origin_lon = ctx.longitude;
+      s_sid_direct_issued = fire_direct;
+      if (fire_direct) {
+        s_sid_direct_origin_lat = ctx.latitude;
+        s_sid_direct_origin_lon = ctx.longitude;
+        s_sid_direct_elapsed_sec = 0.0f;
+        // Advance route tracker to the direct fix — mirrors the STAR /
+        // approach direct-to pattern (engine.cpp ~5102) so downstream
+        // "next fix" reporting reflects the actual routing. Without this
+        // the tracker keeps advancing through intermediate SID waypoints
+        // that the aircraft is now bypassing (e.g. MF702, MF418 for LIMF
+        // KUKE1X → direct KUKEV).
+        const std::string &target = ctx.ifr_sid_last_fix;
+        for (int ri = s_route_fix_idx;
+             ri < static_cast<int>(s_route_fixes.size()); ++ri) {
+          if (s_route_fixes[ri].ident == target) {
+            s_route_fix_idx = ri;
+            s_pending_route_direct = "ATC direct: " + target;
+            logging::info("[route] ATC direct: %s (idx=%d, SID)",
+                          target.c_str(), ri);
+            break;
+          }
+        }
+      }
       // Give the FMS time to intercept the new direct track before the
       // cross-track deviation check can fire.
       s_sid_deviation_cooldown_sec = defaults.sid_deviation_cooldown_sec;
@@ -2631,7 +2757,11 @@ skip_tma_check:;
       if (out_text) {
         const std::string &last_fix = ctx.ifr_sid_last_fix;
         char buf[128];
-        if (!last_fix.empty()) {
+        // Only speak "direct FIX" when the 20% probability gate above
+        // (fire_direct) actually fired. Without this second check the
+        // clearance always said "direct FIX, climb FL X" while only the
+        // internal s_sid_direct_issued flag respected the gate.
+        if (s_sid_direct_issued && !last_fix.empty()) {
           std::snprintf(buf, sizeof(buf),
                         "%s, direct %s, climb flight level %d.",
                         callsign.c_str(), last_fix.c_str(), step1_fl);
@@ -2647,39 +2777,84 @@ skip_tma_check:;
     }
   }
 
-  // ── SID cross-track deviation warning ─────────────────────────────────
-  // Tolerance 2 NM (tighter than en-route 5 NM — SIDs follow specific
-  // terrain/obstacle clearance tracks). 2-minute cooldown.
-  // Before direct: check vs SID legs in the navlog (is_sid_star == true).
-  // After direct:  check vs the direct leg (stored origin → direct fix).
+  // ── SID deviation warning ──────────────────────────────────────────────
+  // Two modes:
+  //   Before direct: cross-track vs SID legs in the navlog (2 NM tolerance,
+  //   2-minute cooldown). SID legs are dense and lateral offset is a
+  //   meaningful indicator that the pilot is not following the SID.
+  //   After direct: heading-vs-bearing to the assigned fix, checked
+  //   starting 180 s after the "direct FIX" was issued. Real ATC does
+  //   NOT measure cross-track from the origin — they look at whether the
+  //   aircraft is on a converging course. A large lateral offset with
+  //   correct heading is a normal parallel-intercept manoeuvre and
+  //   should not warn (LIMF-KUKEV false-positive fix).
   s_sid_deviation_cooldown_sec =
       std::max(0.0f, s_sid_deviation_cooldown_sec - dt);
+  if (s_sid_direct_issued)
+    s_sid_direct_elapsed_sec += dt;
+
   if (s_sid_deviation_cooldown_sec <= 0.0f) {
-    auto ofp = simbrief_ofp::get();
-    if (ofp.valid && !ofp.navlog.empty()) {
-      const std::string &direct_fix =
-          s_sid_direct_issued ? ctx.ifr_sid_last_fix : std::string{};
-      double xt_nm = procedure_deviation_nm(ctx, ofp.navlog,
-                                            /*sid_star_only=*/true, direct_fix,
-                                            s_sid_direct_origin_lat,
-                                            s_sid_direct_origin_lon);
-      if (xt_nm > 2.0 && xt_nm < 1e8) {
-        s_sid_deviation_cooldown_sec = defaults.sid_deviation_cooldown_sec;
-        if (out_text) {
-          char buf[160];
-          if (s_sid_direct_issued && !direct_fix.empty())
-            std::snprintf(buf, sizeof(buf),
-                          "%s, confirm direct %s, you appear %.0f NM off track.",
-                          callsign.c_str(), direct_fix.c_str(), xt_nm);
-          else
+    if (s_sid_direct_issued) {
+      // Heading-vs-bearing check, 180 s post-direct.
+      const std::string &direct_fix = ctx.ifr_sid_last_fix;
+      if (!direct_fix.empty() && s_sid_direct_elapsed_sec >= 180.0f) {
+        double fix_lat = 0.0, fix_lon = 0.0;
+        bool have_fix = false;
+        for (const auto &rf : s_route_fixes) {
+          if (rf.ident == direct_fix) {
+            fix_lat = rf.lat;
+            fix_lon = rf.lon;
+            have_fix = true;
+            break;
+          }
+        }
+        if (have_fix) {
+          double brg = traffic_geometry::bearing_deg(ctx.latitude, ctx.longitude,
+                                                    fix_lat, fix_lon);
+          double diff = std::fabs(brg - ctx.heading_true);
+          if (diff > 180.0) diff = 360.0 - diff;
+          // 25 deg = 10 deg intercept + 10 deg wind correction + 5 deg slop.
+          if (diff > 25.0) {
+            s_sid_deviation_cooldown_sec = defaults.sid_deviation_cooldown_sec;
+            if (out_text) {
+              char buf[160];
+              std::snprintf(buf, sizeof(buf),
+                            "%s, confirm direct %s, "
+                            "you appear tracking heading %.0f, expected %.0f.",
+                            callsign.c_str(), direct_fix.c_str(),
+                            static_cast<double>(ctx.heading_true), brg);
+              *out_text = buf;
+            }
+            logging::info("IFR SID: heading %.0f vs bearing %.0f to %s "
+                          "(diff %.0f, post-direct %.0f s)",
+                          static_cast<double>(ctx.heading_true), brg,
+                          direct_fix.c_str(), diff,
+                          static_cast<double>(s_sid_direct_elapsed_sec));
+            return true;
+          }
+        }
+      }
+    } else {
+      // Pre-direct: original cross-track check vs SID legs.
+      auto ofp = simbrief_ofp::get();
+      if (ofp.valid && !ofp.navlog.empty()) {
+        double xt_nm = procedure_deviation_nm(ctx, ofp.navlog,
+                                              /*sid_star_only=*/true,
+                                              /*direct_fix=*/std::string{},
+                                              0.0, 0.0);
+        if (xt_nm > 2.0 && xt_nm < 1e8) {
+          s_sid_deviation_cooldown_sec = defaults.sid_deviation_cooldown_sec;
+          if (out_text) {
+            char buf[160];
             std::snprintf(buf, sizeof(buf),
                           "%s, confirm SID routing, you appear %.0f NM off track.",
                           callsign.c_str(), xt_nm);
-          *out_text = buf;
+            *out_text = buf;
+          }
+          logging::info("IFR SID: cross-track deviation %.1f NM (pre-direct)",
+                        xt_nm);
+          return true;
         }
-        logging::info("IFR SID: cross-track deviation %.1f NM (direct=%s)",
-                      xt_nm, s_sid_direct_issued ? "yes" : "no");
-        return true;
       }
     }
   }
@@ -3333,9 +3508,12 @@ pick_direct_fix(const xplane_context::XPlaneContext &ctx,
 
 // ── poll_speed_restriction ────────────────────────────────────────────────
 // ICAO standard: all aircraft must maintain 250 kt IAS or less below FL100.
-// Fires once per descent through FL100; resets when aircraft climbs back above
-// FL100 so the advisory re-fires on the next descent.
-// A 5 kt hysteresis band (255 kt threshold) prevents chattering near the limit.
+// Continuously enforced: fires "reduce speed, 250 knots or less" whenever the
+// aircraft is below FL100 (10 000 ft MSL) AND IAS > 255 kt (5 kt hysteresis).
+// After firing, the flag is held UNTIL the pilot complies (IAS <= 245 kt) —
+// then a subsequent overspeed re-fires the advisory. Also resets when the
+// aircraft climbs back above FL100 (+ 500 ft hysteresis), so a fresh descent
+// re-arms the check even if the pilot never complied at high altitude.
 bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
                             std::string *out_text) {
   using AS = atc_state_machine::ATCState;
@@ -3347,8 +3525,13 @@ bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
       state != AS::IFR_APPROACH_TOWER)
     return false;
 
-  // Reset flag when aircraft climbs back above FL100 (+ 500 ft hysteresis).
+  // Reset flag when aircraft climbs back above FL100 (+ 500 ft hysteresis)
+  // OR when the pilot complies (IAS <= 245 kt, 5 kt hysteresis below 250).
+  // Compliance-reset lets the advisory re-fire if the pilot subsequently
+  // exceeds 250 kt again while still below FL100.
   if (ctx.altitude_ft_msl > 10500.0f)
+    s_speed_250_warned = false;
+  else if (ctx.indicated_airspeed_kts <= 245.0f)
     s_speed_250_warned = false;
 
   if (s_speed_250_warned)

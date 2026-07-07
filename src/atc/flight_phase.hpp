@@ -128,6 +128,19 @@ struct IfrDefaults {
   // Phase 4 descent clearance altitude issued by Approach controller.
   // Formatted as FL when >= 5000 ft (e.g. 8000 -> "flight level 80"), else "N feet".
   int approach_entry_alt_ft = 8000;
+  // Minimum aircraft altitude before poll_sid_climb can fire the
+  // intermediate APP -> Radar/Center handoff during SID climb.
+  // Prevents firing the handoff immediately after aircraft exits the
+  // departure CTR (where Approach still handles the initial climb).
+  // Struct default 10000 (FL100) matches typical US TRACON ceiling —
+  // used when the active profile's flight_rules.json has no ifr_defaults
+  // section (US case). EU profile overrides to 12000 (FL120) via its
+  // ifr_defaults JSON since Italian / French CTA stacks extend to
+  // FL195 and Approach controllers work traffic that high.
+  // Value must be > the local CTR ceiling (usually 3500-4500 ft) so the
+  // Tower -> Approach handoff (via takeoff clearance + poll_departure_handoff)
+  // is respected first.
+  int sid_handoff_min_alt_ft = 10000;
 };
 
 void init();

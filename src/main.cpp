@@ -16,6 +16,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <cstdlib>
+#include <ctime>
+
 #include <XPLMDataAccess.h>
 #include <XPLMDisplay.h>
 #include <XPLMMenus.h>
@@ -133,6 +136,15 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
 
   logging::set_sink(&XPLMDebugString);
   logging::info("Plugin started");
+
+  // Seed the PRNG used by probability-gated ATC choices (SID direct-to,
+  // STAR direct-to, target-fix selection). Without seeding, std::rand()
+  // uses the default seed 1 every launch, so std::rand()%5 returns the
+  // same value on every process boot — the 20% "gate" then fires either
+  // 100% or 0% of the time (deterministic per launch), never actually
+  // randomising the flow. Seed from wall-clock time so successive
+  // launches vary.
+  std::srand(static_cast<unsigned>(std::time(nullptr)));
 
   settings::init();
   atc_templates::init();

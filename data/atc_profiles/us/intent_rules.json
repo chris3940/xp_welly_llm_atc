@@ -258,12 +258,11 @@
     },
 
     {
-      "_note": "Calls to Approach Control (or radar). Negative guards reject 'continue approach', 'final approach', etc. — those are flight-phase nouns, not facility calls.",
+      "_note": "Calls to Approach Control. 'radar' is NOT in this list — in US ATC 'XYZ Radar' generally means the ARTCC/Center providing radar service, not the terminal Approach controller. See EU profile parallel comment.",
       "intent": "INITIAL_CALL_APPROACH",
       "confidence": 0.88,
       "any": [
-        { "has_facility": "approach" },
-        { "has_facility": "radar" }
+        { "has_facility": "approach" }
       ],
       "none": [
         "continue approach", "final approach", "missed approach",

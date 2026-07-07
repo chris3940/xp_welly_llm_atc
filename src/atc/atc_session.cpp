@@ -172,7 +172,10 @@ static int total_transcriptions_ = 0;
 static int total_inferences_ = 0;
 static constexpr float kMinRecordingDuration = 0.5f;
 // Extra mic-open time after PTT release to avoid cutting the last syllable.
-static constexpr float kPttTailSec = 0.60f;
+// Bumped from 0.60 to 0.90 in 4.2.2 — Voxtral was still truncating trailing
+// callsigns ("...Romeo Charlie") at 600 ms for pilots who let the key go
+// while the final syllable was still leaving their lips.
+static constexpr float kPttTailSec = 0.90f;
 static float ptt_tail_remaining_ = 0.0f;
 
 // ATIS playback state

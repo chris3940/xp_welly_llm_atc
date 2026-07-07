@@ -575,12 +575,16 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
         return buf;
       }()},
       // {ifr_departure_contact}: post-departure frequency instruction for the
-      // takeoff clearance. Expands to ", passing Xft, contact Approach on Y.YYY"
-      // when ctr_departure_contact_alt_ft > 0 and an Approach/Departure frequency
-      // exists; empty otherwise (plain "cleared for takeoff" with no follow-on).
+      // takeoff clearance. Standard ICAO / EUROCONTROL phraseology gives the
+      // pilot the next controller + frequency, no "passing X ft" phrase —
+      // the actual CTR-exit moment is detected server-side by
+      // poll_departure_handoff() via 3D polygon containment (whichever
+      // comes first: ceiling OR lateral boundary), and the state advances
+      // silently. Was previously ", passing Xft QNH Y, contact Z on F"
+      // with a hard-coded 3000 ft — misleading for CTRs with different
+      // ceilings (LSZH 3000, LFPO 4500, LFLP 3500, LIMF 3500).
+      // Empty result when no Approach/Departure freq is available.
       {"ifr_departure_contact", [&]() -> std::string {
-        int alt = flight_phase::get_ifr_defaults().ctr_departure_contact_alt_ft;
-        if (alt <= 0) return "";
         float freq = ctx.airport_freqs.first_mhz(FT::DEPARTURE);
         if (freq < 100.0f) freq = ctx.airport_freqs.first_mhz(FT::APPROACH);
         if (freq < 100.0f) return "";
@@ -592,6 +596,12 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
           return ctx.airport_freqs.first_name(FT::APPROACH);
         }();
         const std::string facility_name = [&]() -> std::string {
+          // Strip trailing " APP" / " DEP" / " CTR" / " GND" / " TWR" (with
+          // leading space — airport prefix + suffix). Also handle the bare
+          // form ("APP", "DEP", etc.) where apt.dat has no airport prefix
+          // at all (LIMF has row `1054 12110 APP` — without the leading
+          // space the strip loop leaves "APP" untouched, and later
+          // title-case + append " Approach" produces "App Approach").
           static const char *kSuf[] = {" APP", " DEP", " CTR", " GND", " TWR", nullptr};
           std::string loc = loc_raw;
           for (int i = 0; kSuf[i]; ++i) {
@@ -601,9 +611,29 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
               loc = loc.substr(0, loc.size() - s.size());
               break;
             }
+            // Bare suffix case (no airport prefix).
+            std::string bare = s.substr(1);
+            if (loc == bare) {
+              loc.clear();
+              break;
+            }
           }
-          if (loc.empty())
+          if (loc.empty()) {
+            // No airport prefix in apt.dat. Fall back to the nearest-airport
+            // NAME (city only) so we get "Torino Approach" instead of the
+            // generic "Approach".
+            std::string apt = ctx.nearest_airport_name;
+            auto sp = apt.find_first_of(" -");
+            if (sp != std::string::npos) apt = apt.substr(0, sp);
+            if (!apt.empty()) {
+              // Title-case the city (first letter upper, rest lower).
+              apt[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(apt[0])));
+              for (std::size_t i = 1; i < apt.size(); ++i)
+                apt[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(apt[i])));
+              return apt + (ctx.airport_freqs.has(FT::DEPARTURE) ? " Departure" : " Approach");
+            }
             return ctx.airport_freqs.has(FT::DEPARTURE) ? "Departure" : "Approach";
+          }
           bool cap = true;
           for (char &c : loc) {
             if (c == ' ') { cap = true; }
@@ -622,8 +652,8 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
           engine::set_pending_handoff_freq(freq);
         }
         char buf[128];
-        std::snprintf(buf, sizeof(buf), ", passing %dft QNH %d, contact %s on %.3f",
-                      alt, ctx.qnh_hpa, facility_name.c_str(), freq);
+        std::snprintf(buf, sizeof(buf), ", QNH %d, contact %s on %.3f",
+                      ctx.qnh_hpa, facility_name.c_str(), freq);
         return buf;
       }()},
       // {holding_point}: "holding point Alpha, runway 28" when apt.dat taxiway data

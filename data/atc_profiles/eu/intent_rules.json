@@ -340,13 +340,12 @@
     },
 
     {
-      "_note": "Calls to Approach Control, Departure Control, or Radar. Negative guards reject flight-phase nouns ('final approach', 'after departure') and readback phrases that happen to contain the facility word.",
+      "_note": "Calls to Approach Control or Departure Control. 'Radar' is NOT in this list — in real ATC 'XYZ Radar' is an en-route ACC/Center providing radar service (Milan Radar = Milan ACC), not a destination Approach controller. Matching 'radar' here would fire a destination approach clearance whenever the pilot check-ins with any en-route Center whose callsign includes 'radar', which is a routine phraseology. 'radar' is handled by the INITIAL_CALL_CENTER rule below.",
       "intent": "INITIAL_CALL_APPROACH",
       "confidence": 0.88,
       "any": [
         { "has_facility": "approach" },
-        { "has_facility": "departure" },
-        { "has_facility": "radar" }
+        { "has_facility": "departure" }
       ],
       "none": [
         "continue approach", "final approach", "missed approach",
@@ -394,16 +393,18 @@
     },
 
     {
-      "_note": "En-route initial call to Area Control / UIR Centre (facility word: 'control' or 'centre'/'center'). Fires before INITIAL_CALL_GROUND so 'Brest Control' doesn't accidentally match ground. Negative guards catch readbacks of handoff instructions ('contact Control on 119.755').",
+      "_note": "En-route initial call to Area Control / UIR Centre / Radar. Facility words: 'control', 'centre'/'center', and 'radar' — 'XYZ Radar' is standard ICAO callsign for an ACC providing radar service (e.g. 'Milan Radar', 'Marseille Radar'). Fires before INITIAL_CALL_GROUND so 'Brest Control' doesn't accidentally match ground. Negative guards catch readbacks of handoff instructions ('contact Control on 119.755').",
       "intent": "INITIAL_CALL_CENTER",
       "confidence": 0.88,
       "any": [
         { "has_facility": "control" },
         { "has_facility": "centre" },
-        { "has_facility": "center" }
+        { "has_facility": "center" },
+        { "has_facility": "radar" }
       ],
       "none": [
-        "contact control", "contact centre", "contact center", "when ready"
+        "contact control", "contact centre", "contact center",
+        "contact radar", "when ready"
       ]
     },
 

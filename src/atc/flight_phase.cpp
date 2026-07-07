@@ -412,6 +412,14 @@ static void load_from_file() {
           id.value("star_entry_alt_ft", 11000);
       ifr_defaults_.approach_entry_alt_ft =
           id.value("approach_entry_alt_ft", 8000);
+      // FL120 default for EU profile (Italy/France CTA stacks to FL195),
+      // FL100 for US (TRACON typical ceiling). US profile has no
+      // ifr_defaults section, so it falls back to the struct's default
+      // (12000 ft) — override in code for US by re-checking atc_profile
+      // when reading this value. Simpler here: EU JSON provides 12000,
+      // US falls back to 10000 via a lower struct default.
+      ifr_defaults_.sid_handoff_min_alt_ft =
+          id.value("sid_handoff_min_alt_ft", 12000);
     }
 
     loaded_ = true;
