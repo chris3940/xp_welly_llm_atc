@@ -61,6 +61,31 @@ std::vector<AirspaceEntry> find_all_enclosing(double lat, double lon,
 // ignoring altitude. Returns 0 if not inside any CTR.
 int ctr_ceiling_ft(double lat, double lon);
 
+// Returns the ceiling of the BASE (lowest-floor) TMA-class airspace whose
+// polygon contains (lat, lon), IGNORING altitude (2-D lateral test only) --
+// i.e. the top of the terminal control area sitting directly on the field, not
+// any higher TMA stacked above it. Over LFMN this is NICE TMA (11500); over
+// LFLP/Annecy it is CHAMBERY TMA (9500), correctly ignoring the GENEVA TMA
+// (9500-19500) stacked on top. Ties on floor break to the higher ceiling.
+// Returns 0 when the point is over no TMA (AFIS-only field, or a field whose
+// terminal area is a plain CTR). Geometry-based, so a field controlled by a
+// differently-named unit (LFLP under CHAMBERY) resolves correctly. Used by the
+// "descend to enter the terminal area" clearance -- an aircraft cleared above a
+// low-ceilinged terminal TMA can never enter it otherwise.
+int terminal_tma_ceiling(double lat, double lon);
+
+// "Descend to enter" test. Returns the destination's base terminal-TMA ceiling
+// (terminal_tma_ceiling at the destination) IF the aircraft at (acft_lat,
+// acft_lon) is laterally inside a TMA whose ceiling matches that reference --
+// i.e. the aircraft is over the destination's terminal area -- else 0. Ignores
+// altitude (2-D). This is the correct trigger for the descend-to-enter
+// clearance: an aircraft over a large TMA can be well beyond a fixed
+// field-distance radius (NICE TMA extends 40+ NM), so "over the TMA" must be a
+// polygon test, not a distance gate. Matching by the base ceiling keeps a
+// stacked overlying TMA (GENEVA over CHAMBERY) from hijacking it.
+int descend_to_enter_ceiling(double acft_lat, double acft_lon, double dest_lat,
+                             double dest_lon);
+
 } // namespace openair_db
 
 #endif // OPENAIR_DB_HPP

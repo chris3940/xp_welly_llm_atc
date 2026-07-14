@@ -245,11 +245,38 @@ static std::string fl_to_speech(int fl) {
 // never matches; the digits may follow "speed" after filler ("speed, 250",
 // "reduce speed to 250 knots").
 static int extract_speed(const std::string &norm) {
+  std::smatch m;
+  // Primary: anchored on "speed" ("reduce speed, 250", "speed 210 knots").
   static const std::regex kRe(R"(speed[a-z, ]*?(\d{2,3}))",
                               std::regex_constants::icase);
-  std::smatch m;
   if (std::regex_search(norm, m, kRe))
     return std::stoi(m[1]);
+  // Remaining spoken forms are trusted ONLY when "knot(s)" is present, so a
+  // wind read-out or an altitude can never be mistaken for a speed. Pilots
+  // naturally drop the word "speed" when reading a restriction back
+  // ("200 knots or less"), which the anchored pattern missed -- causing an
+  // endless "negative, N knots, readback" loop on a CORRECT read-back, in every
+  // spoken form of 200 (LFMN R22LZ 2026-07-12).
+  if (norm.find("knot") == std::string::npos)
+    return -1;
+  // "200 knots" -- digits, incl. "two zero zero" which normalise compacts to
+  // "200".  Require >= 100 kt (real IAS restriction) vs a wind's "15 knots".
+  static const std::regex kKnots(R"((\d{2,3})\s*knots?)",
+                                 std::regex_constants::icase);
+  if (std::regex_search(norm, m, kKnots)) {
+    const int v = std::stoi(m[1]);
+    if (v >= 100)
+      return v;
+  }
+  // "two hundred knots" -- normalize_phonetics maps the digit word ("two"->"2")
+  // but NOT "hundred", so expand "<n> hundred" -> n*100 here.
+  static const std::regex kHundred(R"((\d)\s*hundred)",
+                                   std::regex_constants::icase);
+  if (std::regex_search(norm, m, kHundred)) {
+    const int v = std::stoi(m[1]) * 100;
+    if (v >= 100)
+      return v;
+  }
   return -1;
 }
 

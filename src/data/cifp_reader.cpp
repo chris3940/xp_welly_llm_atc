@@ -708,6 +708,114 @@ bool is_sid_valid_for_runway(const std::string &cifp_dir,
   return false;
 }
 
+// ── sid_waypoints ─────────────────────────────────────────────────────────
+
+// Own cache (g_star_waypoints_cache is defined further down, next to
+// star_waypoints, so it isn't in scope here). Guarded by g_alt_cache_mutex.
+static std::unordered_map<std::string, std::vector<StarWaypoint>>
+    g_sid_waypoints_cache;
+
+std::vector<StarWaypoint> sid_waypoints(const std::string &cifp_dir,
+                                        const std::string &icao,
+                                        const std::string &sid_name,
+                                        const std::string &active_runway,
+                                        bool constrained_only) {
+  if (cifp_dir.empty() || icao.empty() || sid_name.empty())
+    return {};
+
+  const std::string cache_key = icao + ":SIDWPTS:" + sid_name + ":" +
+                                (active_runway.empty() ? "ALL" : active_runway) +
+                                (constrained_only ? ":C" : ":ALL");
+  {
+    std::lock_guard<std::mutex> lk(g_alt_cache_mutex);
+    auto it = g_sid_waypoints_cache.find(cache_key);
+    if (it != g_sid_waypoints_cache.end())
+      return it->second;
+  }
+
+  std::ifstream in(make_cifp_path(cifp_dir, icao));
+  std::vector<StarWaypoint> result;
+  if (!in.good()) {
+    std::lock_guard<std::mutex> lk(g_alt_cache_mutex);
+    g_sid_waypoints_cache[cache_key] = result;
+    return result;
+  }
+
+  const std::string rwy_match =
+      active_runway.empty() ? "" : ("RW" + active_runway);
+
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.size() < 4 || line.compare(0, 4, "SID:") != 0)
+      continue;
+    auto f = split_csv(line);
+    if (f.size() < 28) continue;
+    if (trim(f[2]) != sid_name) continue;
+
+    // Keep our runway transition + the common route (f[3] not "RW.."); drop
+    // other runways' transitions so we don't pull a foreign leg's constraint.
+    const std::string rwy = trim(f[3]);
+    const bool is_rw = (rwy.size() > 2 && rwy.compare(0, 2, "RW") == 0);
+    if (is_rw && !rwy_match.empty() && rwy != rwy_match)
+      continue;
+
+    std::string seq_str = trim(f[0]);
+    if (seq_str.size() <= 4) continue;
+    int seq = 0;
+    try { seq = std::stoi(seq_str.substr(4)); } catch (...) { continue; }
+
+    std::string wpt = trim(f[4]);
+    if (wpt.empty()) continue;
+
+    const std::string pterm    = trim(f[11]);
+    const std::string alt_desc = trim(f[22]);
+    // Altitude column is path-term dependent (see initial_altitude): CF legs
+    // carry the climb altitude at f[25], TF/DF at f[23].
+    CifpAlt alt = (pterm == "CF" && f.size() > 25) ? parse_alt(f[25])
+                                                   : parse_alt(f[23]);
+
+    std::string spd_desc = trim(f[26]);
+    int         speed_kt = 0;
+    if (!spd_desc.empty() && f.size() > 27) {
+      std::string sv = trim(f[27]);
+      try { if (!sv.empty()) speed_kt = std::stoi(sv); }
+      catch (...) { speed_kt = 0; } // NOLINT(bugprone-empty-catch)
+    }
+
+    if (constrained_only && alt.feet == 0 && speed_kt == 0)
+      continue;
+
+    StarWaypoint wp;
+    wp.ident      = wpt;
+    wp.alt        = alt;
+    wp.is_ceiling = (alt_desc == "-");
+    // "+" or a bare "at" altitude (empty descriptor with a value) is a climb
+    // minimum on a SID — the aircraft must be at or above it.
+    wp.is_floor   = (alt_desc == "+") || (alt_desc.empty() && alt.feet > 0);
+    if (alt_desc == "B" && f.size() > 24) {
+      wp.is_ceiling = true;
+      wp.floor_ft   = parse_alt(f[24]).feet;
+    }
+    wp.speed_kt   = speed_kt;
+    wp.seq        = seq;
+    result.push_back(wp);
+  }
+
+  std::sort(result.begin(), result.end(),
+            [](const StarWaypoint &a, const StarWaypoint &b) {
+              return a.seq < b.seq;
+            });
+
+  logging::info("[cifp] %s SID %s rwy %s -> %d waypoints",
+                icao.c_str(), sid_name.c_str(),
+                active_runway.empty() ? "(any)" : active_runway.c_str(),
+                static_cast<int>(result.size()));
+
+  std::lock_guard<std::mutex> lk(g_alt_cache_mutex);
+  g_sid_waypoints_cache[cache_key] = result;
+  return result;
+}
+
 // ── best_approach ──────────────────────────────────────────────────────
 
 ApproachInfo best_approach(const std::string &cifp_dir,
@@ -1255,11 +1363,16 @@ std::vector<StarWaypoint> star_waypoints(const std::string &cifp_dir,
     StarWaypoint wp;
     wp.ident      = wpt;
     wp.alt        = alt;
-    // "B" = between (block altitude): f[23] is ceiling, f[24] is floor.
-    // Treat as ceiling for descent clearance purposes — we clear to the
-    // upper bound so the pilot descends into the block.
+    // "B" = between (block altitude): f[23] is the ceiling (in wp.alt),
+    // f[24] is the floor. We keep BOTH: the ceiling lets the aircraft
+    // descend into the block, the floor stops ATC clearing below it (e.g.
+    // AMVA3P GOVNA "B FL090/6500" — descend to 6500 ft, not lower, until
+    // the fix is behind). Discarding the floor caused the arrival to be
+    // cleared below the block (LFMN MN261 -> SOTOX FL070).
     wp.is_ceiling = (alt_desc == "-" || alt_desc == "B");
     wp.is_floor   = (alt_desc == "+");
+    if (alt_desc == "B" && f.size() > 24)
+      wp.floor_ft = parse_alt(f[24]).feet; // 0 when the floor field is blank
     wp.speed_kt   = speed_kt;
     wp.seq        = seq;
     result.push_back(wp);
@@ -1431,6 +1544,8 @@ std::vector<StarWaypoint> approach_procedure_waypoints(
     wp.alt              = alt;
     wp.is_ceiling       = (alt_desc == "-" || alt_desc == "B");
     wp.is_floor         = (alt_desc == "+");
+    if (alt_desc == "B" && f.size() > 24)
+      wp.floor_ft = parse_alt(f[24]).feet; // block lower bound (0 if blank)
     wp.speed_kt         = speed_kt;
     wp.seq              = seq;
     wp.is_approach_proc = true;
@@ -1614,6 +1729,7 @@ void clear_cache() {
   g_star_entry_cache.clear();
   g_approach_cache.clear();
   g_star_waypoints_cache.clear();
+  g_sid_waypoints_cache.clear();
   g_faf_cache.clear();
 }
 

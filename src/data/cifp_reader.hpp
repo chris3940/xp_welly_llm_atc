@@ -180,9 +180,13 @@ std::string best_runway_for_approach(const std::string &cifp_dir,
 // by star_waypoints() and approach_procedure_waypoints().
 struct StarWaypoint {
   std::string ident;            // e.g. "TIPIK"
-  CifpAlt     alt;              // altitude constraint (feet == 0 = none)
-  bool        is_ceiling;       // true = at-or-below ("-")
+  CifpAlt     alt;              // altitude constraint (feet == 0 = none).
+                                // For a "B" block this holds the CEILING (upper).
+  bool        is_ceiling;       // true = at-or-below ("-") or block ("B")
   bool        is_floor;         // true = at-or-above ("+")
+  int         floor_ft = 0;     // block "B" LOWER bound in feet (0 = not a block).
+                                // is_fl-format matches alt.is_fl. ATC must not
+                                // clear below this while crossing the fix.
   int         speed_kt;         // max speed in kt (0 = no restriction)
   int         seq;              // CIFP sequence number (for ordering)
   bool        is_approach_proc = false; // true = from APPCH transition, not STAR
@@ -200,6 +204,21 @@ std::vector<StarWaypoint> star_waypoints(const std::string &cifp_dir,
                                           const std::string &icao,
                                           const std::string &star_name,
                                           bool constrained_only = true);
+
+// Returns the waypoints along the named SID for active_runway, ordered by
+// sequence, so the unified route table can enrich its early (departure) fixes
+// with SID climb constraints exactly as star_waypoints() enriches the arrival
+// fixes. SID specifics vs STAR: the altitude column is path-term dependent
+// (CF leg -> f[25], TF/DF -> f[23]); a bare "at" altitude with an empty
+// descriptor is a climb minimum (is_floor). Speed at f[27]. Records for other
+// runways' transitions are excluded; the common route (f[3] not "RW..") is kept.
+// constrained_only=true (default) keeps only fixes carrying an altitude or speed
+// constraint; false keeps every fix. Empty when the SID or CIFP is not found.
+std::vector<StarWaypoint> sid_waypoints(const std::string &cifp_dir,
+                                        const std::string &icao,
+                                        const std::string &sid_name,
+                                        const std::string &active_runway,
+                                        bool constrained_only = true);
 
 // Returns the last fix (highest sequence number) of the named STAR,
 // regardless of whether it carries an altitude constraint.  This is

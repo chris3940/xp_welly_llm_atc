@@ -809,18 +809,32 @@ apply_post_transition_hooks(const intent_parser::PilotMessage &msg,
     g_state.readback_last_reminder_secs_ = g_state.last_now_secs_;
     g_state.readback_reminder_count_ = 0;
   } else if (g_state.readback_pending_ && !resp.text.empty()) {
-    // Tower spoke while a readback was already pending (LM-_INVALID
-    // fallback, or any other non-readback reply during the readback
-    // window). The pilot just heard a
-    // tower utterance — give them the full reminder delay again
-    // before nudging, and reset the count so a multi-attempt back-
-    // and-forth doesn't burn through the 3-reminder cancellation
-    // budget mid-dialog. Without this the reminder fires 20 s after
-    // the tower's correction even though the pilot was actively
-    // talking the whole time.
-    bump_gen();
-    g_state.readback_last_reminder_secs_ = g_state.last_now_secs_;
-    g_state.readback_reminder_count_ = 0;
+    if (resp.next_state != g_state.state_) {
+      // A NEW clearance (it changes state) was issued while an earlier
+      // read-back was still waiting -- e.g. an unsolicited "reduce speed N"
+      // advisory armed a read-back, then the pilot's report-established drew
+      // "cleared to land". The new clearance SUPERSEDES the old waiting
+      // read-back: non-cumulative, latest wins. Without this the stale speed
+      // read-back hijacked the landing read-back ("negative, N knots" while
+      // the pilot read back the landing clearance -- LFMN R22LZ 2026-07-12).
+      // KNOWN LIMITATION: a genuinely-required earlier read-back is dropped
+      // when ATC issues a new clearance before the pilot reads it back.
+      bump_gen();
+      g_state.readback_pending_ = false;
+      g_state.last_clearance_text_.clear();
+      g_state.readback_ok_fields_.clear();
+      g_state.readback_pending_since_secs_ = 0.0;
+      g_state.readback_last_reminder_secs_ = 0.0;
+      g_state.readback_reminder_count_ = 0;
+    } else {
+      // Non-clearance reply (LM-_INVALID "say again", a same-state
+      // acknowledgement) during the read-back window: KEEP the pending
+      // read-back, just restart the reminder delay + count so a multi-attempt
+      // back-and-forth doesn't burn the 3-reminder cancellation budget.
+      bump_gen();
+      g_state.readback_last_reminder_secs_ = g_state.last_now_secs_;
+      g_state.readback_reminder_count_ = 0;
+    }
   }
 
   // Leaving the controller's frequency or resetting drops stale readback

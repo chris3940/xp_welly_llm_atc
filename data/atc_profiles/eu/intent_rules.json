@@ -18,6 +18,8 @@
       "from": "pierre to take of", "to": "cleared to take off" },
     { "_note": "Same 'Pierre' substitution against the compounded 'takeoff' word.",
       "from": "pierre to takeoff", "to": "cleared to takeoff" },
+    { "_note": "Voxtral substitutes 'Pilgrim' for 'cleared' in landing readbacks: 'Pilgrim Land' for 'cleared to land' (LFMN ABDI8R 2026-07-13, caused a 'say again'). 'Pilgrim Land' is not ATC phraseology so global alias is safe.",
+      "from": "pilgrim land", "to": "cleared to land" },
     { "_note": "Voxtral mishears 'Torino' as 'Tavino' when followed by a facility word (LIMF check-in). Scoped to the phrase so bare 'tavino' can never collide.",
       "from": "tavino approach", "to": "torino approach" },
     { "_note": "Torino → Tavino, tower variant.",

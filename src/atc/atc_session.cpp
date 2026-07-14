@@ -44,6 +44,7 @@
 #include <functional>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace atc_session {
@@ -780,7 +781,15 @@ static void submit_recording_to_stt() {
       ctx_state == atc_state_machine::ATCState::IFR_DESCENT ||
       ctx_state == atc_state_machine::ATCState::IFR_ARRIVAL ||
       ctx_state == atc_state_machine::ATCState::IFR_APPROACH_CONTACT ||
-      ctx_state == atc_state_machine::ATCState::IFR_APPROACH_DESCENT;
+      ctx_state == atc_state_machine::ATCState::IFR_APPROACH_DESCENT ||
+      // On final after the Tower handoff (still airborne) the full airport
+      // freq list must ALSO be suppressed: LFMN has ~20 Tower/Ground freqs and
+      // dumping them all floods the Voxtral context_bias with numeric tokens,
+      // garbling every read-back once cleared to land ("Pirto Land", "X-Robot",
+      // LFMN R22LZ 2026-07-12). Only the pending-handoff freq belongs in the
+      // bias here. Also biases the live Tower label instead of the airport name.
+      ctx_state == atc_state_machine::ATCState::IFR_APPROACH_TOWER ||
+      ctx_state == atc_state_machine::ATCState::IFR_LANDING_CLEARED;
   if (!airborne_ifr_drift_risk) {
     airport_ctx += ctx_for_whisper.nearest_airport_id;
     if (!ctx_for_whisper.nearest_airport_name.empty())
@@ -873,6 +882,18 @@ static void submit_recording_to_stt() {
           ++fix_count;
         }
       }
+      // CIFP STAR + approach procedure waypoints from the engine's route table.
+      // These are NOT in the filed navlog (SimBrief lists the enroute FPL, not
+      // the STAR/APPCH fixes), so "direct <STAR fix>" readbacks garble without
+      // them (AMFOU -> "I'm full", LFMN ABDI8R 2026-07-13). Deduped against what
+      // the navlog already added. Only the upcoming fixes (tracker-forward).
+      for (const auto &id : engine::upcoming_route_fix_idents()) {
+        if ((" " + airport_ctx + " ").find(" " + id + " ") == std::string::npos) {
+          airport_ctx += " " + id;
+          if (++fix_count >= 90)
+            break;
+        }
+      }
     }
     // Destination arrival controller (Approach or Information/FIS).
     // Try TRACON first (proper Approach); fall back to CTR which is how
@@ -902,7 +923,8 @@ static void submit_recording_to_stt() {
             const std::string apt =
                 xplane_context::airport_name_for(arr_ctrl->facility_id);
             if (!apt.empty()) {
-              auto sp = apt.find(' ');
+              // Stop at a space OR '/' so "Nice/Cote d'Azur" -> "Nice".
+              auto sp = apt.find_first_of(" /");
               std::string city =
                   (sp == std::string::npos) ? apt : apt.substr(0, sp);
               if (!city.empty()) {
@@ -984,8 +1006,12 @@ static void submit_recording_to_stt() {
   {
     char freq_buf[16];
     if (!airborne_ifr_drift_risk) {
+      // Dedupe: apt.dat lists the same freq under several role codes, so the
+      // raw list repeats (LFMN dumped 118.700 five times). Duplicate numeric
+      // tokens add nothing but bias-flood risk for Voxtral.
+      std::unordered_set<uint32_t> seen_khz;
       for (const auto &af : ctx_for_whisper.airport_freqs.all) {
-        if (af.freq_khz > 0) {
+        if (af.freq_khz > 0 && seen_khz.insert(af.freq_khz).second) {
           std::snprintf(freq_buf, sizeof(freq_buf), "%.3f",
                         static_cast<float>(af.freq_khz) / 1000.0f);
           airport_ctx += " ";
@@ -1461,6 +1487,28 @@ void update() {
       speak_response(arrival_text, role, 1.0f);
       if (arrival_rb)
         atc_state_machine::arm_readback(arrival_text);
+      return;
+    }
+
+    // IFR altitude-compliance courtesy prompt (DESCENT + ARRIVAL gap): "confirm
+    // descending/climbing <level>" if the pilot hasn't started toward the
+    // assigned level. Advisory only (no readback).
+    std::string alt_comp_text;
+    if (engine::poll_altitude_compliance(ctx_now, dt, &alt_comp_text) &&
+        !alt_comp_text.empty()) {
+      float active_freq = (ctx_now.active_com == 1) ? ctx_now.com1_freq_mhz
+                                                    : ctx_now.com2_freq_mhz;
+      char freq_str[16];
+      std::snprintf(freq_str, sizeof(freq_str), "%.3f", active_freq);
+      push_transcript(TranscriptEntry{
+          static_cast<double>(XPLMGetElapsedTime()),
+          TranscriptKind::Tower,
+          alt_comp_text,
+          freq_str,
+          engine::current_controller_label(),
+      });
+      auto role = role_for_frequency(ctx_now);
+      speak_response(alt_comp_text, role, 1.0f);
       return;
     }
 

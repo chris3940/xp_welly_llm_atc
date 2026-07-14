@@ -293,4 +293,51 @@ int ctr_ceiling_ft(double lat, double lon) {
   return 0;
 }
 
+int terminal_tma_ceiling(double lat, double lon) {
+  if (!s_ready)
+    return 0;
+  int best_floor = 1000000000; // base (lowest-floor) TMA over the point
+  int ceil_at_best = 0;        // its ceiling; ties break to the higher ceiling
+  for (const auto &e : s_entries) {
+    if (e.ac_class != AirspaceClass::TMA)
+      continue;
+    if (lat < e.bbox_min_lat || lat > e.bbox_max_lat)
+      continue;
+    if (lon < e.bbox_min_lon || lon > e.bbox_max_lon)
+      continue;
+    if (e.floor_ft > best_floor) // can't be a lower base -- skip the poly test
+      continue;
+    if (!point_in_polygon(lat, lon, e.polygon))
+      continue;
+    if (e.floor_ft < best_floor ||
+        (e.floor_ft == best_floor && e.ceiling_ft > ceil_at_best)) {
+      best_floor = e.floor_ft;
+      ceil_at_best = e.ceiling_ft;
+    }
+  }
+  return ceil_at_best;
+}
+
+int descend_to_enter_ceiling(double acft_lat, double acft_lon, double dest_lat,
+                             double dest_lon) {
+  if (!s_ready)
+    return 0;
+  const int ref_ceil = terminal_tma_ceiling(dest_lat, dest_lon);
+  if (ref_ceil <= 0)
+    return 0; // no terminal TMA at the destination (AFIS / CTR-only field)
+  // Aircraft laterally inside a TMA whose ceiling matches the destination's
+  // terminal ceiling -> it is over the destination terminal area.
+  for (const auto &e : s_entries) {
+    if (e.ac_class != AirspaceClass::TMA || e.ceiling_ft != ref_ceil)
+      continue;
+    if (acft_lat < e.bbox_min_lat || acft_lat > e.bbox_max_lat)
+      continue;
+    if (acft_lon < e.bbox_min_lon || acft_lon > e.bbox_max_lon)
+      continue;
+    if (point_in_polygon(acft_lat, acft_lon, e.polygon))
+      return ref_ceil;
+  }
+  return 0;
+}
+
 } // namespace openair_db

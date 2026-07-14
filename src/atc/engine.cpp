@@ -131,6 +131,18 @@ static float s_enroute_alt_warn_cooldown =
 // Reset by every clearance that sets s_enroute_alt_warn_cooldown = 180.
 static bool  s_enroute_verify_query_sent = false;
 static int   s_enroute_verify_target_ft  = 0; // altitude at time of last clearance
+// Altitude-compliance monitor for the DESCENT + ARRIVAL phases (the gap where
+// the en-route 2.4 verify and the approach verify-descending do not run).
+static int   s_alt_comp_target_ft = 0;   // assigned level being monitored
+static float s_alt_comp_arm_sec   = 0.0f; // seconds since that assignment
+static bool  s_alt_comp_sent      = false; // fired once for this assignment
+// Descend-to-enter-terminal-area clearance (poll_descent): the last TMA-ceiling
+// level we cleared the aircraft down to, so the clearance fires only once per
+// distinct target instead of every 1 Hz tick.
+static int   s_descent_tma_target_ft = 0;
+// CIFP STAR crossing-altitude corrective (poll_descent): the last crossing
+// target we cleared to, so "descend FLxxx" for a STAR fix fires once per fix.
+static int   s_descent_cifp_target_ft = 0;
 // Set to true when the pilot says "request descent" in IFR_ENROUTE_CRUISE.
 // Consumed by poll_enroute on the next frame to issue the descent clearance.
 static bool s_pilot_requested_descent = false;
@@ -170,9 +182,14 @@ static int s_route_step_idx = 0;
 // when the aircraft climbs back above FL100 so the advisory re-fires on the
 // next descent through FL100.
 static bool s_speed_250_warned = false;
+// Last speed limit (kt) we evaluated, so a NEWLY tighter cap (e.g. 250 -> 210
+// approaching a terminal fix) re-arms the advisory even if it had already
+// fired for the looser limit. 0 = none evaluated yet.
+static int s_last_speed_limit_kt = 0;
 
 static int round_to_fl(int feet); // defined near poll_sid_climb
 static void init_route_fixes(const xplane_context::XPlaneContext &ctx); // defined near poll_approach
+static void build_sid_route_table(const xplane_context::XPlaneContext &ctx); // departure half of the route table
 static std::string controller_label_for(const airspace_db::Controller *ctrl); // defined near handoff helpers
 
 // IFR approach STAR constraint tracking (IFR_APPROACH_CONTACT / IFR_APPROACH_DESCENT).
@@ -195,6 +212,10 @@ static cifp_reader::FafFix s_approach_faf;                   // FAF from CIFP + 
 // poll_enroute() sub-phase 1.5.
 static uint32_t s_approach_sector_freq_khz  = 0;
 static float    s_approach_sector_check_sec = 0.0f;
+// openair ceiling (ft) of the current approach sector's TMA -- so the forward
+// handoff only advances to a MORE-TERMINAL (lower-ceiling) inner TMA and never
+// backward/sideways (Chambery->Lyon->Marseille, LIMF->LFLP 2026-07-14).
+static int      s_approach_sector_ceiling_ft = 0;
 // Sectors already handed off to during this approach phase.  Real ATC only
 // hands forward: once you're on Chambery, you don't get sent back to
 // Geneva even if the Geneva polygon re-envelops the aircraft later.  The
@@ -208,6 +229,10 @@ static float s_expedite_cooldown       = 0.0f;  // counts down; fires when <= 0
 static int   s_expedite_last_cleared_ft = 0;    // altitude of last issued step-down
 // Lateral-deviation monitor (after FAF, Tower state): cross-track from runway centerline.
 static float s_alignment_cooldown = 0.0f;
+// DirectMonitor course-deviation cooldowns (en-route + approach sites). SID has
+// its own inline check (s_sid_deviation_cooldown_sec). Firing gates TBD.
+static float s_enroute_course_cooldown  = 0.0f;
+static float s_approach_course_cooldown = 0.0f;
 
 // Route fix tracker — the COMPLETE ordered arrival sequence (enroute navlog +
 // ALL STAR + ALL approach fixes, constrained or not). Fixes are dropped from
@@ -218,9 +243,11 @@ struct RouteFix {
   std::string ident;
   double lat = 0.0;
   double lon = 0.0;
-  cifp_reader::CifpAlt alt{};       // feet + is_fl; feet==0 = no altitude constraint
+  cifp_reader::CifpAlt alt{};       // feet + is_fl; feet==0 = no altitude constraint.
+                                    // For a "B" block this is the CEILING (upper).
   bool is_ceiling = false;          // at-or-below ("-" / "B")
   bool is_floor = false;            // at-or-above ("+")
+  int floor_ft = 0;                 // block "B" lower bound (0 = not a block)
   int speed_kt = 0;                 // 0 = no speed constraint
   bool is_approach_proc = false;    // from the APPCH transition (vs STAR)
   bool is_map = false;              // Missed Approach Point
@@ -271,10 +298,26 @@ static double s_sid_direct_origin_lon = 0.0;
 // post-direct heading-vs-bearing check (gives the FMS ~3 min to intercept
 // before we start comparing course to bearing_to_fix).
 static float s_sid_direct_elapsed_sec = 0.0f;
-// Departure airport position captured at radar-contact entry.
+// Departure airport captured at radar-contact entry.
 // Kept here so nearest_airport_id cannot drift as the aircraft flies away.
+static std::string s_departure_apt_id;
 static double s_departure_apt_lat = 0.0;
 static double s_departure_apt_lon = 0.0;
+
+// The airport all AIRBORNE IFR lookups (controller, TA, QNH, CIFP) must key on:
+// the DESTINATION once a descent clearance has bound it (s_assigned_dest_icao),
+// the DEPARTURE field before that, and only nearest as a ground/pre-departure
+// fallback. ctx.nearest_airport_id is a VFR-native concept that drifts to
+// whatever field is closest and is actively wrong en-route (the "climb FL80"
+// small-field regression). See [[feedback_nearest_airport_ifr]].
+static std::string current_flight_airport(
+    const xplane_context::XPlaneContext &ctx) {
+  if (!s_assigned_dest_icao.empty())
+    return s_assigned_dest_icao;   // descent and beyond
+  if (!s_departure_apt_id.empty())
+    return s_departure_apt_id;     // airborne, pre-descent
+  return ctx.nearest_airport_id;   // on the ground / fallback
+}
 
 // Ground runway-change detection: ATC must announce when active runway changes
 // while on the ground.
@@ -329,9 +372,18 @@ void reset() {
   s_sid_direct_origin_lat = 0.0;
   s_sid_direct_origin_lon = 0.0;
   s_sid_direct_elapsed_sec = 0.0f;
+  s_departure_apt_id.clear();
   s_departure_apt_lat = 0.0;
   s_departure_apt_lon = 0.0;
   s_speed_250_warned = false;
+  s_last_speed_limit_kt = 0;
+  s_enroute_course_cooldown = 0.0f;
+  s_approach_course_cooldown = 0.0f;
+  s_alt_comp_target_ft = 0;
+  s_alt_comp_arm_sec = 0.0f;
+  s_alt_comp_sent = false;
+  s_descent_tma_target_ft = 0;
+  s_descent_cifp_target_ft = 0;
   s_ground_last_announced_runway.clear();
   s_assigned_star_name.clear();
   s_assigned_dest_icao.clear();
@@ -2466,8 +2518,10 @@ static std::string controller_label_for(const airspace_db::Controller *ctrl) {
   if (!ctrl->facility_id.empty()) {
     const std::string apt = xplane_context::airport_name_for(ctrl->facility_id);
     if (!apt.empty()) {
-      // First word of the airport name is the city (e.g. "Chambery Savoie" → "Chambery").
-      auto sp = apt.find(' ');
+      // First token of the airport name is the city; stop at a space OR a '/'
+      // so "Nice/Cote d'Azur" -> "Nice" (not "Nice/Cote"), "Chambery Savoie" ->
+      // "Chambery", "Reims" -> "Reims".
+      auto sp = apt.find_first_of(" /");
       std::string city = (sp == std::string::npos) ? apt : apt.substr(0, sp);
       if (!city.empty()) {
         city[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(city[0])));
@@ -2726,6 +2780,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     s_sid_direct_origin_lat = 0.0;
     s_sid_direct_origin_lon = 0.0;
     s_sid_direct_elapsed_sec = 0.0f;
+    s_departure_apt_id.clear();
     s_departure_apt_lat = 0.0;
     s_departure_apt_lon = 0.0;
     return false;
@@ -2747,8 +2802,14 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
   // One-time initialisation on first entry to IFR_RADAR_CONTACT.
   if (!s_sid_initialized) {
     s_sid_initialized = true;
+    s_departure_apt_id  = ctx.nearest_airport_id; // still the departure field here
     s_departure_apt_lat = ctx.airport_lat;
     s_departure_apt_lon = ctx.airport_lon;
+    // Build the DEPARTURE half of the unified route table (SID + enroute
+    // navlog) so the compliance monitor / speed enforcement work during the
+    // climb, exactly as the arrival table serves approach. The arrival re-init
+    // (init_route_fixes) later rebuilds it for the STAR/approach.
+    build_sid_route_table(ctx);
 
     // Step1 altitude: LFLP RW04 westbound → FL110 (clear of Geneva TMA
     // after SOCOF). All other cases: midpoint between SID minimum and
@@ -3362,17 +3423,46 @@ skip_tma_check:;
 
 // ── Helpers for poll_enroute ──────────────────────────────────────────────
 
-// Format an altitude as ATC phraseology using the Transition Level.
-// Above TL: "flight level X".  Below TL: "X feet, QNH Y".
-// Default args replicate the old 5000 ft threshold (neutral QNH, EU TA).
-static std::string format_alt(int alt_ft, int ta_ft = 5000, int qnh_hpa = 1013) {
-  const int tl = compute_tl_ft(ta_ft > 0 ? ta_ft : 5000, qnh_hpa);
+// Canonical FL-vs-feet formatter — the single source of truth for every spoken
+// altitude phrase (replaces three rival rules that previously diverged).
+//   AltHint::Auto        -> Transition-Level threshold (altitudes with no CIFP
+//                           is_fl flag: cruise, climb targets, maintain-current)
+//   AltHint::Feet / FlightLevel -> force the format the CIFP constraint publishes
+//                           (a plate "06500" is feet even above the TL, "FL080"
+//                           is a level even below it — the old TL guess spoke
+//                           LP403's 6500 ft as "flight level 65", LIMF->LFLP).
+// QNH is appended only in feet form, never with a flight level.
+enum class AltHint { Auto, Feet, FlightLevel };
+static std::string format_alt_clearance(int alt_ft, AltHint hint,
+                                        int qnh_hpa = 1013, int ta_ft = 5000) {
+  bool as_fl;
+  switch (hint) {
+  case AltHint::Feet:        as_fl = false; break;
+  case AltHint::FlightLevel: as_fl = true;  break;
+  default:
+    as_fl = (alt_ft >= compute_tl_ft(ta_ft > 0 ? ta_ft : 5000, qnh_hpa));
+    break;
+  }
   char buf[48];
-  if (alt_ft >= tl)
+  if (as_fl)
     std::snprintf(buf, sizeof(buf), "flight level %d", alt_ft / 100);
   else
     std::snprintf(buf, sizeof(buf), "%d feet, QNH %d", alt_ft, qnh_hpa);
   return buf;
+}
+
+// Convenience for the TL-threshold path (no CIFP is_fl available).
+// Default args replicate the old 5000 ft threshold (neutral QNH, EU TA).
+static std::string format_alt(int alt_ft, int ta_ft = 5000, int qnh_hpa = 1013) {
+  return format_alt_clearance(alt_ft, AltHint::Auto, qnh_hpa, ta_ft);
+}
+
+// Pick the format hint for a CIFP-sourced constraint: honor its is_fl flag when
+// it has a real altitude, else fall back to the TL threshold.
+static AltHint alt_hint_for(const cifp_reader::CifpAlt &a) {
+  if (a.feet <= 0)
+    return AltHint::Auto;
+  return a.is_fl ? AltHint::FlightLevel : AltHint::Feet;
 }
 
 // Cross-track distance (NM) from point P to the great-circle leg A→B.
@@ -3841,15 +3931,49 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   s_assigned_star_name = star_name;
   s_assigned_dest_icao = ofp.destination_icao;
 
+  // Decide whether to SPEAK a "descend" step: only when star_alt_ft is a genuine
+  // step below the PRIOR cleared level (or the prior level is unknown -- an
+  // external jump). Computed against the prior value BEFORE recording the new
+  // one, otherwise emit_alt always sees its own write and the spoken descent
+  // vanishes (alpha-11 regression: "cleared via ABDI8R" with no "descend FL120").
+  const int prior_cleared = s_enroute_cleared_alt_ft > 0 ? s_enroute_cleared_alt_ft
+                                                         : ctx.ifr_cruise_alt_ft;
+  const bool emit_alt =
+      star_alt_ft > 0 && (prior_cleared <= 0 || star_alt_ft < prior_cleared);
+
+  // Record the cleared altitude so current_cleared_alt_ft() (and EVERY downstream
+  // altitude gate -- descend-to-enter, poll_altitude_compliance, the CIFP crossing
+  // corrective) reflects it. build_descent_clearance previously only READ this,
+  // never wrote it -- so on an external jump it stayed 0, current_cleared_alt_ft()
+  // returned 0, and SILENTLY disabled all descent enforcement (LFMN ABDI8R
+  // 2026-07-13). Seed to cruise when no step is spoken so it is never left at 0.
+  if (emit_alt)
+    s_enroute_cleared_alt_ft = star_alt_ft;
+  else if (s_enroute_cleared_alt_ft <= 0 && ctx.ifr_cruise_alt_ft > 0)
+    s_enroute_cleared_alt_ft = ctx.ifr_cruise_alt_ft;
+  logging::info("IFR descent: cleared alt recorded = %d ft (star=%d emit_alt=%d "
+                "prior=%d cruise=%d)",
+                s_enroute_cleared_alt_ft, star_alt_ft, emit_alt ? 1 : 0,
+                prior_cleared, ctx.ifr_cruise_alt_ft);
+
+  // Load the STAR + approach fix chain into the route table NOW, at the descent
+  // clearance -- not only at the Approach check-in. ATC has already named both
+  // the STAR (s_assigned_star_name) and the expected approach
+  // (s_assigned_approach_designator, set above), so the full arrival sequence
+  // (e.g. GIROL/AMFOU/TIPIK/MUS + the RNAV 22L fixes on LFMN ABDI8R) is known.
+  // Without this the route table jumps STAR-entry -> destination during the
+  // whole descent, so "direct <STAR fix>" readbacks are not biased (AMFOU ->
+  // "I'm full", 2026-07-13), check_course compares against the airport, and the
+  // STAR block-floor clamp has no floors to read. init_route_fixes clears +
+  // rebuilds and re-syncs the tracker to the aircraft position (idempotent --
+  // the Approach check-in still calls it again to fold in any late changes).
+  init_route_fixes(ctx);
+
   if (out_text) {
     char buf[240];
-    // Emit a "descend" instruction only when star_alt_ft is a genuine step
-    // below the current cleared level.  If navlog step-downs already brought
-    // the aircraft below the computed STAR entry altitude, skip the altitude
-    // and just give routing + approach information.
-    int current_cleared = s_enroute_cleared_alt_ft > 0 ? s_enroute_cleared_alt_ft
-                                                        : ctx.ifr_cruise_alt_ft;
-    bool emit_alt = star_alt_ft > 0 && star_alt_ft < current_cleared;
+    // emit_alt was decided above (against the PRIOR cleared level). When false,
+    // navlog step-downs already had us below the STAR entry altitude, so give
+    // routing + approach info only.
     std::string routing = star_phrase + approach_phrase;
     if (!emit_alt && !routing.empty()) {
       if (routing.size() >= 2 && routing[0] == ',')
@@ -4129,14 +4253,163 @@ pick_direct_fix(const xplane_context::XPlaneContext &ctx,
   return {};
 }
 
+// Nearest upcoming SID/STAR/approach speed cap (kt) from the unified route
+// table, scanning a short look-ahead window from the current tracker index.
+// 0 = no cap in range (or the table isn't populated — e.g. SID climb today,
+// which falls back to the pure ICAO 250 kt rule). Reads s_route_fixes so SID
+// and STAR/approach share one rule the moment the table carries the fix.
+// Highest block-"B" FLOOR among route fixes NOT yet passed (positional: from
+// the current tracker index forward). A descent may never be cleared below this
+// until the block fix is physically behind the aircraft. 0 = no active block.
+// This is the authoritative block gate: even if the walker's queue skips a
+// block fix on altitude, the descent target is still clamped up to this floor
+// (LFMN R22LZ: at MUS/FL080 the walker grabbed SOTOX FL070, below MN261's
+// FL080 block floor). Positional, so the floor releases once MN261 is passed.
+static int active_block_floor_ft() {
+  int floor = 0;
+  for (int i = std::max(0, s_route_fix_idx);
+       i < static_cast<int>(s_route_fixes.size()); ++i)
+    if (s_route_fixes[i].floor_ft > floor)
+      floor = s_route_fixes[i].floor_ft;
+  return floor;
+}
+
+// Compliance of the NEXT constrained route fix with the aircraft's current
+// altitude/speed. This is the enforcement primitive behind the corrective ATC
+// model: the pilot flies the published SID/STAR/approach profile IMPLICITLY,
+// and ATC issues a statement ONLY when the fix is within `lead_seconds` flying
+// time AND the aircraft will bust its constraint. The trigger is TIME, not a
+// fixed distance -- a jet at 300 kt and a turboprop at 150 kt get the same
+// warning lead. Phase-agnostic: it reads s_route_fixes, so the same monitor
+// serves SID, en-route, and approach (the roadmap enforcement-symmetry goal).
+struct FixCompliance {
+  bool        valid = false;   // a positioned, constrained fix exists ahead
+  std::string ident;
+  double      dist_nm = 1e9;
+  double      eta_sec = 1e9;   // estimated flying time to the fix
+  bool        near = false;    // within lead_seconds of that fix
+  bool        alt_bust = false;
+  int         alt_target_ft = 0;
+  bool        alt_is_fl = false;
+  bool        spd_bust = false;
+  int         spd_target_kt = 0;
+};
+
+static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
+                                    double lead_seconds) {
+  using AS = atc_state_machine::ATCState;
+  FixCompliance c;
+  const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+  const float pa = ctx.pressure_alt_ft;
+  // Phase gate: APPROACH-procedure fixes (LP403 etc.) are enforced ONLY once in an
+  // approach phase. On the STAR (DESCENT/ARRIVAL) they must be ignored -- otherwise
+  // an APP constraint leaks into the STAR (LFLP 2026-07-14: LP403's 200 kt / 6500 ft,
+  // an APP fix that loops back geographically near COLLO, was issued during the STAR
+  // near COLLO, skipping LUVOB/GOVNA's 210 kt). The STAR uses only STAR fixes.
+  const AS st = atc_state_machine::get_state();
+  const bool in_approach =
+      st == AS::IFR_APPROACH_CONTACT || st == AS::IFR_APPROACH_DESCENT ||
+      st == AS::IFR_APPROACH_TOWER || st == AS::IFR_LANDING_CLEARED;
+  for (int i = std::max(0, s_route_fix_idx);
+       i < static_cast<int>(s_route_fixes.size()); ++i) {
+    const auto &f = s_route_fixes[i];
+    if (f.is_approach_proc && !in_approach)
+      continue; // APP fix but still on the STAR -> not yet enforceable
+    const bool has_alt = (f.alt.feet > 0) || (f.floor_ft > 0);
+    const bool has_spd = (f.speed_kt > 0);
+    if (!has_alt && !has_spd)
+      continue; // unconstrained fix — flown implicitly, nothing to enforce
+    if (f.lat == 0.0 && f.lon == 0.0)
+      continue; // no position — cannot range-gate
+    c.valid   = true;
+    c.ident   = f.ident;
+    c.dist_nm = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
+                                              f.lat, f.lon);
+    // Time to the fix = distance / groundspeed (floored so we don't divide by a
+    // near-zero GS on the ground / in a hold).
+    const double gs = ctx.groundspeed_kts > 40.0f
+                          ? static_cast<double>(ctx.groundspeed_kts)
+                          : 120.0;
+    c.eta_sec = c.dist_nm / gs * 3600.0;
+    c.near    = (c.eta_sec <= lead_seconds);
+    // Altitude bust: the aircraft will not satisfy the fix's altitude band.
+    if (f.floor_ft > 0) { // block "B": must be within [floor, ceiling]
+      if (pa > static_cast<float>(f.alt.feet) + 200.0f ||
+          pa < static_cast<float>(f.floor_ft) - 200.0f) {
+        c.alt_bust = true;
+        c.alt_target_ft = f.floor_ft; // descend to (or climb to) the block floor
+        c.alt_is_fl = (f.floor_ft >= compute_tl_ft(ta, ctx.qnh_hpa));
+      }
+    } else if (f.is_floor) { // at-or-above: bust only if BELOW
+      if (pa < static_cast<float>(f.alt.feet) - 200.0f) {
+        c.alt_bust = true; c.alt_target_ft = f.alt.feet; c.alt_is_fl = f.alt.is_fl;
+      }
+    } else if (f.alt.feet > 0) { // ceiling / "at": bust if ABOVE (descent case)
+      if (pa > static_cast<float>(f.alt.feet) + 200.0f) {
+        c.alt_bust = true; c.alt_target_ft = f.alt.feet; c.alt_is_fl = f.alt.is_fl;
+      }
+    }
+    // Speed bust: faster than the fix's cap (5 kt hysteresis).
+    if (has_spd && ctx.indicated_airspeed_kts > static_cast<float>(f.speed_kt) + 5.0f) {
+      c.spd_bust = true; c.spd_target_kt = f.speed_kt;
+    }
+    return c; // first constrained fix ahead is the one that governs
+  }
+  return c;
+}
+
+// Lateral analog of check_next_fix (the "DirectMonitor" primitive): course
+// compliance to the ACTIVE next route fix. off_course = the aircraft's heading
+// diverges from the bearing to the next positioned fix by more than
+// threshold_deg. Drives "confirm direct <fix>" corrections at SID / en-route /
+// approach. Firing gates (cooldown, distance guard, threshold, post-turn grace)
+// are decided per phase at the call site -- wired now, thresholds TBD.
+struct CourseCheck {
+  bool        valid = false;
+  std::string ident;
+  double      dist_nm = 1e9;
+  double      bearing_deg = 0.0;
+  double      diff_deg = 0.0;
+  bool        off_course = false;
+};
+
+static CourseCheck check_course(const xplane_context::XPlaneContext &ctx,
+                                double threshold_deg) {
+  CourseCheck c;
+  for (int i = std::max(0, s_route_fix_idx);
+       i < static_cast<int>(s_route_fixes.size()); ++i) {
+    const auto &f = s_route_fixes[i];
+    if (f.lat == 0.0 && f.lon == 0.0)
+      continue; // no position -> cannot compute a bearing
+    const double bearing = traffic_geometry::bearing_deg(
+        ctx.latitude, ctx.longitude, f.lat, f.lon);
+    const double dist = traffic_geometry::distance_nm(ctx.latitude,
+                                                      ctx.longitude, f.lat, f.lon);
+    double diff = std::fabs(bearing - static_cast<double>(ctx.heading_true));
+    if (diff > 180.0) diff = 360.0 - diff;
+    // Skip a fix that is clearly BEHIND the aircraft (bearing >120 deg off the
+    // nose) and not adjacent: it was bypassed, so "fly direct to it" is wrong --
+    // evaluate the next fix instead. Belt-and-suspenders with the tracker's own
+    // bypass-advance; keeps a stale index from firing "confirm direct <behind
+    // fix>" (LFMN ABDI8R 2026-07-13, diff 179 to ABDIL).
+    if (diff > 120.0 && dist > 1.5) continue;
+    c.valid       = true;
+    c.ident       = f.ident;
+    c.dist_nm     = dist;
+    c.bearing_deg = bearing;
+    c.diff_deg    = diff;
+    c.off_course  = (diff > threshold_deg);
+    return c; // first positioned fix ahead is the active leg target
+  }
+  return c;
+}
+
 // ── poll_speed_restriction ────────────────────────────────────────────────
-// ICAO standard: all aircraft must maintain 250 kt IAS or less below FL100.
-// Continuously enforced: fires "reduce speed, 250 knots or less" whenever the
-// aircraft is below FL100 (10 000 ft MSL) AND IAS > 255 kt (5 kt hysteresis).
-// After firing, the flag is held UNTIL the pilot complies (IAS <= 245 kt) —
-// then a subsequent overspeed re-fires the advisory. Also resets when the
-// aircraft climbs back above FL100 (+ 500 ft hysteresis), so a fresh descent
-// re-arms the check even if the pilot never complied at high altitude.
+// Effective speed limit = min(ICAO 250 kt < FL100, nearest active SID/STAR/
+// approach waypoint cap). Continuously enforced: fires "reduce speed, N knots
+// or less" whenever IAS exceeds the limit + 5 kt (hysteresis). The flag is held
+// until the pilot complies (IAS <= limit - 5 kt); a subsequent overspeed, or a
+// newly tighter limit, re-fires the advisory.
 bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
                             std::string *out_text) {
   using AS = atc_state_machine::ATCState;
@@ -4148,32 +4421,59 @@ bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
       state != AS::IFR_APPROACH_TOWER)
     return false;
 
-  // Reset flag when aircraft climbs back above FL100 (+ 500 ft hysteresis)
-  // OR when the pilot complies (IAS <= 245 kt, 5 kt hysteresis below 250).
-  // Compliance-reset lets the advisory re-fire if the pilot subsequently
-  // exceeds 250 kt again while still below FL100.
-  // Reset on either condition: climbed back above FL100 (+500 ft hysteresis)
-  // OR pilot complied (IAS <= 245 kt). Combined — identical reset body.
-  if (ctx.altitude_ft_msl > 10500.0f || ctx.indicated_airspeed_kts <= 245.0f)
-    s_speed_250_warned = false;
+  // Effective speed limit in force now: the tighter of the ICAO 250 kt < FL100
+  // rule and any active SID/STAR/approach waypoint cap from the unified route
+  // table (e.g. 210 kt at a terminal fix). 0 = no restriction.
+  int limit = (ctx.altitude_ft_msl < 10000.0f) ? 250 : 0;
+  // Procedure speed cap is enforced CORRECTIVELY: the pilot flies the published
+  // cap implicitly, and ATC only calls it when the fix is within ~60 s flying
+  // time AND the aircraft is still too fast (so NANAX's 200 kt fires approaching
+  // NANAX, not back at MUS -- LFMN R22LZ 2026-07-12). Shared compliance monitor.
+  const FixCompliance fc = check_next_fix(ctx, 60.0);
+  const int proc = (fc.valid && fc.near && fc.spd_bust) ? fc.spd_target_kt : 0;
+  if (proc > 0)
+    limit = (limit == 0) ? proc : std::min(limit, proc);
 
+  // A newly tighter limit re-arms the advisory (e.g. 250 -> 210 approaching a
+  // terminal fix) even if it had already fired for the looser limit.
+  if (limit > 0 && s_last_speed_limit_kt > 0 && limit < s_last_speed_limit_kt)
+    s_speed_250_warned = false;
+  s_last_speed_limit_kt = limit;
+
+  if (limit == 0) { // no restriction — reset (re-arms next descent) and stay silent
+    s_speed_250_warned = false;
+    return false;
+  }
+  // Compliance / hysteresis: 5 kt band around the effective limit.
+  if (ctx.indicated_airspeed_kts <= static_cast<float>(limit) - 5.0f)
+    s_speed_250_warned = false;
   if (s_speed_250_warned)
     return false;
-  if (ctx.altitude_ft_msl >= 10000.0f)
-    return false;
-  if (ctx.indicated_airspeed_kts <= 255.0f)
+  if (ctx.indicated_airspeed_kts <= static_cast<float>(limit) + 5.0f)
     return false;
 
   s_speed_250_warned = true;
   const std::string &cs = atc_state_machine::session_callsign();
   const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
-  logging::info("IFR speed: %.0f ft IAS %.0f kts — issuing 250 kt restriction",
-                ctx.altitude_ft_msl, ctx.indicated_airspeed_kts);
+  // DIAGNOSTIC (alpha-20): which fix drove the cap + the tracker index, to pin the
+  // premature-200kt bug (LP403 issued at COLLO). Remove once the LFLP looping-RNAV
+  // enforcement is fixed.
+  {
+    const FixCompliance dfc = check_next_fix(ctx, 60.0);
+    logging::info("[dbg spd] issuing %d kt @ %.0f ft -- check_next_fix: %s idx=%d "
+                  "dist=%.1f near=%d spd_tgt=%d (route_idx=%d/%d)",
+                  limit, ctx.altitude_ft_msl,
+                  dfc.valid ? dfc.ident.c_str() : "(none)", s_route_fix_idx,
+                  dfc.dist_nm, dfc.near ? 1 : 0, dfc.spd_target_kt,
+                  s_route_fix_idx, static_cast<int>(s_route_fixes.size()));
+  }
+  logging::info("IFR speed: %.0f ft IAS %.0f kts -- issuing %d kt restriction",
+                ctx.altitude_ft_msl, ctx.indicated_airspeed_kts, limit);
   if (out_text) {
     char buf[128];
     std::snprintf(buf, sizeof(buf),
-                  "%s, reduce speed, 250 knots or less.",
-                  callsign.c_str());
+                  "%s, reduce speed, %d knots or less.",
+                  callsign.c_str(), limit);
     *out_text = buf;
   }
   return true;
@@ -4213,7 +4513,17 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     s_enroute_sector_freq_khz = 0;
   s_enroute_visited_sector_freqs.clear();
     s_enroute_sector_check_sec = 30.0f;
-    s_enroute_cleared_alt_ft = 0;
+    // Do NOT wipe the cleared altitude here for the airborne IFR continuation
+    // phases. poll_enroute runs EVERY frame and this block fires for ANY
+    // non-ENROUTE_CRUISE state -- so unconditionally zeroing s_enroute_cleared_alt_ft
+    // erased the "descend FL120" that build_descent_clearance had just set, ONE
+    // FRAME later. current_cleared_alt_ft() then returned 0 for the whole descent,
+    // silently killing descend-to-enter, poll_altitude_compliance AND the CIFP
+    // crossing corrective (LFMN ABDI8R 2026-07-13: [dbg dte] showed cleared=0 at
+    // every tick while over the NICE TMA). Reset it only on a true lifecycle
+    // reset to IDLE; DESCENT/ARRIVAL/APPROACH must keep the assigned level.
+    if (atc_state_machine::get_state() == AS::IDLE)
+      s_enroute_cleared_alt_ft = 0;
     s_enroute_alt_warn_cooldown = 0.0f;
     s_cruise_stepup_issued = false;
     s_navlog_alt_step_idx = 0;
@@ -4236,6 +4546,19 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     else if (ctx.altitude_ft_msl > 1000.0f)
       s_enroute_cleared_alt_ft =
           (static_cast<int>(ctx.altitude_ft_msl) / 1000) * 1000;
+  }
+
+  // Route table may be empty if the SID phase was skipped (JUMP-to-ENR, airborne
+  // start, reposition): build_sid_route_table only runs at SID-init, and
+  // init_route_fixes only at approach. Without route fixes the route tracker AND
+  // the course monitor (check_course) have nothing to work with -- the reason a
+  // jumped-in flight got zero course enforcement (LFLP->LFMN 2026-07-13). Build
+  // it lazily here so en-route/descent monitoring works regardless of how the
+  // aircraft became airborne.
+  if (s_route_fixes.empty()) {
+    const auto &ofp_lazy = simbrief_ofp::get();
+    if (ofp_lazy.valid && !ofp_lazy.navlog.empty())
+      build_sid_route_table(ctx);
   }
 
   // Training jump: s_current_controller_label not set. Find the CTR sector
@@ -4894,6 +5217,33 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     }
   }
 
+  // DirectMonitor (en-route course): "confirm direct <fix>" when the aircraft is
+  // off the leg to the ACTIVE next fix. Lowest priority -- only reached when no
+  // higher event fired this frame. WIRED with placeholder gates (25 deg / 3 NM
+  // guard / 180 s cooldown); firing conditions to be tuned. Distinct from the
+  // coarse 5 NM cross-track check above (heading-vs-bearing, not offset).
+  s_enroute_course_cooldown = std::max(0.0f, s_enroute_course_cooldown - dt);
+  if (s_enroute_course_cooldown <= 0.0f) {
+    const CourseCheck cc = check_course(ctx, 25.0);
+    if (cc.valid && cc.off_course && cc.dist_nm > 3.0) {
+      s_enroute_course_cooldown = 180.0f;
+      if (out_text) {
+        char buf[176];
+        std::snprintf(buf, sizeof(buf),
+                      "%s, confirm direct %s, you appear tracking heading %.0f, "
+                      "expected %.0f.",
+                      callsign.c_str(), cc.ident.c_str(),
+                      static_cast<double>(ctx.heading_true), cc.bearing_deg);
+        *out_text = buf;
+      }
+      logging::info("IFR en-route: course deviation hdg %.0f vs brg %.0f to %s (diff %.0f)",
+                    static_cast<double>(ctx.heading_true), cc.bearing_deg,
+                    cc.ident.c_str(), cc.diff_deg);
+      rb(false);
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -4984,6 +5334,74 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
 // reaches the STAR entry fix (procedure-anchored boundary). The real Approach
 // handoff now lives in poll_arrival() -- poll_descent no longer transitions to
 // IFR_APPROACH_CONTACT.
+// Post-clearance altitude-compliance courtesy prompt for the DESCENT + ARRIVAL
+// phases -- the gap between the TOD "descend FLxx" clearance and the approach
+// phase, where poll_enroute's 2.4 verify and poll_approach's verify-descending
+// do NOT run. Same shape as the en-route 2.4 verify: arm on the assigned level;
+// if ~45 s later the aircraft is >=500 ft off it and NOT moving toward it
+// (small |VS| or wrong direction), prompt "confirm descending/climbing <level>".
+// Once per assignment. Firing gates (45 s grace, 500 ft, 200 fpm) are
+// placeholders mirroring 2.4 -- tune in-sim. Runs every frame (real dt).
+bool poll_altitude_compliance(const xplane_context::XPlaneContext &ctx, float dt,
+                              std::string *out_text) {
+  using AS = atc_state_machine::ATCState;
+  const AS st = atc_state_machine::get_state();
+  if (st != AS::IFR_DESCENT && st != AS::IFR_ARRIVAL) {
+    s_alt_comp_target_ft = 0;
+    s_alt_comp_arm_sec = 0.0f;
+    s_alt_comp_sent = false;
+    return false;
+  }
+  const int target = engine::current_cleared_alt_ft();
+  if (target <= 0) {
+    s_alt_comp_target_ft = 0;
+    s_alt_comp_arm_sec = 0.0f;
+    s_alt_comp_sent = false;
+    return false;
+  }
+  if (target != s_alt_comp_target_ft) { // new level assigned -> re-arm grace
+    s_alt_comp_target_ft = target;
+    s_alt_comp_arm_sec = 0.0f;
+    s_alt_comp_sent = false;
+    return false;
+  }
+  s_alt_comp_arm_sec += dt;
+  if (s_alt_comp_sent || atc_state_machine::is_readback_pending())
+    return false;
+  if (s_alt_comp_arm_sec < 45.0f) // grace for the pilot to start toward it
+    return false;
+  const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
+  const bool tgt_is_fl = (target > ta);
+  const int actual = tgt_is_fl ? static_cast<int>(ctx.pressure_alt_ft)
+                               : static_cast<int>(ctx.altitude_ft_msl);
+  const int diff = actual - target; // + above assigned (needs descent)
+  if (std::abs(diff) < 500) // effectively at / reaching the level
+    return false;
+  const bool needs_descent = diff > 0;
+  const float vs = ctx.vertical_speed_fpm; // + up, - down
+  const bool moving_ok = needs_descent ? (vs < -200.0f) : (vs > 200.0f);
+  if (moving_ok) // actively moving toward the assigned level
+    return false;
+  s_alt_comp_sent = true;
+  if (out_text) {
+    const std::string &cs = atc_state_machine::session_callsign();
+    const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+    const char *verb = needs_descent ? "descending" : "climbing";
+    char buf[160];
+    if (tgt_is_fl)
+      std::snprintf(buf, sizeof(buf), "%s, confirm %s flight level %d.",
+                    callsign.c_str(), verb, target / 100);
+    else
+      std::snprintf(buf, sizeof(buf), "%s, confirm %s %d feet.",
+                    callsign.c_str(), verb, target);
+    *out_text = buf;
+  }
+  logging::info("IFR descent/arrival: alt-compliance target=%d diff=%+d VS=%.0f -> confirm %s",
+                target, diff, static_cast<double>(ctx.vertical_speed_fpm),
+                needs_descent ? "descending" : "climbing");
+  return true;
+}
+
 bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
                   std::string *out_text,
                   bool *out_requires_readback) {
@@ -4999,6 +5417,37 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
   // phase advance -- the aircraft is still under ACC here.
   if (poll_acc_sector_change(ctx, dt, out_text, out_requires_readback))
     return true;
+
+  // DirectMonitor (descent course): extend course enforcement into DESCENT (was
+  // en-route + approach only). Runs every frame (real dt), before the 1 Hz
+  // throttle below. Shares s_enroute_course_cooldown (en-route/descent are
+  // mutually exclusive states). ARRIVAL is intentionally NOT covered yet -- the
+  // STAR is curved and direct-bearing-vs-heading would false-fire on the turns;
+  // it needs the leg-track refinement (see the consolidation roadmap).
+  s_enroute_course_cooldown = std::max(0.0f, s_enroute_course_cooldown - dt);
+  if (s_enroute_course_cooldown <= 0.0f) {
+    const CourseCheck cc = check_course(ctx, 25.0);
+    if (cc.valid && cc.off_course && cc.dist_nm > 3.0) {
+      s_enroute_course_cooldown = 180.0f;
+      if (out_text) {
+        const std::string &cs = atc_state_machine::session_callsign();
+        const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+        char buf[176];
+        std::snprintf(buf, sizeof(buf),
+                      "%s, confirm direct %s, you appear tracking heading %.0f, "
+                      "expected %.0f.",
+                      callsign.c_str(), cc.ident.c_str(),
+                      static_cast<double>(ctx.heading_true), cc.bearing_deg);
+        *out_text = buf;
+      }
+      if (out_requires_readback)
+        *out_requires_readback = false;
+      logging::info("IFR descent: course deviation hdg %.0f vs brg %.0f to %s (diff %.0f)",
+                    static_cast<double>(ctx.heading_true), cc.bearing_deg,
+                    cc.ident.c_str(), cc.diff_deg);
+      return true;
+    }
+  }
 
   s_descent_timer += dt;
 
@@ -5021,6 +5470,109 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
 
   const double d_dest = traffic_geometry::distance_nm(
       ctx.latitude, ctx.longitude, ofp.navlog.back().lat, ofp.navlog.back().lon);
+
+  // Descend-to-enter the terminal area. If the aircraft is still cleared ABOVE
+  // the destination TMA while over it, clear it down to a level INSIDE the TMA
+  // so it can actually enter -- where Approach + the STAR step-downs take over.
+  // Without this, an aircraft cleared to a level above a low-ceilinged TMA
+  // (NICE and CHAMBERY both top at FL115) can never enter it and stalls above
+  // the terminal area (LFLP->LFMN jump-to-ENR 2026-07-13: sat at FL120 over the
+  // NICE TMA with no instruction). Geometry-based, so it resolves correctly for
+  // a field controlled by a differently-named unit (LFLP/Annecy under the
+  // CHAMBERY TMA). Fires once per distinct target; the descent it issues then
+  // re-arms poll_altitude_compliance (both read s_enroute_cleared_alt_ft). This
+  // is the primary "get into the TMA" path; the buffer-based TMA-entry advance
+  // below is now the fallback for when no ceiling resolves (no openair).
+  if (out_text && openair_db::ready()) {
+    // Fire when the aircraft is laterally OVER a terminal TMA (polygon test),
+    // above its ceiling. Use terminal_tma_ceiling(AIRCRAFT) -- the base TMA the
+    // aircraft is actually over -- NOT descend_to_enter_ceiling(...,dest): the
+    // latter depended on ofp.navlog.back() coords, which are unreliable in-sim
+    // and silently returned 0 (LFMN ABDI8R 2026-07-13: over NICE TMA at FL177,
+    // no descent). Base-TMA logic still ignores a stacked overlying TMA (GENEVA
+    // over CHAMBERY -> 9500). We are already gated to DESCENT near the arrival.
+    const int tma_ceil =
+        openair_db::terminal_tma_ceiling(ctx.latitude, ctx.longitude);
+    // Highest full-thousand flight level strictly below the TMA ceiling.
+    int target_ft = (tma_ceil > 1000) ? ((tma_ceil - 100) / 1000) * 1000 : 0;
+    // Respect STAR block-constraint floors: NEVER clear below an active block
+    // floor ahead (e.g. LFMN MN261 block FL080/FL120). If a floor sits above
+    // the level we'd otherwise pick, clamp up to it; if that clamp pushes the
+    // target at/above the TMA ceiling, the aircraft can't legally enter the TMA
+    // yet (it must stay above the floor), so the target_ft < tma_ceil guard
+    // below suppresses the clearance until the block fix is behind us. ("+"/
+    // at-or-above crossings fold in via the effective-constraint merge later.)
+    const int block_floor = active_block_floor_ft();
+    if (block_floor > 0 && target_ft < block_floor)
+      target_ft = block_floor;
+    const int cleared = engine::current_cleared_alt_ft();
+    // Diagnostic: 1 Hz snapshot of the descend-to-enter gate inputs, so a flight
+    // log shows exactly why it fires or not (remove once validated in-sim).
+    if (tma_ceil > 0)
+      logging::info("[dbg dte] tma_ceil=%d target=%d alt=%.0f cleared=%d floor=%d "
+                    "last=%d -> %s",
+                    tma_ceil, target_ft, static_cast<double>(ctx.altitude_ft_msl),
+                    cleared, block_floor, s_descent_tma_target_ft,
+                    (target_ft > 0 && target_ft < tma_ceil &&
+                     static_cast<int>(ctx.altitude_ft_msl) > tma_ceil + 200 &&
+                     cleared > target_ft + 100 && s_descent_tma_target_ft != target_ft)
+                        ? "FIRE" : "hold");
+    if (target_ft > 0 && target_ft < tma_ceil &&
+        static_cast<int>(ctx.altitude_ft_msl) > tma_ceil + 200 &&
+        cleared > target_ft + 100 && s_descent_tma_target_ft != target_ft) {
+      s_descent_tma_target_ft = target_ft;
+      s_enroute_cleared_alt_ft = target_ft; // re-arms poll_altitude_compliance
+      const std::string &cs = atc_state_machine::session_callsign();
+      const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+      const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
+      const std::string clr =
+          format_alt_clearance(target_ft, AltHint::Auto, ctx.qnh_hpa, ta);
+      *out_text = callsign + ", descend " + clr + ".";
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      logging::info("IFR descent: descend-to-enter terminal area, TMA ceil %d -> "
+                    "%s (%.1f NM from dest)",
+                    tma_ceil, clr.c_str(), d_dest);
+      return true;
+    }
+  }
+
+  // CIFP STAR crossing-altitude enforcement (the corrective model). The STAR
+  // publishes the descent profile as per-fix crossing altitudes (ABDI8R:
+  // ABDIL<=FL190, AMFOU<=FL160, TIPIK<=FL120, MUS>=FL080). The pilot flies these
+  // implicitly; ATC only speaks when, within a time-to-fix window, the aircraft
+  // won't make the next constrained fix. This drives the enroute part of the
+  // descent (before the terminal TMA) and does NOT depend on any airspace
+  // polygon -- it fixes the "stuck at cruise, busts TIPIK" failure (LFMN ABDI8R
+  // 2026-07-13: level FL129 through TIPIK's <=FL120 with no correction). The
+  // descend-to-enter block above takes priority when over the terminal TMA (it
+  // clears BELOW the ceiling, satisfying the crossing too). Fires once per fix.
+  if (out_text) {
+    const FixCompliance fc = check_next_fix(ctx, 90.0);
+    if (fc.valid && fc.near && fc.alt_bust && fc.alt_target_ft > 0 &&
+        fc.alt_target_ft != s_descent_cifp_target_ft) {
+      const int cleared = engine::current_cleared_alt_ft();
+      // Only a genuine DOWN step (a STAR crossing we're above). An at-or-above
+      // floor bust in descent shouldn't push us back up.
+      if (fc.alt_target_ft < cleared) {
+        s_descent_cifp_target_ft = fc.alt_target_ft;
+        s_enroute_cleared_alt_ft = fc.alt_target_ft; // arms poll_altitude_compliance
+        const std::string &cs = atc_state_machine::session_callsign();
+        const std::string &callsign =
+            cs.empty() ? settings::pilot_callsign() : cs;
+        const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
+        const AltHint hint = fc.alt_is_fl ? AltHint::FlightLevel : AltHint::Auto;
+        const std::string clr =
+            format_alt_clearance(fc.alt_target_ft, hint, ctx.qnh_hpa, ta);
+        *out_text = callsign + ", descend " + clr + ".";
+        if (out_requires_readback)
+          *out_requires_readback = true;
+        logging::info("IFR descent: STAR crossing %s -> descend %s (%.0f NM, eta %.0fs)",
+                      fc.ident.c_str(), clr.c_str(), fc.dist_nm, fc.eta_sec);
+        return true;
+      }
+    }
+  }
 
   bool reached_arrival = false;
   std::string anchor_id;
@@ -5068,6 +5620,33 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
         "IFR descent -> arrival: terminal-area fallback (%.1f NM, no entry fix)",
         d_dest);
   }
+
+  // Also advance on destination-TMA entry (openair), independent of the fix
+  // anchor. An off-course aircraft can enter the TMA without crossing the STAR
+  // entry fix -- and the 40 NM fallback above only applies when NO anchor exists
+  // (else-if), so with a resolvable-but-missed anchor DESCENT stalled and the
+  // approach handoff never fired (LFLP->LFMN jump-to-ENR 2026-07-13: sat in the
+  // NICE TMA at FL120 with no instruction). TMA class only (not CTR -- a CTR is
+  // the broad ACC sector we're already under in descent). Query 1000 ft lower so
+  // a TMA the aircraft is about to drop into still matches (mirrors poll_arrival).
+  if (!reached_arrival && openair_db::ready()) {
+    constexpr int kArrivalCeilingBufferFt = 1000;
+    const openair_db::AirspaceEntry enc = openair_db::find_enclosing(
+        ctx.latitude, ctx.longitude,
+        static_cast<int>(ctx.altitude_ft_msl) - kArrivalCeilingBufferFt);
+    if (enc.ac_class == openair_db::AirspaceClass::TMA) {
+      reached_arrival = true;
+      logging::info("IFR descent -> arrival: destination TMA entry '%s'",
+                    enc.name.c_str());
+    }
+  }
+
+  // NOTE: DESCENT->ARRIVAL and the Approach handoff both stay ALTITUDE-GATED
+  // (find_enclosing above / in poll_arrival). Correct ATC model (user 2026-07-13):
+  // the CURRENT controller (e.g. Marseille ACC) clears the aircraft DOWN to the
+  // TMA ceiling (the descend-to-enter block above) to force it into the TMA;
+  // only ONCE INSIDE the TMA does the handoff to the terminal unit (Nice
+  // Approach) fire. So we must NOT flip/hand off while still above the ceiling.
 
   if (reached_arrival)
     atc_state_machine::set_state(AS::IFR_ARRIVAL);
@@ -5227,6 +5806,17 @@ const std::string &pending_departure_label() {
 
 const std::string &assigned_star_name() { return s_assigned_star_name; }
 
+std::vector<std::string> upcoming_route_fix_idents() {
+  std::vector<std::string> out;
+  for (int i = std::max(0, s_route_fix_idx);
+       i < static_cast<int>(s_route_fixes.size()); ++i) {
+    const std::string &id = s_route_fixes[i].ident;
+    if (!id.empty())
+      out.push_back(id);
+  }
+  return out;
+}
+
 int current_cleared_alt_ft() {
   // Precedence: freshest write wins. s_enroute_cleared_alt_ft is updated
   // by SID climb, en-route step-ups, en-route step-downs, approach
@@ -5255,16 +5845,13 @@ static std::string build_star_constraint(
 ) {
   const int ta = (ta_ft > 0) ? ta_ft : 5000;
   std::string msg = cs;
-  char alt_buf[64];
-  // Prefer the CIFP constraint's is_fl flag (feet vs FL as published on the
-  // plate). Fall back to the transition-altitude comparison only when this
-  // clearance isn't tied to a real CIFP altitude (e.g. maintain-current).
-  const bool use_fl = (wp.alt.feet > 0) ? wp.alt.is_fl : (cleared_ft > ta);
-  if (use_fl)
-    std::snprintf(alt_buf, sizeof(alt_buf), ", descend flight level %d", cleared_ft / 100);
-  else
-    std::snprintf(alt_buf, sizeof(alt_buf), ", descend %d feet, QNH %d", cleared_ft, qnh_hpa);
-  msg += alt_buf;
+  // FL-vs-feet from the CIFP constraint's is_fl flag (feet vs FL as published
+  // on the plate); TL threshold only when not tied to a real CIFP altitude.
+  // For a block "B", cleared_ft is the FLOOR (a plain feet value, e.g. GOVNA
+  // 6500) — its own is_fl is not the ceiling's, so decide by the TL threshold.
+  const AltHint hint =
+      (wp.floor_ft > 0) ? AltHint::Auto : alt_hint_for(wp.alt);
+  msg += ", descend " + format_alt_clearance(cleared_ft, hint, qnh_hpa, ta);
   if (wp.speed_kt > 0) {
     char spd[40];
     std::snprintf(spd, sizeof(spd), ", speed %d knots or less", wp.speed_kt);
@@ -5290,16 +5877,13 @@ static std::string build_approach_final_alt(const std::string &cs,
   // 6500 ft is_fl=false, "FL080" = FL080 is_fl=true). The old "alt_ft > ta"
   // guess spoke LP403's 6500 ft as "flight level 65" (LIMF -> LFLP
   // 2026-07-10) — wrong; it's a QNH altitude on the plate.
-  (void)ta_ft;
   std::string msg = cs;
   if (!fix_ident.empty())
     msg += ", direct " + fix_ident;
-  char alt_buf[80];
-  if (is_fl)
-    std::snprintf(alt_buf, sizeof(alt_buf), ", descend flight level %d.", alt_ft / 100);
-  else
-    std::snprintf(alt_buf, sizeof(alt_buf), ", descend %d feet, QNH %d.", alt_ft, qnh_hpa);
-  msg += alt_buf;
+  msg += ", descend " +
+         format_alt_clearance(alt_ft, is_fl ? AltHint::FlightLevel : AltHint::Feet,
+                              qnh_hpa, ta_ft) +
+         ".";
   return msg;
 }
 
@@ -5341,6 +5925,89 @@ static std::string approach_clearance_phrase(
 // Build the ordered route fix list from OFP navlog + STAR/APP waypoints.
 // Looks up lat/lon for STAR/APP idents from earth_fix.dat.
 // Called once when STAR/approach waypoints are loaded.
+// Build the DEPARTURE portion of the unified route table: enroute navlog fixes
+// enriched with the assigned SID's CIFP climb constraints (floor / block /
+// speed). Lets the shared compliance monitor + poll_speed_restriction enforce
+// SID limits during the climb, exactly as the arrival table serves approach.
+// Transient -- init_route_fixes rebuilds the table for the arrival. v1 enriches
+// fixes already present in the OFP navlog; a SID fix absent from the filed route
+// carries no constraint (acceptable first cut). See [[project_release_4_4_0]].
+static void build_sid_route_table(const xplane_context::XPlaneContext &ctx) {
+  s_route_fixes.clear();
+  s_route_fix_idx = 0;
+
+  const std::string dep =
+      s_departure_apt_id.empty() ? ctx.nearest_airport_id : s_departure_apt_id;
+  const std::string &sid = ctx.ifr_sid;
+  std::unordered_set<std::string> seen;
+
+  // 1. SID fixes FROM CIFP (idents + climb constraints), positioned via
+  //    earth_fix.dat -- the same pattern init_route_fixes uses for STAR/
+  //    approach. Sourcing from CIFP (not the OFP navlog) means every SID fix
+  //    is present with its constraint even when the filed route omits it.
+  if (!ctx.cifp_dir.empty() && !dep.empty() && !sid.empty()) {
+    const auto sw = cifp_reader::sid_waypoints(ctx.cifp_dir, dep, sid,
+                                               ctx.active_runway,
+                                               /*constrained_only=*/false);
+    std::vector<std::string> idents;
+    for (const auto &wp : sw)
+      if (!wp.ident.empty())
+        idents.push_back(wp.ident);
+    const auto pos = cifp_reader::lookup_fix_positions(ctx.cifp_dir, idents, dep);
+    for (const auto &wp : sw) {
+      if (wp.ident.empty() || seen.count(wp.ident))
+        continue;
+      seen.insert(wp.ident);
+      double lat = 0.0, lon = 0.0;
+      auto it = pos.find(wp.ident);
+      if (it != pos.end()) { lat = it->second.first; lon = it->second.second; }
+      RouteFix rf;
+      rf.ident      = wp.ident;
+      rf.lat        = lat;
+      rf.lon        = lon;
+      rf.alt        = wp.alt;
+      rf.is_ceiling = wp.is_ceiling;
+      rf.is_floor   = wp.is_floor;
+      rf.floor_ft   = wp.floor_ft;
+      rf.speed_kt   = wp.speed_kt;
+      s_route_fixes.push_back(rf);
+    }
+  }
+
+  // 2. Enroute navlog fixes AFTER the SID (skip any already added from the SID,
+  //    plus the SimBrief pseudo-fixes). These carry the OFP lat/lon.
+  const auto &ofp = simbrief_ofp::get();
+  for (const auto &nf : ofp.navlog) {
+    if (nf.ident.empty() || nf.ident == "TOC" || nf.ident == "TOD")
+      continue;
+    if (seen.count(nf.ident))
+      continue;
+    seen.insert(nf.ident);
+    s_route_fixes.push_back({nf.ident, nf.lat, nf.lon});
+  }
+
+  logging::info("[route] SID table: %d fixes (SID %s from CIFP + navlog, dep=%s rwy=%s)",
+                static_cast<int>(s_route_fixes.size()),
+                sid.empty() ? "(none)" : sid.c_str(), dep.c_str(),
+                ctx.active_runway.c_str());
+
+  // Advance past fixes already behind the aircraft (proximity + bearing),
+  // same rule as init_route_fixes.
+  while (s_route_fix_idx < static_cast<int>(s_route_fixes.size())) {
+    const auto &rf = s_route_fixes[s_route_fix_idx];
+    if (rf.lat == 0.0 && rf.lon == 0.0) { s_route_fix_idx++; continue; }
+    const float d = static_cast<float>(traffic_geometry::distance_nm(
+        ctx.latitude, ctx.longitude, rf.lat, rf.lon));
+    if (d < 1.5f) { s_route_fix_idx++; continue; }
+    double brg = traffic_geometry::bearing_deg(ctx.latitude, ctx.longitude,
+                                               rf.lat, rf.lon);
+    double diff = std::abs(brg - static_cast<double>(ctx.heading_true));
+    if (diff > 180.0) diff = 360.0 - diff;
+    if (diff > 90.0) { s_route_fix_idx++; continue; }
+    break;
+  }
+}
+
 static void init_route_fixes(const xplane_context::XPlaneContext &ctx) {
   s_route_fixes.clear();
   s_route_fix_idx = 0;
@@ -5403,6 +6070,7 @@ static void init_route_fixes(const xplane_context::XPlaneContext &ctx) {
         existing->alt = wp.alt;
         existing->is_ceiling = wp.is_ceiling;
         existing->is_floor = wp.is_floor;
+        existing->floor_ft = wp.floor_ft;
         existing->speed_kt = wp.speed_kt;
         existing->is_approach_proc = wp.is_approach_proc;
         existing->is_map = wp.is_map;
@@ -5418,6 +6086,7 @@ static void init_route_fixes(const xplane_context::XPlaneContext &ctx) {
       rf.alt = wp.alt;
       rf.is_ceiling = wp.is_ceiling;
       rf.is_floor = wp.is_floor;
+      rf.floor_ft = wp.floor_ft;
       rf.speed_kt = wp.speed_kt;
       rf.is_approach_proc = wp.is_approach_proc;
       rf.is_map = wp.is_map;
@@ -5519,7 +6188,32 @@ std::string poll_route_tracker(const xplane_context::XPlaneContext &ctx) {
   const float dist = static_cast<float>(traffic_geometry::distance_nm(
       ctx.latitude, ctx.longitude, fix.lat, fix.lon));
 
-  if (dist > 1.5f) return {};
+  if (dist > 1.5f) {
+    // The fix is within a few NM but never entered the 1.5 NM capture zone and is
+    // now clearly BEHIND the aircraft (bearing >100 deg off the nose) -- it was
+    // overflown wide. Advance so the tracker (and check_course) move on instead
+    // of forever flagging "off course" to a fix behind us (LFMN ABDI8R 2026-07-13:
+    // deviated wide of ABDIL, tracker stuck, repeated "confirm direct ABDIL").
+    //
+    // UPPER DISTANCE CAP (kNearBypass) is essential: a fix that is FAR ahead on a
+    // CURVED path (e.g. the FAF at 10 NM before the final turn) has a wide
+    // bearing-off-nose yet is NOT bypassed -- the aircraft simply hasn't turned
+    // toward it. Without the cap, heading-vs-bearing wrongly "bypassed" FP04Z at
+    // 10.1 NM (brg 98 vs hdg 221) and fired the Tower handoff 10 NM early
+    // (LIMF->LFLP 2026-07-14). You can't overfly a fix 10 NM away.
+    constexpr float kNearBypass = 4.0f;
+    const double brg = traffic_geometry::bearing_deg(ctx.latitude, ctx.longitude,
+                                                     fix.lat, fix.lon);
+    double behind = std::fabs(brg - static_cast<double>(ctx.heading_true));
+    if (behind > 180.0) behind = 360.0 - behind;
+    if (behind > 100.0 && dist < kNearBypass) {
+      logging::info("[route] bypassed %s (%.1f NM, brg %.0f behind hdg %.0f) -- advancing",
+                    fix.ident.c_str(), dist, brg,
+                    static_cast<double>(ctx.heading_true));
+      s_route_fix_idx++;
+    }
+    return {};
+  }
 
   // Entered 1.5 NM zone around this fix — log and advance.
   const int next_idx = s_route_fix_idx + 1;
@@ -5565,6 +6259,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
     s_expedite_last_cleared_ft = 0;
     s_pending_route_direct.clear();
     s_approach_sector_freq_khz  = 0;
+    s_approach_sector_ceiling_ft = 0;
     s_approach_sector_check_sec = 0.0f;
     s_approach_visited_sector_freqs.clear();
     return false;
@@ -5706,8 +6401,8 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
   // Timer only counts while in APPROACH_DESCENT (or no-STAR APPROACH_CONTACT)
   // so 60-s guards are relative to actual entry, not the waiting period.
   // Use dest ICAO for the towered check — nearest airport may be a phantom.
-  const bool dest_is_afis = !xplane_context::has_ground_freq_for(
-      s_assigned_dest_icao.empty() ? ctx.nearest_airport_id : s_assigned_dest_icao);
+  const bool dest_is_afis =
+      !xplane_context::has_ground_freq_for(current_flight_airport(ctx));
   if (state == AS::IFR_APPROACH_CONTACT &&
       !(s_assigned_star_name.empty() && s_approach_final_issued && dest_is_afis))
     return false;
@@ -5733,17 +6428,83 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           ctx.enclosing_airspaces, s_approach_visited_sector_freqs,
           dpos.first, dpos.second);
 
+      // openair-driven forward handoff. atc.dat (ctx.enclosing_airspaces) is
+      // X-Plane's coarse ATC model and can model a field's controller as a small
+      // TWR zone (Navigraph atc.dat: CHAMBERY = twr / 118.30 / <=3500 ft), so
+      // pick_next_approach never sees the inner terminal TMA. Resolve the INNER
+      // (lowest) enclosing TMA from openair -- the Navigraph airspace.txt, which
+      // is authoritative for TMAs -- and hand FORWARD to its controller. This is
+      // the Geneva->Chambery case (LIMF->LFLP 2026-07-14): at LUVOB the aircraft
+      // leaves GENEVA TMA and enters CHAMBERY TMA (1000-9500). Freq via the same
+      // fragment->controller path as the initial handoff, trying TRACON then TWR
+      // (Chambery has no TRACON in the data -> resolves to Chambery TWR 118.30).
+      bool force_forward = false;
+      bool stay = false;      // openair says: still in current sector -> no handoff
+      int  new_ceiling = 0;   // openair ceiling of the sector we hand off to
+      if (openair_db::ready()) {
+        const openair_db::AirspaceEntry inner = openair_db::find_enclosing(
+            ctx.latitude, ctx.longitude, static_cast<int>(ctx.altitude_ft_msl));
+        if (inner.ac_class == openair_db::AirspaceClass::TMA &&
+            inner.ceiling_ft > 0) {
+          std::string frag = inner.name;
+          for (const char *kw : {"TMA", "CTA", " SECTOR", " SEC"}) {
+            auto p = frag.find(kw);
+            if (p != std::string::npos) { frag = frag.substr(0, p); break; }
+          }
+          while (!frag.empty() && frag.back() == ' ') frag.pop_back();
+          const airspace_db::Controller *oc = nullptr;
+          if (!frag.empty()) {
+            oc = airspace_db::find_by_role_name_contains(
+                airspace_db::ControllerRole::TRACON, frag);
+            if (!oc)
+              oc = airspace_db::find_by_role_name_contains(
+                  airspace_db::ControllerRole::TWR, frag);
+          }
+          if (oc && !oc->freqs_khz.empty()) {
+            const uint32_t of = oc->freqs_khz.front();
+            if (of == s_approach_sector_freq_khz) {
+              stay = true; // still in the current sector's own TMA -> hold
+            } else {
+              bool visited = false;
+              for (uint32_t f : s_approach_visited_sector_freqs)
+                if (f == of) { visited = true; break; }
+              // FORWARD only: hand off to the inner TMA solely when it is MORE
+              // terminal (lower openair ceiling) than the current sector and not
+              // already visited. Otherwise HOLD -- never go to a larger/higher
+              // overlapping sector (Chambery->Lyon) or backward.
+              const bool more_terminal =
+                  (s_approach_sector_ceiling_ft == 0 ||
+                   inner.ceiling_ft < s_approach_sector_ceiling_ft);
+              if (!visited && more_terminal) {
+                best = oc;
+                force_forward = true;
+                new_ceiling = inner.ceiling_ft;
+              } else {
+                stay = true;
+              }
+            }
+          } else if (s_approach_sector_freq_khz != 0) {
+            // Over a TMA whose controller can't be resolved -> keep current;
+            // do NOT fall through to the atc.dat picker or the Tower fallback.
+            stay = true;
+          }
+        }
+      }
+      if (stay)
+        best = nullptr; // suppress this cycle's handoff entirely
+
       if (best) {
         uint32_t new_freq_khz = best->freqs_khz.front();
         if (s_approach_sector_freq_khz == 0) {
           // Seed silently: pilot already on this sector's frequency.
           s_approach_sector_freq_khz = new_freq_khz;
+          s_approach_sector_ceiling_ft = new_ceiling; // openair ceiling (0 if atc.dat pick)
           logging::info("[approach] sector baseline: %s %.3f MHz floor=%dft",
                         best->name.c_str(),
                         static_cast<float>(new_freq_khz) / 1000.0f,
                         best->floor_ft);
         } else if (new_freq_khz != s_approach_sector_freq_khz &&
-                   [&] {
+                   (force_forward || [&] {
                      // "Lowest enclosing volume in charge": do NOT hand off
                      // while the CURRENT controller's volume still encloses the
                      // aircraft, UNLESS the candidate is MORE TERMINAL (a
@@ -5771,12 +6532,13 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
                        return false;
                      }
                      return true;
-                   }()) {
+                   }())) {
           // Record the OUTGOING freq so this sector cannot be re-elected
           // later in the same approach phase (block backward handoff).
           s_approach_visited_sector_freqs.push_back(s_approach_sector_freq_khz);
           // Sector changed to another controller (e.g. Melun → Paris FIR Info).
           s_approach_sector_freq_khz = new_freq_khz;
+          s_approach_sector_ceiling_ft = new_ceiling; // track for the next more-terminal test
           std::string new_label = controller_label_for(best);
           float new_mhz = static_cast<float>(new_freq_khz) / 1000.0f;
           // Defer label switch — see s_pending_controller_label comment.
@@ -5811,7 +6573,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           rb(true);
           return true;
         }
-      } else if (s_approach_sector_freq_khz != 0 && out_text) {
+      } else if (!stay && s_approach_sector_freq_khz != 0 && out_text) {
         // No TRACON/CTR remaining: aircraft has left the approach sector
         // (e.g. left Melun TMA). Hand off to destination TOWER or INFO/AFIS.
         // FAF gate: a small TMA (e.g. Chambery) can be exited 10+ NM before the
@@ -5840,8 +6602,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           if (tower_mhz > 100.0f)
             is_info_svc = true;
         } else if (!xplane_context::has_ground_freq_for(
-                       s_assigned_dest_icao.empty() ? ctx.nearest_airport_id
-                                                    : s_assigned_dest_icao)) {
+                       current_flight_airport(ctx))) {
           is_info_svc = true;
         }
         s_approach_tower_handed_off = true;
@@ -5918,6 +6679,76 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
   const std::string cs =
       cs_ref2.empty() ? settings::pilot_callsign() : cs_ref2;
 
+  // Approach clearance timing: confirm the approach as the aircraft NEARS the
+  // IAF (~60 s out), not one fix later. The IAF is the last STAR fix = the route
+  // fix immediately before the first approach-transition fix; its own CIFP leg
+  // (IF/FM) is skipped, so keying the clearance on "reaching the first
+  // approach-proc fix" fired it one fix PAST the IAF (LFMN R22LZ: at MN261
+  // instead of approaching MUS). Time-based (eta), so it scales with GS. A
+  // descent is folded in only if the next fix would otherwise be busted.
+  if (!s_approach_cleared_issued && !dest_is_afis && out_text &&
+      !s_route_fixes.empty()) {
+    // Anchor the "cleared approach" at the SELECTED IAF -- the STAR-terminating
+    // IAF (star_last_fix) or the no-STAR direct IAF -- NOT the first approach-proc
+    // route fix. On an approach with several IAFs (LFLP R04-Z: COLLO/PIRUV/TOLNA)
+    // every IAF/transition fix is flagged is_approach_proc, so "first approach-
+    // proc" landed on COLLO instead of the chosen IAF PIRUV, firing the clearance
+    // (and shifting the whole FAF/Tower timing) far too early (LIMF->LFLP
+    // 2026-07-14). The STAR always terminates at its IAF, so star_last_fix is the
+    // authoritative entry for a STAR arrival.
+    std::string sel_iaf = s_no_star_direct_iaf;
+    if (sel_iaf.empty())
+      sel_iaf = cifp_reader::star_last_fix(ctx.cifp_dir, s_assigned_dest_icao,
+                                           s_assigned_star_name);
+    int iaf_idx = -1;
+    if (!sel_iaf.empty()) {
+      for (int i = std::max(0, s_route_fix_idx);
+           i < static_cast<int>(s_route_fixes.size()); ++i)
+        if (s_route_fixes[i].ident == sel_iaf) { iaf_idx = i; break; }
+    }
+    if (iaf_idx < 0) { // fallback: the fix before the first approach-proc waypoint
+      int first_ap = -1;
+      for (int i = std::max(0, s_route_fix_idx);
+           i < static_cast<int>(s_route_fixes.size()); ++i)
+        if (s_route_fixes[i].is_approach_proc) { first_ap = i; break; }
+      iaf_idx = (first_ap > 0) ? first_ap - 1 : first_ap;
+    }
+    if (iaf_idx >= 0 && iaf_idx < static_cast<int>(s_route_fixes.size())) {
+      const auto &iaf = s_route_fixes[iaf_idx];
+      if (iaf.lat != 0.0 || iaf.lon != 0.0) {
+        const double gs = ctx.groundspeed_kts > 40.0f
+                              ? static_cast<double>(ctx.groundspeed_kts)
+                              : 120.0;
+        const double eta = traffic_geometry::distance_nm(
+                               ctx.latitude, ctx.longitude, iaf.lat, iaf.lon) /
+                           gs * 3600.0;
+        if (eta <= 60.0) {
+          const std::string phrase = approach_clearance_phrase(ctx);
+          if (!phrase.empty()) {
+            s_approach_cleared_issued = true;
+            std::string msg = cs + ", cleared " + phrase;
+            const FixCompliance fc = check_next_fix(ctx, 60.0);
+            if (fc.valid && fc.near && fc.alt_bust) {
+              msg += ", descend " +
+                     format_alt_clearance(fc.alt_target_ft,
+                                          fc.alt_is_fl ? AltHint::FlightLevel
+                                                       : AltHint::Feet,
+                                          ctx.qnh_hpa, ctx.transition_alt_ft);
+              s_enroute_cleared_alt_ft = fc.alt_target_ft;
+            }
+            msg += ".";
+            *out_text = msg;
+            logging::info(
+                "[approach] cleared approach approaching IAF %s (eta %.0f s)",
+                iaf.ident.c_str(), eta);
+            rb(true);
+            return true;
+          }
+        }
+      }
+    }
+  }
+
   // Skip waypoints the aircraft is already in compliance with — no instruction
   // needed for a constraint the aircraft already meets.
   // Also skip unconstrained STAR routing waypoints (no altitude, no speed) —
@@ -5951,10 +6782,20 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       const float wp_ft = static_cast<float>(wp.alt.feet);
       // 200 ft tolerance for ceiling constraints: pressure altimeter error
       // and residual QNH offsets mean PA can be slightly above the cleared FL.
-      bool already_compliant =
-          (wp.is_ceiling  && ctx.pressure_alt_ft <= wp_ft + 200.0f) ||
-          (wp.is_floor    && ctx.pressure_alt_ft >= wp_ft) ||
-          (!wp.is_ceiling && !wp.is_floor && ctx.pressure_alt_ft <= wp_ft + 200.0f);
+      bool already_compliant;
+      if (wp.floor_ft > 0) {
+        // Block "B" (e.g. MN261 FL120/FL080): the operative lower limit is the
+        // FLOOR. Not compliant until at/below the floor — otherwise we skip the
+        // fix and clear the next (lower) fix BELOW the block floor
+        // (LFMN MN261 -> SOTOX FL070). Cleared to the floor in the issue loop.
+        already_compliant =
+            ctx.pressure_alt_ft <= static_cast<float>(wp.floor_ft) + 200.0f;
+      } else {
+        already_compliant =
+            (wp.is_ceiling  && ctx.pressure_alt_ft <= wp_ft + 200.0f) ||
+            (wp.is_floor    && ctx.pressure_alt_ft >= wp_ft) ||
+            (!wp.is_ceiling && !wp.is_floor && ctx.pressure_alt_ft <= wp_ft + 200.0f);
+      }
       if (already_compliant) {
         s_approach_waypoint_idx++;
         s_approach_timer = 0.0f;
@@ -6046,11 +6887,10 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         if (tower_mhz > 100.0f)
           is_info_svc = true;
       } else if (!xplane_context::has_ground_freq_for(
-                     s_assigned_dest_icao.empty() ? ctx.nearest_airport_id
-                                                  : s_assigned_dest_icao)) {
+                     current_flight_airport(ctx))) {
         // No Ground freq for the destination → AFIS/Information service, not a
-        // real Tower controller. Use destination ICAO (not ctx.nearest_airport_id)
-        // so a phantom airport near the destination doesn't corrupt the check.
+        // real Tower controller. current_flight_airport() returns the bound
+        // destination here so a phantom airport near it can't corrupt the check.
         is_info_svc = true;
       }
       if (out_text) {
@@ -6138,6 +6978,10 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
     // For floor constraints (at-or-above), descend to the floor value
     // so the crew meets the constraint.
     int cleared_ft = wp.alt.feet;
+    // Block "B": clear to the FLOOR (lower bound), not the ceiling in wp.alt —
+    // descend to the bottom of the block, never below it before the fix.
+    if (wp.floor_ft > 0)
+      cleared_ft = wp.floor_ft;
     if (cleared_ft == 0 && wp.speed_kt > 0)
       cleared_ft = static_cast<int>(ctx.pressure_alt_ft / 100) * 100; // maintain current
 
@@ -6166,9 +7010,31 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         // (is_fl=false) as "flight level 65" instead of "6500 feet"
         // (LIMF -> LFLP 2026-07-11).
         const bool twp_has_alt = (twp.alt.feet > 0);
-        const int tft = twp_has_alt ? twp.alt.feet : cleared_ft;
         const int ta_c = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
-        const bool tfl = twp_has_alt ? twp.alt.is_fl : (tft > ta_c);
+        int  tft = twp_has_alt ? twp.alt.feet : cleared_ft;
+        bool tfl = twp_has_alt ? twp.alt.is_fl : (tft > ta_c);
+        // Block "B" on an approach fix (e.g. LFMN R22LZ MN261 FL120/FL080):
+        // clear to the FLOOR. The floor is a plain feet value, so decide FL vs
+        // feet by the transition level rather than the ceiling's is_fl flag.
+        if (twp.floor_ft > 0) {
+          tft = twp.floor_ft;
+          tfl = (tft >= compute_tl_ft(ta_c, ctx.qnh_hpa));
+        }
+        // Positional block gate: never clear below the nearest UNPASSED block
+        // floor -- even when the walker skipped the block fix on altitude
+        // (LFMN R22LZ: at MUS/FL080 the walker grabbed SOTOX's FL070, below
+        // MN261's FL080 block floor). Releases once the block fix is passed.
+        const int block_floor_ap = active_block_floor_ft();
+        if (block_floor_ap > 0 && tft < block_floor_ap) {
+          tft = block_floor_ap;
+          tfl = (tft >= compute_tl_ft(ta_c, ctx.qnh_hpa));
+        }
+        // A descent is "needed" only when the clamped target is actually below
+        // the altitude already cleared. At MUS, already at the FL080 block
+        // floor, the clamp lifts SOTOX's FL070 back to FL080 -> no descent
+        // (user 2026-07-12: "at MUS no descent order can be issued").
+        const int cur_cl_ap = engine::current_cleared_alt_ft();
+        const bool descent_needed_ap = (cur_cl_ap <= 0) || (tft < cur_cl_ap - 100);
         // Post-clearance implicit profile: once the approach has been CLEARED
         // at a controlled field (the clearance carries the first approach-fix
         // altitude, e.g. "cleared RNAV Zulu approach runway 04, descend 6500
@@ -6215,12 +7081,28 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
                           appr_phrase.c_str());
           }
         }
-        *out_text = build_approach_final_alt(lead, /*fix_ident=*/"", tft,
-                                             ctx.qnh_hpa,
-                                             ctx.transition_alt_ft, tfl);
-        // Keep engine::current_cleared_alt_ft() (used by STT context_bias)
-        // in sync with the freshly-issued descent step-down.
-        s_enroute_cleared_alt_ft = tft;
+        if (descent_needed_ap) {
+          *out_text = build_approach_final_alt(lead, /*fix_ident=*/"", tft,
+                                               ctx.qnh_hpa,
+                                               ctx.transition_alt_ft, tfl);
+          // Keep engine::current_cleared_alt_ft() (used by STT context_bias)
+          // in sync with the freshly-issued descent step-down.
+          s_enroute_cleared_alt_ft = tft;
+        } else if (lead != cs) {
+          // Approach clearance to voice, but the block floor means no descent
+          // (already at/above it) -- "cleared RNAV Zulu approach runway 22L."
+          *out_text = lead + ".";
+        } else {
+          // Nothing to say (no clearance phrase, no descent) -> advance silently.
+          if (!twp.ident.empty())
+            for (int ri = s_route_fix_idx;
+                 ri < static_cast<int>(s_route_fixes.size()); ++ri)
+              if (s_route_fixes[ri].ident == twp.ident) { s_route_fix_idx = ri; break; }
+          s_last_cleared_route_idx = s_route_fix_idx;
+          s_approach_waypoint_idx  = target_idx + 1;
+          s_approach_timer         = 0.0f;
+          return false;
+        }
         // Advance the route tracker SILENTLY -- no "direct" is spoken, the pilot
         // follows the procedure implicitly (no s_pending_route_direct event).
         if (!twp.ident.empty()) {
@@ -6247,6 +7129,11 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         // (constraint already satisfied — e.g. the STAR-lookahead initial
         // descent in build_descent_clearance already cleared to this fix's
         // FL). See [[project_star_walker_80_20]].
+        // Positional block gate: never clear below the nearest unpassed block
+        // floor (same rule as the approach branch).
+        const int block_floor_star = active_block_floor_ft();
+        if (block_floor_star > 0 && cleared_ft < block_floor_star)
+          cleared_ft = block_floor_star;
         const int cur_cleared = engine::current_cleared_alt_ft();
         if (cur_cleared > 0 && cleared_ft >= cur_cleared) {
           s_approach_waypoint_idx++;
@@ -6364,6 +7251,34 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       s_enroute_cleared_alt_ft = final_alt_ft;
       rb(true);
       return true;
+    }
+  }
+
+  // DirectMonitor (approach course): lowest-priority "confirm direct <fix>" when
+  // off the leg to the ACTIVE next fix. Skipped post-FAF (IFR_APPROACH_TOWER /
+  // LANDING_CLEARED) where poll_approach_alignment owns lateral (centerline).
+  // WIRED with placeholder gates (25 deg / 2 NM guard / 90 s cooldown) -- tune later.
+  if (state != AS::IFR_APPROACH_TOWER && state != AS::IFR_LANDING_CLEARED) {
+    s_approach_course_cooldown = std::max(0.0f, s_approach_course_cooldown - dt);
+    if (s_approach_course_cooldown <= 0.0f) {
+      const CourseCheck cc = check_course(ctx, 25.0);
+      if (cc.valid && cc.off_course && cc.dist_nm > 2.0) {
+        s_approach_course_cooldown = 90.0f;
+        if (out_text) {
+          char buf[176];
+          std::snprintf(buf, sizeof(buf),
+                        "%s, confirm direct %s, you appear tracking heading %.0f, "
+                        "expected %.0f.",
+                        cs.c_str(), cc.ident.c_str(),
+                        static_cast<double>(ctx.heading_true), cc.bearing_deg);
+          *out_text = buf;
+        }
+        logging::info("[approach] course deviation hdg %.0f vs brg %.0f to %s (diff %.0f)",
+                      static_cast<double>(ctx.heading_true), cc.bearing_deg,
+                      cc.ident.c_str(), cc.diff_deg);
+        rb(false);
+        return true;
+      }
     }
   }
 

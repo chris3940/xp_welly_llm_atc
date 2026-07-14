@@ -191,6 +191,12 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
 
 // IFR descent phase (IFR_DESCENT state): advances to IFR_ARRIVAL when the
 // aircraft reaches the STAR entry fix. Runs after build_descent_clearance fires.
+// Altitude-compliance courtesy prompt for IFR_DESCENT + IFR_ARRIVAL (the gap
+// where the en-route verify and approach verify-descending don't run). Advisory
+// only (no readback). See engine.cpp for the firing gates.
+bool poll_altitude_compliance(const xplane_context::XPlaneContext &ctx, float dt,
+                              std::string *out_text);
+
 bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
                   std::string *out_text,
                   bool *out_requires_readback = nullptr);
@@ -236,6 +242,14 @@ const std::string &pending_departure_label();
 // ATC-assigned STAR name (set by build_descent_clearance, empty before then).
 // Exposed so atc_session can include it in the STT pre-context on each PTT.
 const std::string &assigned_star_name();
+
+// Idents of the UPCOMING route fixes (from the current tracker position to the
+// end of the route table). This includes the CIFP STAR + approach procedure
+// waypoints (e.g. GIROL, AMFOU, TIPIK, MUS on LFMN ABDI8R) that are NOT in the
+// filed SimBrief navlog -- so atc_session can add them to the STT context_bias.
+// Without this, a "direct <STAR fix>" readback garbles (AMFOU -> "I'm full",
+// LFMN 2026-07-13). Empty until a route table is built. Ordered nearest-first.
+std::vector<std::string> upcoming_route_fix_idents();
 
 // Most recent ATC-assigned altitude in feet MSL, or 0 when none is active.
 // Precedence: approach initial FL (once Approach has issued a target) >
