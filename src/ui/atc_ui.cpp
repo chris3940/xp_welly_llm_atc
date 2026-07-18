@@ -2339,6 +2339,18 @@ static void draw_enroute_tab(const xplane_context::XPlaneContext &ctx) {
     for (size_t ci = 0; ci < ctx.enclosing_airspaces.size(); ++ci) {
       const auto *c = ctx.enclosing_airspaces[ci];
 
+      // Mark the controller the pilot is ACTUALLY on (any of its freqs matches the
+      // active COM) vs the merely-enclosing ones. The tab lists EVERY overlapping
+      // atc.dat volume, so it shows the next controller well before the handoff
+      // fires -- this tag tells the user which one is current (user 2026-07-17).
+      bool is_current_ctrl = false;
+      for (uint32_t f : c->freqs_khz) {
+        uint32_t d = (active_khz > f) ? active_khz - f : f - active_khz;
+        if (d <= 1) { is_current_ctrl = true; break; }
+      }
+      if (is_current_ctrl)
+        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), ">> ON FREQUENCY");
+
       // Controller header line
       const char *role_label = airspace_db::role_name(c->role);
       ImGui::Text(ui_strings::tr("enroute.controller_format"), role_label,

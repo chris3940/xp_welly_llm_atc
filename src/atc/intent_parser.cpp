@@ -284,6 +284,12 @@ static const std::vector<std::pair<std::string, std::string>> kPhraseAliases = {
     // Voxtral mishears "flight level" as "flat level" in descent readbacks
     // ("flat level 65" -> "flight level 65"; LIMF -> LFLP 2026-07-11).
     {"flat level", "flight level"},
+    // "plate level" is another "flight level" mishearing seen in the FL140 descent
+    // readback -- broke FL extraction -> false "negative, FL140" (LFLP 2026-07-17).
+    {"plate level", "flight level"},
+    // "flight table" -- yet another "flight level" mishearing, FL90 descent readback
+    // ("Descend flight table 90" -> false "negative, FL90"; LFLP 2026-07-17).
+    {"flight table", "flight level"},
     // Voxtral mishears "two" as "to" in frequencies — anchor with "decimal"
     // so "one to one decimal" = 121.xxx is fixed without corrupting callsigns
     // like "November One One One" which would match "one to one" without anchor.

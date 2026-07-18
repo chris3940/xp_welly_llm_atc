@@ -1052,10 +1052,13 @@ static void submit_recording_to_stt() {
       // in readbacks (LIMF -> LFLP 2026-07-11 "flat level 65"). Both the phrase
       // and the standalone word anchor it.
       " flight level flight"
-      // Speed restriction phrase: Voxtral mishears the value ("250" -> "150").
-      // Bias the whole phrase + the current 250 kt limit. (When per-waypoint
-      // SID/STAR speed limits land in 4.4.0, add the active limit dynamically.)
-      " reduce speed 250 knots or less";
+      // Speed-restriction phrase WITHOUT a hardcoded value: a literal number here
+      // (was "250") competes with the ACTIVE limit added dynamically below and
+      // pulls Voxtral toward the wrong digits -- "reduce speed 210" was read back
+      // as "200 10" while the prompt still shouted "250" (LFLP 2026-07-18). Keep
+      // only the phraseology words; the real number is anchored at the dynamic
+      // speed bias further down.
+      " reduce speed knots or less";
   // Approach + runway bigram: after Approach clears the aircraft, the pilot
   // will say "R-NAV 25" or "RNAV 25" (or ILS/RNP/etc + rwy). Voxtral often
   // mishears "RNAV 25" as "RNAV to 5" — the "2" becomes "to". Biasing the
@@ -1093,6 +1096,18 @@ static void submit_recording_to_stt() {
       // Feet notation — the digit form is what Voxtral must emit correctly.
       airport_ctx += " " + std::to_string(cleared_alt_ft) + " feet";
     }
+  }
+
+  // Speed-restriction context bias (analog of the altitude bias above): speak the
+  // ACTIVE speed limit so Voxtral anchors the digits in the pilot's readback --
+  // "reduce speed 210 knots" was misheard as "110 knots", failing readback
+  // verification and looping (LFLP 2026-07-17). Only when a restriction is in force.
+  const int cur_spd_kt = engine::current_speed_restriction_kt();
+  if (cur_spd_kt > 0) {
+    const std::string kt = std::to_string(cur_spd_kt);
+    // Anchor the value inside the full phrase AND standalone, so both the whole
+    // read-back ("reduce speed 210 knots or less") and a terse "210 knots" match.
+    airport_ctx += " reduce speed " + kt + " knots or less " + kt + " knots";
   }
 
   if (g_transcript_log_) {
@@ -1394,10 +1409,15 @@ void update() {
       return; // one tower utterance per frame
     }
 
-    // ICAO speed restriction: 250 kt or less below FL100.
-    std::string speed_text;
-    if (engine::poll_speed_restriction(ctx_now, &speed_text) &&
-        !speed_text.empty()) {
+    // Unified in-front-profile enforcement: altitude crossing + ICAO/procedure
+    // speed + cleared-level compliance, run in EVERY airborne IFR phase (replaces
+    // the old per-phase poll_speed_restriction / poll_altitude_compliance / CIFP
+    // crossing patchwork). Altitude + speed clearances arm a readback; the
+    // cleared-level courtesy nag does not (out_rb stays false).
+    std::string profile_text;
+    bool profile_rb = false;
+    if (engine::poll_profile_enforcement(ctx_now, dt, &profile_text, &profile_rb) &&
+        !profile_text.empty()) {
       float active_freq = (ctx_now.active_com == 1) ? ctx_now.com1_freq_mhz
                                                     : ctx_now.com2_freq_mhz;
       char freq_str[16];
@@ -1405,15 +1425,13 @@ void update() {
       push_transcript(TranscriptEntry{
           static_cast<double>(XPLMGetElapsedTime()),
           TranscriptKind::Tower,
-          speed_text,
+          profile_text,
           freq_str,
           engine::current_controller_label(),
       });
-      speak_response(speed_text, role_for_frequency(ctx_now), 1.0f);
-      // Speed restriction is a mandatory readback item; arm it so the
-      // readback verifier checks the value (Voxtral 250->150 was silently
-      // accepted when speed was unverified).
-      atc_state_machine::arm_readback(speed_text);
+      speak_response(profile_text, role_for_frequency(ctx_now), 1.0f);
+      if (profile_rb)
+        atc_state_machine::arm_readback(profile_text);
       return;
     }
 
@@ -1490,27 +1508,8 @@ void update() {
       return;
     }
 
-    // IFR altitude-compliance courtesy prompt (DESCENT + ARRIVAL gap): "confirm
-    // descending/climbing <level>" if the pilot hasn't started toward the
-    // assigned level. Advisory only (no readback).
-    std::string alt_comp_text;
-    if (engine::poll_altitude_compliance(ctx_now, dt, &alt_comp_text) &&
-        !alt_comp_text.empty()) {
-      float active_freq = (ctx_now.active_com == 1) ? ctx_now.com1_freq_mhz
-                                                    : ctx_now.com2_freq_mhz;
-      char freq_str[16];
-      std::snprintf(freq_str, sizeof(freq_str), "%.3f", active_freq);
-      push_transcript(TranscriptEntry{
-          static_cast<double>(XPLMGetElapsedTime()),
-          TranscriptKind::Tower,
-          alt_comp_text,
-          freq_str,
-          engine::current_controller_label(),
-      });
-      auto role = role_for_frequency(ctx_now);
-      speak_response(alt_comp_text, role, 1.0f);
-      return;
-    }
+    // (altitude-compliance courtesy prompt now folded into
+    // poll_profile_enforcement above, so it runs in the approach too.)
 
     // IFR approach STAR constraint management: step-down clearances + final alt.
     std::string approach_text;

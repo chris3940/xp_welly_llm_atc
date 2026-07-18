@@ -699,7 +699,15 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
         // intermediate handoff (Phase 2.8 Milan 118.675 -> back to Torino
         // 121.100), then the pilot's check-in on the new freq gets rejected
         // by the wrong-freq guard. LIMF->LFLP 2026-07-07 in-sim regression.
-        if (apply_side_effects) {
+        // Cache ONLY while on the ground. build_vars() evaluates every template
+        // lambda eagerly, so airborne (e.g. building an arrival readback response)
+        // this fired and clobbered s_pending_handoff_freq_mhz with the NEAREST
+        // airport's apt.dat approach freq (LFLP 119.525) -- different from the ACC
+        // handoff's atc.dat freq (Geneva 119.530). That poisoned the check-in gate
+        // (spurious "still with Marseille 119.525") and left the sector-checkin flag
+        // mis-set so a later course readback tripped a bare "radar contact"
+        // (LFLP 2026-07-16). Departure-freq caching is only meaningful pre-takeoff.
+        if (apply_side_effects && ctx.on_ground) {
           const float existing = engine::pending_handoff_freq();
           const bool safe_to_cache =
               existing < 100.0f ||                     // uninitialised
@@ -882,6 +890,17 @@ bool handle_frequency_hint(const PilotMessage &msg, const XPlaneContext &ctx,
 void apply_state_frequency_validity(const XPlaneContext &ctx) {
   using FT = xplane_context::FrequencyType;
   ATCState cur = internal::get_state_ref();
+  // IFR states manage their own frequency handling (ACC/TMA sector handoffs and
+  // the approach check-in) via the IFR poll loops. The VFR frequency-validity
+  // rules do NOT apply to them and must never reset an IFR flight to IDLE -- a
+  // long-lived IFR_ARRIVAL parked on an APPROACH frequency was tripping this and
+  // dropping the whole flight into the VFR flow (LFLP 2026-07-14). state_name()
+  // prefixes every IFR state with "IFR/".
+  {
+    const char *nm = state_name(cur);
+    if (nm && nm[0] == 'I' && nm[1] == 'F' && nm[2] == 'R')
+      return;
+  }
   bool needs_freq_validation =
       ctx.frequency_type != FT::UNKNOWN &&
       !(ctx.tower_only && ctx.frequency_type == FT::TOWER) &&

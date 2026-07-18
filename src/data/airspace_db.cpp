@@ -452,4 +452,20 @@ const Controller *find_by_role_name_contains(ControllerRole role,
   return nullptr;
 }
 
+// Find a controller of a given role at a specific FACILITY (ICAO), regardless of
+// its display name. Needed because a facility's approach/TRACON can be labelled
+// with a different name than its TMA/tower (CHAMBERY = facility LFLB, but its
+// TRACON is labelled "LYON" -- 121.205/123.70). Returns the first with freqs.
+const Controller *find_by_role_facility(ControllerRole role,
+                                        const std::string &facility_id) {
+  if (!enabled_.load() || facility_id.empty())
+    return nullptr;
+  for (auto &up : controllers_) {
+    Controller *c = up.get();
+    if (c->role == role && c->facility_id == facility_id && !c->freqs_khz.empty())
+      return c;
+  }
+  return nullptr;
+}
+
 } // namespace airspace_db

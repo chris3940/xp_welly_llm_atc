@@ -154,6 +154,12 @@ static bool s_cruise_stepup_issued = false;
 static bool s_enroute_descent_prompt_issued = false;
 // Set when the Approach frequency handoff ("contact Approach on X.XXX") is issued.
 static bool s_enroute_approach_handoff_issued = false;
+// Controller label of the last ARRIVAL-phase frequency handoff (Stage A of the
+// arrival handoff -- "contact Geneva Approach" while still flying the STAR). Used
+// to dedup so the same controller is not re-announced every second, and so the
+// later APPROACH-phase handoff (Stage B, near the IAF) stays SILENT when it
+// resolves to the same controller already tuned. Empty = none yet.
+static std::string s_arrival_freq_handoff_label;
 // EUROCONTROL / DGAC phraseology: QNH is stated with every altitude instruction
 // below the transition level — but only ONCE per pilot–sector interaction.
 // If a navlog step-down clearance already transmitted "descend X feet, QNH XXXX",
@@ -418,7 +424,7 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_enroute_timer = 0.0f;
   s_enroute_sector_freq_khz = 0;
   s_enroute_visited_sector_freqs.clear();
-  s_enroute_sector_check_sec = 30.0f;
+  s_enroute_sector_check_sec = 15.0f;
   s_acc_sector_freq_khz = 0;
   s_acc_visited_sector_freqs.clear();
   s_acc_sector_check_sec = 0.0f;
@@ -747,6 +753,22 @@ static bool has_recognisable_elements(const intent_parser::PilotMessage &msg) {
 static std::string
 build_unclear_response(const intent_parser::PilotMessage &msg,
                        const std::string &fallback_cs) {
+  // Benign acknowledgment -- a "direct <fix>" reply to a "confirm direct" query,
+  // or a plain wilco/affirm/roger -- is NOT an unclear transmission. Answering it
+  // with "say again, use standard phraseology" produced a loop even for a correct
+  // "Direct SALEV" (LFLP 2026-07-17: the reply fell to the LM -> _INVALID). Treat
+  // these as acknowledged: a simple "roger", and do not bump the unclear streak.
+  {
+    std::string t = msg.raw_transcript;
+    for (char &c : t)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char *k : {"direct", "wilco", "affirm", "roger"})
+      if (t.find(k) != std::string::npos) {
+        const std::string &scs = atc_state_machine::session_callsign();
+        const std::string cs2 = !scs.empty() ? scs : fallback_cs;
+        return cs2.empty() ? std::string("Roger.") : (cs2 + ", roger.");
+      }
+  }
   ++unclear_streak_;
   // Prefer the session-locked callsign so a mistranscribed utterance
   // ("Delta ...") cannot hijack the tower's salutation mid-session.
@@ -1004,11 +1026,17 @@ void process_transcript(Input in, Done done) {
         const std::string &target_label =
             s_pending_controller_label.empty() ? "the next controller"
                                                : s_pending_controller_label;
+        // "you are still with <current>, contact <target> on <freq>" -- a natural
+        // "you haven't switched yet" nudge, not a "negative" that wrongly implies
+        // the readback was incorrect (the readback content is usually fine; the
+        // pilot simply hasn't changed frequency).
+        const std::string &cur_label =
+            s_current_controller_label.empty() ? "me" : s_current_controller_label;
         Output r;
         char buf[192];
         std::snprintf(buf, sizeof(buf),
-                      "%s, negative, contact %s on %.3f.",
-                      cs.c_str(), target_label.c_str(),
+                      "%s, you are still with %s, contact %s on %.3f.",
+                      cs.c_str(), cur_label.c_str(), target_label.c_str(),
                       s_pending_handoff_freq_mhz);
         r.response_text = buf;
         r.is_warning    = true;
@@ -1043,7 +1071,26 @@ void process_transcript(Input in, Done done) {
   // land"). For those states, only clear the flag here and let the specific
   // handler emit the response.
   bool sector_checkin_just_fired = false;
-  if (s_sector_checkin_pending && s_pending_handoff_freq_mhz > 0.0f) {
+  // A course-correction READBACK ("confirm direct SALEV", "direct PIRUV") on the
+  // current frequency must NOT be mistaken for a sector check-in -- the bare "radar
+  // contact" ack is wrong for a readback (LFLP 2026-07-16). Skip the check-in
+  // treatment for readback-like transmissions; normal processing handles them.
+  const bool readback_like = [&] {
+    std::string t = in.transcript;
+    for (char &c : t)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // Readback / acknowledgement markers -- never a fresh sector check-in. Covers
+    // course ("confirm direct"), speed ("reduce speed / knots"), and plain acks
+    // (wilco/roger). A readback echoing one of these must not get a bare "radar
+    // contact" (LFLP 2026-07-17).
+    for (const char *k : {"direct", "confirm", "knots", "reduce speed", "wilco",
+                          "roger"})
+      if (t.find(k) != std::string::npos)
+        return true;
+    return false;
+  }();
+  if (s_sector_checkin_pending && s_pending_handoff_freq_mhz > 0.0f &&
+      !readback_like) {
     const float active = ctx.active_com == 2 ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
     if (std::fabs(active - s_pending_handoff_freq_mhz) < 0.005f) {
       s_sector_checkin_pending = false;
@@ -1060,37 +1107,67 @@ void process_transcript(Input in, Done done) {
                     active);
       using AS = atc_state_machine::ATCState;
       const auto ck_state = atc_state_machine::get_state();
-      // Frequency-based defer: if the pilot's new frequency matches the
-      // Approach controller (s_enroute_approach_freq_mhz was set by the
-      // Approach handoff), this IS the Approach check-in — real ATC would
-      // give the full clearance ("radar contact, identified, direct IAF,
-      // RNAV approach RWY X, descend Y feet, QNH Z"), not just a bare
-      // radar-contact ack. Same for Tower check-ins.
-      const bool is_approach_freq =
-          s_enroute_approach_freq_mhz > 100.0f &&
-          std::fabs(active - s_enroute_approach_freq_mhz) < 0.010f;
-      // Only defer to the richer INITIAL_CALL_APPROACH handler (engine.cpp
-      // ~line 904) when it will actually fire. That handler gates on
-      // ck_state == IFR_APPROACH_CONTACT || IFR_DESCENT. Without this
-      // qualifier, a sector-change to an approach freq while state is still
-      // IFR_ENROUTE_CRUISE (state hasn't advanced) fell through to a
-      // no-op: sector-checkin ack deferred + richer handler blocked =
-      // silent drop. LIMF -> LFLP 2026-07-08 log line 4843 / 5482 (Geneva
-      // Approach 119.530 check-in silently dropped in ENROUTE_CRUISE).
+      // Defer to the richer approach/tower clearance handler ONLY once the
+      // approach phase has actually been entered: IFR_APPROACH_CONTACT (set by
+      // poll_arrival Stage B at/near the terminating IAF, PIRUV) or the Tower leg.
+      // An intermediate-TMA check-in -- IFR_ARRIVAL / IFR_DESCENT on the approach
+      // freq, e.g. Geneva far out on the STAR -- must NOT get the approach
+      // clearance (Geneva has no authority to clear the approach from there;
+      // several TMAs are crossed on a STAR and none of them is the approach). It
+      // gets the bare "radar contact" sector ack below and stays in ARRIVAL; the
+      // terminal controller (Chambery) issues the clearance near the IAF.
       const bool defer_to_richer_handler =
           ck_state == AS::IFR_APPROACH_CONTACT ||
-          ck_state == AS::IFR_APPROACH_TOWER   ||
-          (is_approach_freq &&
-           (ck_state == AS::IFR_APPROACH_CONTACT ||
-            ck_state == AS::IFR_DESCENT ||
-            ck_state == AS::IFR_ARRIVAL));
+          ck_state == AS::IFR_APPROACH_TOWER;
       if (!defer_to_richer_handler) {
         const std::string &cs_ref_ck = atc_state_machine::session_callsign();
         const std::string &cs_ck =
             cs_ref_ck.empty() ? in.pilot_callsign : cs_ref_ck;
-        char ack_buf[128];
-        std::snprintf(ack_buf, sizeof(ack_buf),
-                      "%s, radar contact.", cs_ck.c_str());
+        // Verify the pilot's stated level against the ASSIGNED cleared level and
+        // re-state it on the handoff check-in if they differ -- the assigned FL/alt
+        // carries across controllers, so a check-in with the wrong level
+        // ("descending FL100" when cleared FL090) must be corrected, not silently
+        // "radar contact"-ed (LFLP 2026-07-17). Re-stating the assigned level is
+        // never wrong (it IS the clearance), so this is safe even when the pilot was
+        // merely reporting their current altitude mid-descent.
+        std::string restate;
+        const int assigned_ft = current_cleared_alt_ft();
+        if (assigned_ft > 0) {
+          int stated_ft = 0;
+          std::string t = in.transcript;
+          for (char &ch : t)
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+          std::smatch mm;
+          static const std::regex kFlRe(R"((?:flight level|fl)\s*(\d{2,3}))");
+          static const std::regex kFtRe(R"((\d{3,5})\s*fe?e?t)");
+          if (std::regex_search(t, mm, kFlRe))
+            stated_ft = std::stoi(mm[1].str()) * 100;
+          else if (std::regex_search(t, mm, kFtRe))
+            stated_ft = std::stoi(mm[1].str());
+          if (stated_ft > 0 && std::abs(stated_ft - assigned_ft) > 500) {
+            const int ta_ck =
+                ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+            // Inline FL-vs-feet (format_alt_clearance is defined later in the TU):
+            // FL above the transition altitude, feet below.
+            char lvlbuf[32];
+            if (assigned_ft >= ta_ck)
+              std::snprintf(lvlbuf, sizeof(lvlbuf), "flight level %d",
+                            assigned_ft / 100);
+            else
+              std::snprintf(lvlbuf, sizeof(lvlbuf), "%d feet", assigned_ft);
+            const std::string lvl = lvlbuf;
+            const int pa_i = static_cast<int>(ctx.pressure_alt_ft);
+            const char *verb = (assigned_ft < pa_i - 200)   ? "descend"
+                               : (assigned_ft > pa_i + 200) ? "climb"
+                                                            : "maintain";
+            restate = std::string(", ") + verb + " " + lvl;
+            logging::info("Sector checkin: stated %d ft vs assigned %d ft -> re-state",
+                          stated_ft, assigned_ft);
+          }
+        }
+        char ack_buf[192];
+        std::snprintf(ack_buf, sizeof(ack_buf), "%s, radar contact%s.",
+                      cs_ck.c_str(), restate.c_str());
         logging::info("Sector checkin ack: %s (state=%s)",
                       ack_buf, atc_state_machine::state_name(ck_state));
         Output out_ck;
@@ -1130,12 +1207,23 @@ void process_transcript(Input in, Done done) {
          ast == AS2::IFR_DESCENT        ||
          ast == AS2::IFR_ARRIVAL        ||
          ast == AS2::IFR_APPROACH_CONTACT)) {
-      if (parsed.intent == PI2::INITIAL_CALL         ||
+      const bool is_explicit_call =
+          parsed.intent == PI2::INITIAL_CALL         ||
           parsed.intent == PI2::INITIAL_CALL_INBOUND ||
           parsed.intent == PI2::INITIAL_CALL_TOWER   ||
           parsed.intent == PI2::INITIAL_CALL_CENTER  ||
-          parsed.intent == PI2::RADIO_CHECK          ||
-          parsed.intent == PI2::UNKNOWN) {
+          parsed.intent == PI2::RADIO_CHECK;
+      // A bare UNKNOWN on the approach freq is only a check-in when one is actually
+      // EXPECTED (a handoff is pending, or we are in APPROACH_CONTACT). Otherwise
+      // it is almost always a garbled READBACK -- reclassifying it to
+      // INITIAL_CALL_APPROACH turned course/speed readbacks into a "radar contact"
+      // check-in ack (LFLP 2026-07-17). Never override while a readback is pending.
+      const bool checkin_expected =
+          s_sector_checkin_pending || ast == AS2::IFR_APPROACH_CONTACT;
+      const bool unknown_is_checkin =
+          parsed.intent == PI2::UNKNOWN && checkin_expected &&
+          !atc_state_machine::is_readback_pending();
+      if (is_explicit_call || unknown_is_checkin) {
         logging::info("Freq override: %s on %s -> INITIAL_CALL_APPROACH",
                       intent_parser::intent_name(parsed.intent),
                       xplane_context::frequency_type_name(ft));
@@ -1294,11 +1382,15 @@ void process_transcript(Input in, Done done) {
   // on the Approach freq while the plugin's state hasn't auto-advanced yet.
   // The frequency gate above already confirms the pilot IS on the Approach
   // freq, so firing the full clearance here is correct.
+  // Fire ONLY in IFR_APPROACH_CONTACT -- the state poll_arrival Stage B sets at/
+  // near the terminating IAF (PIRUV). IFR_DESCENT / IFR_ARRIVAL are deliberately
+  // excluded: crossing a TMA on the STAR (Geneva, far from the IAF) is NOT the
+  // approach phase, so a check-in there gets the bare sector ack, never the
+  // approach clearance + init_route_fixes (which was jumping the tracker past the
+  // STAR to the approach fixes -- LIMF->LFLP 2026-07-14).
   const auto ck_st = atc_state_machine::get_state();
   const bool checkin_state_ok =
-      ck_st == atc_state_machine::ATCState::IFR_APPROACH_CONTACT ||
-      ck_st == atc_state_machine::ATCState::IFR_DESCENT ||
-      ck_st == atc_state_machine::ATCState::IFR_ARRIVAL;
+      ck_st == atc_state_machine::ATCState::IFR_APPROACH_CONTACT;
   // Suppress the approach check-in when the pilot owes a readback of an
   // ALTITUDE clearance (descend/climb/flight level). That transmission is
   // the readback — often echoing "expect RNAV Zulu approach" — not a fresh
@@ -2001,6 +2093,25 @@ void process_transcript(Input in, Done done) {
             atc_state_machine::cancel_readback();
             auto_cleared = true;
           }
+        }
+      }
+      // Also auto-clear when a SECTOR HANDOFF is in progress and the pilot has
+      // switched to the new sector's frequency, even if the pending clearance has
+      // NO freq in its text. A readback owed to the PREVIOUS controller (e.g. Geneva
+      // issued "descend 6500" just before handing off) is moot after the switch --
+      // if left pending it forces the new-sector check-in to READBACK and loops
+      // "negative 6500 readback", blocking the entire arrival (LFLP 2026-07-17). The
+      // cleared level persists in state; the new controller re-issues if needed.
+      if (!auto_cleared && s_sector_checkin_pending &&
+          s_pending_handoff_freq_mhz > 100.0f) {
+        const float active = ctx.active_com == 2 ? ctx.com2_freq_mhz
+                                                 : ctx.com1_freq_mhz;
+        if (std::fabs(active - s_pending_handoff_freq_mhz) < 0.010f) {
+          logging::info("Readback auto-cleared: sector handoff, pilot on new "
+                        "freq %.3f (stale readback dropped)",
+                        s_pending_handoff_freq_mhz);
+          atc_state_machine::cancel_readback();
+          auto_cleared = true;
         }
       }
       if (!auto_cleared) {
@@ -4009,13 +4120,144 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
 // Returns false when already issued.
 // enc: the openair airspace the aircraft just entered (TMA/CTR), or an OTHER
 // entry when the 30 NM distance fallback fired (no openair TMA data).
+// Resolve an openair TMA/CTA name (e.g. "CHAMBERY TMA SECTOR 2") to its terminal
+// approach controller + frequency from atc.dat. Order: TRACON whose name matches
+// the fragment (GENEVA, NICE); else the field's tower's FACILITY -> that
+// facility's TRACON (CHAMBERY -> facility LFLB -> the LFLB tracon labelled "LYON",
+// 123.70) keeping the spoken label as the field ("Chambery Approach", not "Lyon");
+// else the tower itself. Returns false if nothing resolves. Shared by the arrival
+// handoff and the boundary sector-change so both resolve TMAs identically.
+static bool resolve_tma_controller(const std::string &tma_name,
+                                   std::string *out_label, float *out_freq_mhz) {
+  std::string fragment = tma_name;
+  for (const char *kw : {"TMA", "CTA", "FIR", "UIR", " SECTOR", " SEC"}) {
+    auto pos = fragment.find(kw);
+    if (pos != std::string::npos) {
+      fragment = fragment.substr(0, pos);
+      break;
+    }
+  }
+  while (!fragment.empty() && fragment.back() == ' ')
+    fragment.pop_back();
+  if (fragment.empty())
+    return false;
+  const airspace_db::Controller *ctrl = airspace_db::find_by_role_name_contains(
+      airspace_db::ControllerRole::TRACON, fragment);
+  const airspace_db::Controller *label_ctrl = ctrl;
+  if (!ctrl || ctrl->freqs_khz.empty()) {
+    const airspace_db::Controller *named = airspace_db::find_by_role_name_contains(
+        airspace_db::ControllerRole::TWR, fragment);
+    if (named && !named->facility_id.empty()) {
+      const airspace_db::Controller *fac = airspace_db::find_by_role_facility(
+          airspace_db::ControllerRole::TRACON, named->facility_id);
+      if (fac && !fac->freqs_khz.empty()) {
+        ctrl = fac;
+        label_ctrl = named;
+      }
+    }
+    if ((!ctrl || ctrl->freqs_khz.empty()) && named && !named->freqs_khz.empty()) {
+      ctrl = named;
+      label_ctrl = named;
+    }
+  }
+  if (!ctrl || ctrl->freqs_khz.empty())
+    return false;
+  if (out_freq_mhz)
+    *out_freq_mhz = static_cast<float>(ctrl->freqs_khz.front()) / 1000.0f;
+  if (out_label)
+    *out_label = controller_label_for(label_ctrl ? label_ctrl : ctrl) + " Approach";
+  return true;
+}
+
+// Option B (LFLP 2026-07-15): only the TERMINAL controller -- the unit that owns
+// the destination's approach -- may issue the approach clearance, never an outer
+// TMA (Geneva has no authority over the LFLP RNAV choice). The terminal TMA is the
+// innermost TMA enclosing the DESTINATION; the clearance is allowed only once the
+// aircraft is in that SAME terminal TMA (i.e. on Chambery, after the handoff).
+// Returns true when openair / destination data is unavailable so it never blocks a
+// field that has no nested TMAs (single-TMA arrivals like LFMN, AFIS fields).
+static bool on_destination_terminal(const xplane_context::XPlaneContext &ctx) {
+  if (!openair_db::ready() || s_assigned_dest_icao.empty())
+    return true;
+  const auto dpos = xplane_context::airport_pos_for(s_assigned_dest_icao);
+  if (dpos.first == 0.0 && dpos.second == 0.0)
+    return true;
+  // Probe the destination just UNDER its base terminal-TMA ceiling so we get the
+  // approach TMA, NOT the field's low CTR. A low probe (3000 ft) returned ANNECY
+  // CTR (0-4000) as the innermost over LFLP -- its fragment "ANNECY" != the
+  // approach TMA "CHAMBERY", which false-blocked the clearance in-sim (LFLP
+  // 2026-07-17). terminal_tma_ceiling() is TMA-class only (skips the CTR).
+  const int tma_ceil = openair_db::terminal_tma_ceiling(dpos.first, dpos.second);
+  const int probe = (tma_ceil > 1500) ? tma_ceil - 500 : 3000;
+  const openair_db::AirspaceEntry dest_tma =
+      openair_db::find_enclosing(dpos.first, dpos.second, probe);
+  const openair_db::AirspaceEntry acft_tma = openair_db::find_enclosing(
+      ctx.latitude, ctx.longitude, static_cast<int>(ctx.altitude_ft_msl));
+  if (dest_tma.name.empty() || acft_tma.name.empty())
+    return true; // can't tell -> don't block
+  // Compare CONTROLLER FRAGMENTS (strip TMA/CTA/CTR/FIR/UIR/SECTOR + trailing) so a
+  // different sub-sector -- or CTR-vs-TMA -- over the SAME field still counts as
+  // on-terminal: "CHAMBERY TMA SECTOR 2" and "CHAMBERY CTR" both -> "CHAMBERY".
+  // Exact-name + freq-resolve was too fragile and FALSE-BLOCKED the approach
+  // clearance in-sim (LFLP 2026-07-17: the aircraft was in CHAMBERY TMA SECTOR 2
+  // but the dest probe at 3000 ft resolved a different Chambery volume, and
+  // resolve_tma_controller couldn't map "... CTR" -> the clearance never fired).
+  // Still blocks Geneva ("GENEVA" != "CHAMBERY") so Option B holds.
+  auto frag = [](std::string n) {
+    for (const char *kw : {" TMA", " CTA", " CTR", " FIR", " UIR", " SECTOR", " SEC"}) {
+      auto p = n.find(kw);
+      if (p != std::string::npos) { n = n.substr(0, p); break; }
+    }
+    while (!n.empty() && n.back() == ' ')
+      n.pop_back();
+    return n;
+  };
+  return frag(acft_tma.name) == frag(dest_tma.name);
+}
+
+// ICAO Doc 4444 / EUROCONTROL coordination: a controller may descend an aircraft
+// only within its OWN area of responsibility. Over a nested/stacked TMA the
+// effective floor is the ceiling of the inner TMA sitting beneath the aircraft
+// when that inner TMA is owned by a DIFFERENT unit -- everything below that
+// ceiling belongs to the inner controller, issued only after the handoff.
+// Returns that inner ceiling (ft) when a descent to target_ft would enter a
+// lower, differently-controlled TMA; 0 when there is no such boundary (same
+// controlling unit, no inner TMA, or outside all airspace / ACC). Guards Geneva
+// from clearing "descend 6500" into the Chambery TMA (LFLP 2026-07-15).
+static int sector_transfer_floor_ft(const xplane_context::XPlaneContext &ctx,
+                                    int target_ft) {
+  if (!openair_db::ready() || target_ft <= 0)
+    return 0;
+  const int cur_alt = static_cast<int>(ctx.altitude_ft_msl);
+  const openair_db::AirspaceEntry cur =
+      openair_db::find_enclosing(ctx.latitude, ctx.longitude, cur_alt);
+  if (cur.name.empty())
+    return 0; // outside all TMAs (ACC/FIR) -- no inner-boundary clamp here
+  const openair_db::AirspaceEntry lower =
+      openair_db::find_enclosing(ctx.latitude, ctx.longitude, target_ft);
+  if (lower.name.empty() || lower.name == cur.name)
+    return 0; // target level is in the same volume -- no boundary crossed
+  // Same controlling unit (sub-sectors of one TMA)? Then no transfer is needed.
+  float cf = 0.0f, lf = 0.0f;
+  if (resolve_tma_controller(cur.name, nullptr, &cf) &&
+      resolve_tma_controller(lower.name, nullptr, &lf) &&
+      std::fabs(cf - lf) < 0.005f)
+    return 0;
+  return lower.ceiling_ft; // inner controller owns everything below this
+}
+
+// enter_approach: true (Stage B) = also flip to IFR_APPROACH_CONTACT and latch the
+// one-shot lock (legacy behaviour). false (Stage A) = issue the "contact X" call
+// only and STAY in IFR_ARRIVAL (an intermediate TMA frequency handoff while flying
+// the STAR); deduped by controller label via s_arrival_freq_handoff_label.
 static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
                                    const std::string &callsign,
                                    std::string *out_text,
-                                   const openair_db::AirspaceEntry &enc) {
+                                   const openair_db::AirspaceEntry &enc,
+                                   bool enter_approach = true) {
   using AS = atc_state_machine::ATCState;
   using FT = xplane_context::FrequencyType;
-  if (s_enroute_approach_handoff_issued)
+  if (enter_approach && s_enroute_approach_handoff_issued)
     return false;
 
   auto ofp = simbrief_ofp::get();
@@ -4035,33 +4277,17 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
   // "CHAMBERY TMA SECTOR 1" → "CHAMBERY" → Chambery TRACON.
   if (enc.ac_class == openair_db::AirspaceClass::TMA ||
       enc.ac_class == openair_db::AirspaceClass::CTA) {
-    std::string fragment = enc.name;
-    for (const char *kw : {"TMA", "CTA", "FIR", "UIR", " SECTOR", " SEC"}) {
-      auto pos = fragment.find(kw);
-      if (pos != std::string::npos) {
-        fragment = fragment.substr(0, pos);
-        break;
-      }
-    }
-    while (!fragment.empty() && fragment.back() == ' ')
-      fragment.pop_back();
-    if (!fragment.empty()) {
-      const airspace_db::Controller *tracon =
-          airspace_db::find_by_role_name_contains(
-              airspace_db::ControllerRole::TRACON, fragment);
-      if (tracon && !tracon->freqs_khz.empty()) {
-        app_freq  = static_cast<float>(tracon->freqs_khz.front()) / 1000.0f;
-        app_label = controller_label_for(tracon) + " Approach";
-        logging::info(
-            "IFR arrival handoff: [P1-openair] '%s' -> fragment '%s' "
-            "-> TRACON '%s' %.3f",
-            enc.name.c_str(), fragment.c_str(), tracon->name.c_str(), app_freq);
-      } else {
-        logging::info(
-            "IFR arrival handoff: [P1-openair] '%s' -> fragment '%s' "
-            "-> no TRACON match, falling back",
-            enc.name.c_str(), fragment.c_str());
-      }
+    std::string lbl;
+    float f = 0.0f;
+    if (resolve_tma_controller(enc.name, &lbl, &f)) {
+      app_label = lbl;
+      app_freq  = f;
+      logging::info("IFR arrival handoff: [P1-openair] '%s' -> %s %.3f",
+                    enc.name.c_str(), app_label.c_str(), app_freq);
+    } else {
+      logging::info(
+          "IFR arrival handoff: [P1-openair] '%s' -> no controller match, falling back",
+          enc.name.c_str());
     }
   }
 
@@ -4178,39 +4404,83 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
     return false;
   }
 
-  s_enroute_approach_handoff_issued = true;
-  s_enroute_approach_freq_mhz = app_freq;  // gate check-in on correct frequency
-  // The handoff is SPOKEN by the CURRENT controller (e.g. Marseille on
-  // 119.755), so s_current_controller_label must stay until the pilot switches.
-  // Defer the target to the PENDING slot: this call is then labelled with the
-  // current controller ("Marseille"), and process_transcript promotes the
-  // pending label to the speaker once the pilot's COM reaches app_freq.
-  // Overwriting s_current here mislabeled the handoff call itself as the target
-  // ("Geneva Approach: contact Geneva Approach on 119.530" while still on
-  // Marseille's 119.755) -- LIMx->LFLP 2026-07-12.
-  s_pending_controller_label = app_label;
-  s_pending_handoff_freq_mhz = app_freq;
-  atc_state_machine::set_state(AS::IFR_APPROACH_CONTACT);
+  // The handoff is SPOKEN by the CURRENT controller (e.g. Marseille on 119.755),
+  // so s_current_controller_label must stay until the pilot switches. Defer the
+  // target to the PENDING slot: this call is labelled with the current controller
+  // ("Marseille"), and process_transcript promotes the pending label to the
+  // speaker once the pilot's COM reaches app_freq. Overwriting s_current here
+  // mislabeled the handoff call itself as the target ("Geneva Approach: contact
+  // Geneva Approach ..." while still on Marseille) -- LIMx->LFLP 2026-07-12.
+  auto speak_contact = [&]() {
+    s_pending_controller_label = app_label;
+    s_pending_handoff_freq_mhz = app_freq;
+    if (out_text) {
+      char buf[200];
+      if (app_freq >= 100.0f)
+        std::snprintf(buf, sizeof(buf), "%s, contact %s on %.3f.",
+                      callsign.c_str(), app_label.c_str(), app_freq);
+      else
+        std::snprintf(buf, sizeof(buf), "%s, contact %s.", callsign.c_str(),
+                      app_label.c_str());
+      *out_text = buf;
+    }
+  };
 
-  // The expected approach was already briefed ONCE at TOD by the descent
-  // clearance ("expect RNAV Zulu approach runway 04"). The en-route -> Approach
-  // transfer no longer repeats it (dedup) -- the single authoritative approach
-  // clearance is issued later, at the IAF, by poll_approach. Keeping a second
-  // "expect ..." here over-stated the approach three times per arrival with no
-  // discrete clearance ever given. See project_arrival_announcement_model.
-  const std::string expect_phrase;
-
-  if (out_text) {
-    char buf[200];
-    if (app_freq >= 100.0f)
-      std::snprintf(buf, sizeof(buf), "%s, %scontact %s on %.3f.",
-                    callsign.c_str(), expect_phrase.c_str(),
-                    app_label.c_str(), app_freq);
-    else
-      std::snprintf(buf, sizeof(buf), "%s, %scontact %s.",
-                    callsign.c_str(), expect_phrase.c_str(), app_label.c_str());
-    *out_text = buf;
+  // Stage A: intermediate TMA frequency handoff while flying the STAR. Issue
+  // "contact <controller>" and gate the check-in on app_freq, but STAY in
+  // IFR_ARRIVAL (no walker, no tracker jump). Dedup by controller label so a
+  // multi-sector TMA (GENEVA TMA SECTOR 7/8/...) only announces once.
+  if (!enter_approach) {
+    const float active_com_arr =
+        (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
+    if (app_label == s_arrival_freq_handoff_label ||
+        std::fabs(active_com_arr - app_freq) < 0.005f)
+      return false; // already tuned to this controller / frequency
+    s_arrival_freq_handoff_label = app_label;
+    s_enroute_approach_freq_mhz = app_freq; // gate check-in on correct frequency
+    // Treat this like an ACC sector handoff: arm the generic sector check-in so
+    // the pilot's call on the new freq gets a bare "radar contact" ack and
+    // proactive messages pause until then -- NOT the richer approach clearance
+    // (which must wait for the IAF / APPROACH_CONTACT).
+    s_sector_checkin_pending = true;
+    speak_contact();
+    logging::info("IFR arrival: intermediate freq handoff -> %s %.3f MHz (stay ARRIVAL)",
+                  app_label.c_str(), app_freq);
+    return true;
   }
+
+  // Stage B: enter the APPROACH phase (starts the poll_approach walker).
+  s_enroute_approach_handoff_issued = true;
+  s_enroute_approach_freq_mhz = app_freq;
+  atc_state_machine::set_state(AS::IFR_APPROACH_CONTACT);
+  // Flip the phase SILENTLY (no "contact X") when the pilot is already talking to
+  // the resolved approach controller -- either because Stage A handed them there
+  // (single-TMA field like Nice) OR because they are already on that FREQUENCY via
+  // an upstream ACC handoff. At LFLP the Marseille->Geneva ACC handoff already put
+  // the pilot on Geneva 119.530; at APPROACH entry (still above the Chambery
+  // ceiling) find_enclosing resolves Geneva again, so a spoken handoff would be
+  // "contact Geneva on 119.530" while already on 119.530 -- a dead lock on a
+  // check-in that can never differ (LFLP 2026-07-15). The real Geneva->Chambery
+  // terminal handoff fires later from poll_approach's sector-change when the
+  // aircraft descends into the Chambery TMA. Only speak when the controller
+  // genuinely differs from the one currently tuned.
+  const float active_com_app =
+      (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
+  if (app_label == s_arrival_freq_handoff_label ||
+      std::fabs(active_com_app - app_freq) < 0.005f) {
+    // Already on the terminal controller (the pilot checked in via the sector ack
+    // BEFORE APPROACH entry) -> go straight to APPROACH_DESCENT. Staying in
+    // APPROACH_CONTACT would wait for an "approach check-in" that already happened,
+    // so the pilot's NEXT readback (a speed or course readback) was consumed as the
+    // check-in and wrongly answered "radar contact, identified, continue descent"
+    // (LFLP 2026-07-17). poll_approach's cleared-approach fires in DESCENT.
+    atc_state_machine::set_state(AS::IFR_APPROACH_DESCENT);
+    s_sector_checkin_pending = false;
+    logging::info("IFR arrival: APPROACH (already on %s %.3f) -- silent flip -> APPROACH_DESCENT",
+                  app_label.c_str(), app_freq);
+    return true; // out_text stays empty -> caller falls through to poll_approach
+  }
+  speak_contact();
   logging::info("IFR en-route: approach handoff -> %s %.3f MHz",
                 app_label.c_str(), app_freq);
   return true;
@@ -4295,6 +4565,53 @@ struct FixCompliance {
   int         spd_target_kt = 0;
 };
 
+// Routed "distance to FLY" (NM) from the aircraft to route fix `target_idx`: the
+// leg from the aircraft to the current tracked fix, plus each subsequent leg up to
+// the target. Use for TOD / ETA / descent planning -- NOT straight-line, which
+// under-reads on a dog-legged STAR and fires descents far too early (LFLP: FL090
+// cleared 53 NM out because great-circle acft->LUVOB was 53 NM while the routed STAR
+// path is longer). Straight-line fallback when the target is behind the tracker,
+// out of range, or position-less. Proximity/capture checks keep using straight-line
+// (see [[project_distance_limitation]] -- distance-to-fly vs distance-now).
+static double routed_distance_to_fix_idx(const xplane_context::XPlaneContext &ctx,
+                                         int target_idx) {
+  const int n = static_cast<int>(s_route_fixes.size());
+  if (target_idx < 0 || target_idx >= n)
+    return 0.0;
+  int start = std::max(0, s_route_fix_idx);
+  const auto &tgt = s_route_fixes[target_idx];
+  if (target_idx < start || (tgt.lat == 0.0 && tgt.lon == 0.0))
+    return traffic_geometry::distance_nm(ctx.latitude, ctx.longitude, tgt.lat,
+                                         tgt.lon);
+  // Skip fixes at/after `start` that are BEHIND the aircraft. The route tracker
+  // lags between resyncs (it advances only within ~2 NM of a fix), so fix[start]
+  // can be behind the aircraft; summing the backward leg aircraft->fix[start]
+  // INFLATES the routed distance and fires the descent late/steep -- FL090 was
+  // held until the resync corrected the index (LFLP 2026-07-17). Advance to the
+  // first fix that is ahead (bearing within 100 deg of the nose).
+  while (start < target_idx) {
+    const auto &f = s_route_fixes[start];
+    if (f.lat == 0.0 && f.lon == 0.0) { ++start; continue; }
+    double brg = traffic_geometry::bearing_deg(ctx.latitude, ctx.longitude,
+                                               f.lat, f.lon);
+    double off = std::fabs(brg - static_cast<double>(ctx.heading_true));
+    if (off > 180.0) off = 360.0 - off;
+    if (off <= 100.0) break; // fix is ahead -> start summing here
+    ++start;                 // fix is behind -> skip it
+  }
+  double total = 0.0;
+  double plat = ctx.latitude, plon = ctx.longitude;
+  for (int i = start; i <= target_idx; ++i) {
+    const auto &f = s_route_fixes[i];
+    if (f.lat == 0.0 && f.lon == 0.0)
+      continue; // skip position-less fix, keep summing the chain
+    total += traffic_geometry::distance_nm(plat, plon, f.lat, f.lon);
+    plat = f.lat;
+    plon = f.lon;
+  }
+  return total;
+}
+
 static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
                                     double lead_seconds) {
   using AS = atc_state_machine::ATCState;
@@ -4323,8 +4640,9 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
       continue; // no position — cannot range-gate
     c.valid   = true;
     c.ident   = f.ident;
-    c.dist_nm = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
-                                              f.lat, f.lon);
+    // Routed distance-to-fly (sum of legs), not straight-line -- the TOD trigger
+    // reads this, and great-circle under-read fired FL090 53 NM out (LFLP).
+    c.dist_nm = routed_distance_to_fix_idx(ctx, i);
     // Time to the fix = distance / groundspeed (floored so we don't divide by a
     // near-zero GS on the ground / in a hold).
     const double gs = ctx.groundspeed_kts > 40.0f
@@ -4404,6 +4722,107 @@ static CourseCheck check_course(const xplane_context::XPlaneContext &ctx,
   return c;
 }
 
+// Descent-planning tunables (shared by the STAR-crossing TOD trigger and the
+// enroute pre-TOD step alert). Two independent levers:
+//   - SLOPE: 265 ft/NM ~= 2.5 deg (a true 2.5deg = tan(2.5)*6076 = 265). Was
+//     300 ft/NM (~2.83 deg). A shallower slope makes TOD fire earlier and the
+//     descent more gradual, and it scales with the size of the descent.
+//   - REACTION buffer: a flat extra distance added before the geometric TOD so the
+//     call comes with room to start down. Bump to 10.0 for "+5 NM more" (user
+//     2026-07-17). NOTE: 3 deg (ILS glideslope / the pilot 3:1 rule) is a planning
+//     convention, not an ATC rule -- safe to tune.
+static constexpr double kDescentSlopeFtPerNm = 265.0; // 2.5 deg
+static constexpr double kDescentReactionNm   = 8.0;   // flat pre-TOD buffer (NM)
+
+// ── poll_profile_crossing ─────────────────────────────────────────────────
+// Extracted from poll_descent: the CIFP crossing-altitude corrective, now shared
+// by every airborne IFR phase via poll_profile_enforcement. Fires once per target
+// (s_descent_cifp_target_ft dedup) when the next constrained fix will be busted
+// within ~90 s of flying time AND its target is genuinely below what is already
+// cleared. Records the target in s_enroute_cleared_alt_ft so the poll_approach
+// walker and descend-to-enter (which read current_cleared_alt_ft) don't re-issue
+// the same descent -- the `>= cleared` guard is the coordination point. Altitude
+// reference is correct per constraint (check_next_fix judges FL vs feet, TL-aware).
+static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
+                                  std::string *out_text) {
+  if (!out_text)
+    return false;
+  // Once "cleared for the approach", the pilot flies the PUBLISHED vertical profile
+  // (the charted step-down altitudes); ATC does NOT issue each step-down descent --
+  // ICAO Doc 4444 / EUROCONTROL "descend with the procedure" (confirmed 2026-07-17,
+  // continental EU). So stop the crossing correctives once the approach is cleared;
+  // the pilot descends PIRUV/LP403/LP402/IP04Z/FP04Z per the chart. Tower handoff +
+  // landing still fire.
+  if (s_approach_cleared_issued)
+    return false;
+  // Do not issue a descent while a SECTOR HANDOFF is in progress (the pilot is
+  // switching controllers). This is the RIGHT gate -- it's brief (only until the
+  // pilot checks in on the new freq) and prevents the OLD controller from issuing a
+  // new descent mid-handoff: Geneva issued "descend 6500" (Chambery's) right after
+  // "contact Chambery", stranding its readback across the switch (LFLP 2026-07-17).
+  // NOTE: an earlier gate on is_readback_pending was WRONG -- it blocked the
+  // time-critical descent for ANY unrelated readback, so FL090 fired 12 NM late and
+  // steep. s_sector_checkin_pending is false when FL090 fires (no handoff then), so
+  // this gate does not delay it.
+  if (s_sector_checkin_pending)
+    return false;
+  // Wide window: check_next_fix returns the governing constrained fix regardless
+  // of proximity; the REAL trigger is the top-of-descent distance below.
+  const FixCompliance fc = check_next_fix(ctx, 900.0);
+  if (!(fc.valid && fc.alt_bust && fc.alt_target_ft > 0 &&
+        fc.alt_target_ft != s_descent_cifp_target_ft))
+    return false;
+  const int cleared = engine::current_cleared_alt_ft();
+  if (fc.alt_target_ft >= cleared)
+    return false; // only a genuine DOWN step below what is already cleared
+  // ICAO/EUROCONTROL: the current controller may not descend the aircraft into a
+  // lower, differently-controlled TMA. If this crossing's target lies below the
+  // ceiling of such an inner TMA, the descent belongs to the inner controller --
+  // suppress it here. The descend-to-enter clearance brings the aircraft to the
+  // boundary, the handoff transfers control, and the inner controller then issues
+  // it (Geneva must not clear "descend 6500" into the Chambery TMA -- LFLP
+  // 2026-07-15). Once handed off and inside the inner TMA, cur == inner volume and
+  // this returns 0, so the inner controller's crossings fire normally.
+  const int xfer_floor = sector_transfer_floor_ft(ctx, fc.alt_target_ft);
+  if (xfer_floor > 0 && fc.alt_target_ft < xfer_floor) {
+    static int s_last_suppressed_target = 0; // dedup the per-frame diagnostic
+    if (fc.alt_target_ft != s_last_suppressed_target) {
+      s_last_suppressed_target = fc.alt_target_ft;
+      logging::info("[dbg prof] crossing %s -> %d ft SUPPRESSED: below inner-TMA "
+                    "transfer floor %d ft (belongs to inner controller)",
+                    fc.ident.c_str(), fc.alt_target_ft, xfer_floor);
+    }
+    return false;
+  }
+  // Fire at the TOP OF DESCENT for this crossing: within the distance needed to
+  // lose the altitude at kDescentSlopeFtPerNm + kDescentReactionNm buffer. A fixed 90 s
+  // (~5 NM) window was physically impossible for a big step -- FL140->FL090 by
+  // LUVOB needs ~17 NM, so the aircraft stayed high, missed the crossing AND
+  // stayed above the inner (Chambery) TMA so the handoff never fired
+  // (LFLP 2026-07-14). Altitude reference is correct per constraint (FL vs feet).
+  const float alt_now = fc.alt_is_fl ? ctx.pressure_alt_ft : ctx.altitude_ft_msl;
+  const double alt_to_lose = static_cast<double>(alt_now) - fc.alt_target_ft;
+  if (alt_to_lose <= 200.0)
+    return false; // essentially at the level already
+  const double tod_dist = alt_to_lose / kDescentSlopeFtPerNm + kDescentReactionNm;
+  if (fc.dist_nm > tod_dist)
+    return false; // not yet at the top of descent for this crossing
+  s_descent_cifp_target_ft = fc.alt_target_ft;
+  s_enroute_cleared_alt_ft = fc.alt_target_ft; // coordinates with the walker
+  const std::string &cs = atc_state_machine::session_callsign();
+  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
+  const AltHint hint = fc.alt_is_fl ? AltHint::FlightLevel : AltHint::Auto;
+  const std::string clr = format_alt_clearance(fc.alt_target_ft, hint, ctx.qnh_hpa, ta);
+  *out_text = callsign + ", descend " + clr + ".";
+  logging::info("[dbg prof] crossing %s -> descend %s @ PA %.0f (%.1f NM, TOD %.1f NM, "
+                "lose %.0f ft, st=%d)",
+                fc.ident.c_str(), clr.c_str(),
+                static_cast<double>(ctx.pressure_alt_ft), fc.dist_nm, tod_dist,
+                alt_to_lose, static_cast<int>(atc_state_machine::get_state()));
+  return true;
+}
+
 // ── poll_speed_restriction ────────────────────────────────────────────────
 // Effective speed limit = min(ICAO 250 kt < FL100, nearest active SID/STAR/
 // approach waypoint cap). Continuously enforced: fires "reduce speed, N knots
@@ -4416,15 +4835,25 @@ bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
   auto state = atc_state_machine::get_state();
   if (state != AS::IFR_RADAR_CONTACT   &&
       state != AS::IFR_ENROUTE_CRUISE  &&
+      state != AS::IFR_DESCENT          &&
+      state != AS::IFR_ARRIVAL          &&
       state != AS::IFR_APPROACH_CONTACT &&
       state != AS::IFR_APPROACH_DESCENT &&
       state != AS::IFR_APPROACH_TOWER)
+    return false;
+  // Don't issue a speed restriction mid-handoff (see poll_profile_crossing): brief,
+  // avoids the old controller issuing a clearance the pilot must read back on the
+  // new freq. Gated on the handoff, NOT on any readback (which delayed the profile).
+  if (s_sector_checkin_pending)
     return false;
 
   // Effective speed limit in force now: the tighter of the ICAO 250 kt < FL100
   // rule and any active SID/STAR/approach waypoint cap from the unified route
   // table (e.g. 210 kt at a terminal fix). 0 = no restriction.
-  int limit = (ctx.altitude_ft_msl < 10000.0f) ? 250 : 0;
+  // FL100 is a FLIGHT LEVEL (always above the transition level), so the boundary
+  // is pressure altitude, not QNH/MSL -- with a low QNH the aircraft crosses
+  // FL100 while still above 10000 ft MSL, and the 250 kt limit applies from FL100.
+  int limit = (ctx.pressure_alt_ft < 10000.0f) ? 250 : 0;
   // Procedure speed cap is enforced CORRECTIVELY: the pilot flies the published
   // cap implicitly, and ATC only calls it when the fix is within ~60 s flying
   // time AND the aircraft is still too fast (so NANAX's 200 kt fires approaching
@@ -4460,9 +4889,9 @@ bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
   // enforcement is fixed.
   {
     const FixCompliance dfc = check_next_fix(ctx, 60.0);
-    logging::info("[dbg spd] issuing %d kt @ %.0f ft -- check_next_fix: %s idx=%d "
+    logging::info("[dbg spd] issuing %d kt @ PA %.0f ft -- check_next_fix: %s idx=%d "
                   "dist=%.1f near=%d spd_tgt=%d (route_idx=%d/%d)",
-                  limit, ctx.altitude_ft_msl,
+                  limit, static_cast<double>(ctx.pressure_alt_ft),
                   dfc.valid ? dfc.ident.c_str() : "(none)", s_route_fix_idx,
                   dfc.dist_nm, dfc.near ? 1 : 0, dfc.spd_target_kt,
                   s_route_fix_idx, static_cast<int>(s_route_fixes.size()));
@@ -4477,6 +4906,78 @@ bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
     *out_text = buf;
   }
   return true;
+}
+
+// ── poll_profile_enforcement ──────────────────────────────────────────────
+// Unified in-front-profile enforcement, dispatched once per frame BEFORE the
+// per-phase poll_* handlers. It runs the same three checks in EVERY airborne IFR
+// phase, so no phase is silently unmonitored -- the "no altitude warning at
+// LP402/LP403 in the approach" bug came from each check being wired to a
+// different, non-overlapping phase set (speed skipped DESCENT/ARRIVAL; the
+// crossing corrective was DESCENT-only; the compliance nag was DESCENT/ARRIVAL-
+// only). Priority order, one utterance/frame:
+//   1. altitude crossing   -- "descend X" for the next constrained fix that will
+//      be busted within ~90 s. Mandatory readback. (DESCENT/ARRIVAL/APPROACH.)
+//   2. speed restriction    -- min(ICAO 250 kt < FL100, next fix cap). Readback.
+//   3. cleared-level nag     -- "confirm descending X". Advisory, no readback.
+// All three coordinate with the poll_approach walker + descend-to-enter through
+// the shared s_enroute_cleared_alt_ft, so nothing double-fires. The altitude
+// reference is correct per constraint (pressure-alt vs FL, QNH/feet vs feet,
+// TL-aware) because every check routes through check_next_fix / current_cleared.
+bool poll_profile_enforcement(const xplane_context::XPlaneContext &ctx, float dt,
+                              std::string *out_text,
+                              bool *out_requires_readback) {
+  using AS = atc_state_machine::ATCState;
+  const AS st = atc_state_machine::get_state();
+  const bool airborne_ifr =
+      st == AS::IFR_RADAR_CONTACT || st == AS::IFR_ENROUTE_CRUISE ||
+      st == AS::IFR_DESCENT || st == AS::IFR_ARRIVAL ||
+      st == AS::IFR_APPROACH_CONTACT || st == AS::IFR_APPROACH_DESCENT ||
+      st == AS::IFR_APPROACH_TOWER;
+  if (out_requires_readback)
+    *out_requires_readback = false;
+  if (!airborne_ifr)
+    return false;
+
+  // Tower-handoff priority near the FAF: once the approach is cleared and the
+  // aircraft is within ~2 NM of the FAF (Tower not yet contacted), stop issuing
+  // profile enforcement so poll_approach's "contact Tower, report established"
+  // wins the frame. On final the pilot flies the published vertical path; ATC
+  // issues no further step-downs. Without this, LFLP's tightly-packed step-downs
+  // (LP402/IP04Z within ~2 NM of FP04Z) can win the one-utterance-per-frame budget
+  // and push the Tower handoff past the FAF (LFLP 2026-07-15).
+  if (s_approach_final_issued && !s_approach_tower_handed_off &&
+      (s_approach_faf.lat != 0.0 || s_approach_faf.lon != 0.0)) {
+    const double faf_nm = traffic_geometry::distance_nm(
+        ctx.latitude, ctx.longitude, s_approach_faf.lat, s_approach_faf.lon);
+    if (faf_nm < 2.0) {
+      logging::info("[approach] profile enforcement yielded to Tower handoff "
+                    "(%.1f NM from FAF %s)",
+                    faf_nm, s_approach_faf.ident.c_str());
+      return false;
+    }
+  }
+
+  // 1. Altitude crossing -- descent / arrival / approach only (climb is owned by
+  //    poll_sid_climb; the final segment by the glidepath, not a crossing).
+  const bool alt_phase =
+      st == AS::IFR_DESCENT || st == AS::IFR_ARRIVAL ||
+      st == AS::IFR_APPROACH_CONTACT || st == AS::IFR_APPROACH_DESCENT;
+  if (alt_phase && poll_profile_crossing(ctx, out_text)) {
+    if (out_requires_readback)
+      *out_requires_readback = true;
+    return true;
+  }
+  // 2. Speed restriction (mandatory readback item).
+  if (poll_speed_restriction(ctx, out_text)) {
+    if (out_requires_readback)
+      *out_requires_readback = true;
+    return true;
+  }
+  // 3. Cleared-level compliance courtesy prompt (advisory only).
+  if (poll_altitude_compliance(ctx, dt, out_text))
+    return true;
+  return false;
 }
 
 bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
@@ -4512,7 +5013,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     s_enroute_deviation_cooldown_sec = 0.0f;
     s_enroute_sector_freq_khz = 0;
   s_enroute_visited_sector_freqs.clear();
-    s_enroute_sector_check_sec = 30.0f;
+    s_enroute_sector_check_sec = 15.0f;
     // Do NOT wipe the cleared altitude here for the airborne IFR continuation
     // phases. poll_enroute runs EVERY frame and this block fires for ANY
     // non-ENROUTE_CRUISE state -- so unconditionally zeroing s_enroute_cleared_alt_ft
@@ -4586,7 +5087,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
   if (!s_enroute_descent_issued && airspace_db::enabled()) {
     s_enroute_sector_check_sec -= dt;
     if (s_enroute_sector_check_sec <= 0.0f) {
-      s_enroute_sector_check_sec = 30.0f;
+      s_enroute_sector_check_sec = 15.0f;
 
       const airspace_db::Controller *best = sector_picker::pick_next(
           ctx.enclosing_airspaces, s_enroute_visited_sector_freqs);
@@ -4788,7 +5289,8 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
           ++s_route_step_idx; // no meaningful change at this filed step
           break;
         }
-        float alt_comp = static_cast<float>(std::abs(step_diff)) / 300.0f;
+        float alt_comp = static_cast<float>(std::abs(step_diff)) /
+                         static_cast<float>(kDescentSlopeFtPerNm);
         float alert_nm_step =
             std::max(15.0f, std::min(80.0f, alt_comp + gs_step / 20.0f));
         if (dist_nm > static_cast<double>(alert_nm_step))
@@ -5268,43 +5770,71 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
   s_acc_sector_check_sec -= dt;
   if (s_acc_sector_check_sec > 0.0f)
     return false;
-  s_acc_sector_check_sec = 30.0f;
+  s_acc_sector_check_sec = 15.0f;
 
-  // CTR (ACC/FIR/UIR) sectors only; drop oceanic / global-junk polygons whose
-  // bounding box spans an implausible area (OAKLAND OCEANIC covers the whole
-  // world at floor 0 and would tie every continental sector).
-  std::vector<const airspace_db::Controller *> ctrs;
-  for (const auto *c : ctx.enclosing_airspaces) {
-    if (!c || c->role != airspace_db::ControllerRole::CTR || c->freqs_khz.empty())
-      continue;
-    if ((c->bbox_max_lat - c->bbox_min_lat) > 40.0 ||
-        (c->bbox_max_lon - c->bbox_min_lon) > 40.0 ||
-        c->name.find("OCEANIC") != std::string::npos)
-      continue;
-    ctrs.push_back(c);
+  // Controlling sector = the innermost / most-terminal enclosing volume,
+  // boundary-driven. An openair TMA (GENEVA / CHAMBERY) OVERRIDES the broad
+  // atc.dat CTR when the aircraft is inside it (lateral + altitude-gated) -- so
+  // TMA handoffs fire when you CROSS the boundary (enter the TMA, or descend into
+  // a lower one such as GENEVA -> CHAMBERY below FL095), not at a route point
+  // (LFLP 2026-07-15). CTR sectors (Milan / France / Marseille) are the fallback
+  // when outside any terminal TMA.
+  std::string new_label;
+  float new_mhz = 0.0f;
+  if (openair_db::ready()) {
+    const openair_db::AirspaceEntry enc = openair_db::find_enclosing(
+        ctx.latitude, ctx.longitude, static_cast<int>(ctx.altitude_ft_msl));
+    if (enc.ac_class == openair_db::AirspaceClass::TMA) {
+      std::string lbl;
+      float f = 0.0f;
+      if (resolve_tma_controller(enc.name, &lbl, &f)) {
+        new_label = lbl;
+        new_mhz = f;
+      }
+    }
   }
-  const airspace_db::Controller *best =
-      sector_picker::pick_next(ctrs, s_acc_visited_sector_freqs);
-  if (!best)
+  if (new_mhz <= 0.0f) {
+    // atc.dat CTR (ACC/FIR/UIR) sectors; drop oceanic / global-junk polygons.
+    std::vector<const airspace_db::Controller *> ctrs;
+    for (const auto *c : ctx.enclosing_airspaces) {
+      if (!c || c->role != airspace_db::ControllerRole::CTR ||
+          c->freqs_khz.empty())
+        continue;
+      if ((c->bbox_max_lat - c->bbox_min_lat) > 40.0 ||
+          (c->bbox_max_lon - c->bbox_min_lon) > 40.0 ||
+          c->name.find("OCEANIC") != std::string::npos)
+        continue;
+      ctrs.push_back(c);
+    }
+    const airspace_db::Controller *best =
+        sector_picker::pick_next(ctrs, s_acc_visited_sector_freqs);
+    if (!best)
+      return false;
+    new_label = controller_label_for(best);
+    new_mhz = static_cast<float>(best->freqs_khz.front()) / 1000.0f;
+  }
+  if (new_mhz <= 0.0f)
     return false;
 
-  const uint32_t new_freq_khz = best->freqs_khz.front();
+  const uint32_t new_freq_khz =
+      static_cast<uint32_t>(std::lround(new_mhz * 1000.0));
   if (s_acc_sector_freq_khz == 0) {
     // Seed silently to the sector the pilot is already on (Milan at BANKO).
     s_acc_sector_freq_khz = new_freq_khz;
-    logging::info("IFR ACC: sector baseline %s %.3f MHz (silent)",
-                  best->name.c_str(),
-                  static_cast<float>(new_freq_khz) / 1000.0f);
+    logging::info("IFR sector baseline %s %.3f MHz (silent)", new_label.c_str(),
+                  new_mhz);
     return false;
   }
   if (new_freq_khz == s_acc_sector_freq_khz)
     return false;
+  // Never hand back to a sector already left (prevents flicker at a boundary).
+  for (uint32_t v : s_acc_visited_sector_freqs)
+    if (v == new_freq_khz)
+      return false;
 
   // Sector changed -> hand off; block backward handoff via the visited guard.
   s_acc_visited_sector_freqs.push_back(s_acc_sector_freq_khz);
   s_acc_sector_freq_khz = new_freq_khz;
-  const std::string new_label = controller_label_for(best);
-  const float new_mhz = static_cast<float>(new_freq_khz) / 1000.0f;
   s_pending_controller_label = new_label;
   s_pending_handoff_freq_mhz = new_mhz;
   const float active_com_now =
@@ -5346,7 +5876,20 @@ bool poll_altitude_compliance(const xplane_context::XPlaneContext &ctx, float dt
                               std::string *out_text) {
   using AS = atc_state_machine::ATCState;
   const AS st = atc_state_machine::get_state();
-  if (st != AS::IFR_DESCENT && st != AS::IFR_ARRIVAL) {
+  if (st != AS::IFR_DESCENT && st != AS::IFR_ARRIVAL &&
+      st != AS::IFR_APPROACH_CONTACT && st != AS::IFR_APPROACH_DESCENT) {
+    s_alt_comp_target_ft = 0;
+    s_alt_comp_arm_sec = 0.0f;
+    s_alt_comp_sent = false;
+    return false;
+  }
+  // Post-clearance: the last assigned level (current_cleared_alt_ft) is SUPERSEDED
+  // by the published approach profile -- the aircraft is meant to descend below it,
+  // so this monitor would false-fire "confirm climbing <old level>" as it correctly
+  // descends (LFLP: "confirm climbing FL090"/"6500"). Silence it once the approach
+  // is cleared. The published-constraint compliance query ("confirm <alt> at <FIX>")
+  // is a deliberate deferred follow-up (option A, user 2026-07-17).
+  if (s_approach_cleared_issued) {
     s_alt_comp_target_ft = 0;
     s_alt_comp_arm_sec = 0.0f;
     s_alt_comp_sent = false;
@@ -5537,67 +6080,39 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
     }
   }
 
-  // CIFP STAR crossing-altitude enforcement (the corrective model). The STAR
-  // publishes the descent profile as per-fix crossing altitudes (ABDI8R:
-  // ABDIL<=FL190, AMFOU<=FL160, TIPIK<=FL120, MUS>=FL080). The pilot flies these
-  // implicitly; ATC only speaks when, within a time-to-fix window, the aircraft
-  // won't make the next constrained fix. This drives the enroute part of the
-  // descent (before the terminal TMA) and does NOT depend on any airspace
-  // polygon -- it fixes the "stuck at cruise, busts TIPIK" failure (LFMN ABDI8R
-  // 2026-07-13: level FL129 through TIPIK's <=FL120 with no correction). The
-  // descend-to-enter block above takes priority when over the terminal TMA (it
-  // clears BELOW the ceiling, satisfying the crossing too). Fires once per fix.
-  if (out_text) {
-    const FixCompliance fc = check_next_fix(ctx, 90.0);
-    if (fc.valid && fc.near && fc.alt_bust && fc.alt_target_ft > 0 &&
-        fc.alt_target_ft != s_descent_cifp_target_ft) {
-      const int cleared = engine::current_cleared_alt_ft();
-      // Only a genuine DOWN step (a STAR crossing we're above). An at-or-above
-      // floor bust in descent shouldn't push us back up.
-      if (fc.alt_target_ft < cleared) {
-        s_descent_cifp_target_ft = fc.alt_target_ft;
-        s_enroute_cleared_alt_ft = fc.alt_target_ft; // arms poll_altitude_compliance
-        const std::string &cs = atc_state_machine::session_callsign();
-        const std::string &callsign =
-            cs.empty() ? settings::pilot_callsign() : cs;
-        const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
-        const AltHint hint = fc.alt_is_fl ? AltHint::FlightLevel : AltHint::Auto;
-        const std::string clr =
-            format_alt_clearance(fc.alt_target_ft, hint, ctx.qnh_hpa, ta);
-        *out_text = callsign + ", descend " + clr + ".";
-        if (out_requires_readback)
-          *out_requires_readback = true;
-        logging::info("IFR descent: STAR crossing %s -> descend %s (%.0f NM, eta %.0fs)",
-                      fc.ident.c_str(), clr.c_str(), fc.dist_nm, fc.eta_sec);
-        return true;
-      }
-    }
-  }
+  // NOTE: the CIFP STAR crossing-altitude corrective that used to live here now
+  // runs for EVERY airborne IFR phase in poll_profile_enforcement (dispatched
+  // before this handler), so a STAR/approach crossing is enforced uniformly in
+  // descent, arrival AND the approach -- not just here. See poll_profile_crossing.
 
   bool reached_arrival = false;
   std::string anchor_id;
   double anchor_lat = 0.0, anchor_lon = 0.0;
 
-  // Primary anchor: the first navlog fix whose planned stage is descent (DSC)
-  // -- the true top of the arrival. SimBrief's per-fix stage is reliable even
-  // when it omits the is_sid_star flag; relying on find_star_entry instead made
-  // it fall back to the LAST navlog fix and fire ARRIVAL ~9 NM out
-  // (LIMF -> LFLP 2026-07-11: SALEV, navlog[6], instead of VALBU, navlog[3]).
-  for (const auto &f : ofp.navlog) {
-    if (f.stage == "DSC" && (f.lat != 0.0 || f.lon != 0.0)) {
-      anchor_id  = f.ident;
-      anchor_lat = f.lat;
-      anchor_lon = f.lon;
-      break;
-    }
-  }
-  // Fallback: CIFP STAR entry fix (when the navlog carries no DSC stage).
-  if (anchor_id.empty()) {
+  // Anchor = the FIRST STAR fix (the STAR entry fix, which is the last en-route /
+  // FPL fix). ARRIVAL must begin when the aircraft reaches the first STAR fix --
+  // NOT earlier at the top-of-descent fix and NOT at a TMA boundary. Several TMAs
+  // are crossed while flying a STAR and none of them is the arrival (user
+  // 2026-07-14); this mirrors APPROACH firing at the IAF, for consistency. The
+  // CIFP STAR entry fix is authoritative.
+  {
     StarEntryResult se;
     if (find_star_entry(ctx.cifp_dir, ofp, se) && (se.lat != 0.0 || se.lon != 0.0)) {
       anchor_id  = se.ident;
       anchor_lat = se.lat;
       anchor_lon = se.lon;
+    }
+  }
+  // Fallback: first navlog fix planned as descent (DSC) when no STAR entry
+  // resolves (e.g. no STAR assigned / direct arrival).
+  if (anchor_id.empty()) {
+    for (const auto &f : ofp.navlog) {
+      if (f.stage == "DSC" && (f.lat != 0.0 || f.lon != 0.0)) {
+        anchor_id  = f.ident;
+        anchor_lat = f.lat;
+        anchor_lon = f.lon;
+        break;
+      }
     }
   }
 
@@ -5621,25 +6136,11 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
         d_dest);
   }
 
-  // Also advance on destination-TMA entry (openair), independent of the fix
-  // anchor. An off-course aircraft can enter the TMA without crossing the STAR
-  // entry fix -- and the 40 NM fallback above only applies when NO anchor exists
-  // (else-if), so with a resolvable-but-missed anchor DESCENT stalled and the
-  // approach handoff never fired (LFLP->LFMN jump-to-ENR 2026-07-13: sat in the
-  // NICE TMA at FL120 with no instruction). TMA class only (not CTR -- a CTR is
-  // the broad ACC sector we're already under in descent). Query 1000 ft lower so
-  // a TMA the aircraft is about to drop into still matches (mirrors poll_arrival).
-  if (!reached_arrival && openair_db::ready()) {
-    constexpr int kArrivalCeilingBufferFt = 1000;
-    const openair_db::AirspaceEntry enc = openair_db::find_enclosing(
-        ctx.latitude, ctx.longitude,
-        static_cast<int>(ctx.altitude_ft_msl) - kArrivalCeilingBufferFt);
-    if (enc.ac_class == openair_db::AirspaceClass::TMA) {
-      reached_arrival = true;
-      logging::info("IFR descent -> arrival: destination TMA entry '%s'",
-                    enc.name.c_str());
-    }
-  }
+  // (Removed the close-in TMA safety net: it fired at ~18 NM to dest and
+  // preempted the STAR-entry anchor, setting ARRIVAL ~10 NM before SALEV
+  // (LFLP 2026-07-14). The STAR-entry anchor above -- reached within 5 NM of the
+  // entry fix OR once closer to dest than the entry fix is -- is the sole
+  // trigger; the 40 NM no-anchor fallback covers the no-STAR case.)
 
   // NOTE: DESCENT->ARRIVAL and the Approach handoff both stay ALTITUDE-GATED
   // (find_enclosing above / in poll_arrival). Correct ATC model (user 2026-07-13):
@@ -5670,6 +6171,7 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
 
   if (atc_state_machine::get_state() != AS::IFR_ARRIVAL) {
     s_enroute_approach_handoff_issued = false;
+    s_arrival_freq_handoff_label.clear();
     s_enroute_app_check_sec = 0.0f;
     s_arrival_timer = 0.0f;
     return false;
@@ -5700,67 +6202,102 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
   // indexed. Without airspace data, fall back to the classic 50 NM handoff.
   // A 20 s minimum dwell lets the descent-clearance readback complete first.
   openair_db::AirspaceEntry enc_arrival;
-  bool fire_handoff = false;
+  bool inside_tma = false;
   s_enroute_app_check_sec -= dt;
   if (s_enroute_app_check_sec <= 0.0f) {
     s_enroute_app_check_sec = 1.0f;
     const bool have_airspace = openair_db::ready();
     if (have_airspace) {
-      // Arrival descent buffer: on the STAR the aircraft is descending INTO the
-      // destination TMA, so treat it as "entering" when it is within
-      // kArrivalCeilingBufferFt ABOVE the TMA ceiling (about to drop in). Query
-      // openair as if the aircraft were that much lower so a TMA whose ceiling
-      // sits just below still matches. Without this, sitting just above the
-      // ceiling left the aircraft "above every TMA" and no Approach handoff
-      // fired -- e.g. FL115 on ABDI8R with a high QNH giving ~11870 ft MSL vs
-      // the NICE TMA's 11500 ft ceiling, so Marseille never handed off to Nice
-      // Approach (LFLP->LFMN 2026-07-12). Only advances the ONE-SHOT arrival
-      // handoff; never affects separation.
+      // Query openair 1000 ft LOWER so a TMA the aircraft is about to drop into
+      // still matches (mirrors poll_descent). find_enclosing returns the
+      // INNERMOST enclosing volume, so near the IAF it resolves the terminal TMA
+      // (CHAMBERY) rather than the big outer one (GENEVA) -- which is exactly what
+      // makes Stage B below hand off to the correct terminal controller.
       constexpr int kArrivalCeilingBufferFt = 1000;
       enc_arrival = openair_db::find_enclosing(
           ctx.latitude, ctx.longitude,
           static_cast<int>(ctx.altitude_ft_msl) - kArrivalCeilingBufferFt);
-      if (enc_arrival.ac_class == openair_db::AirspaceClass::TMA ||
-          enc_arrival.ac_class == openair_db::AirspaceClass::CTR) {
-        fire_handoff = true;
-        logging::info(
-            "IFR arrival: TMA/CTR entry '%s' floor=%dft ceil=%dft"
-            " at %.0fft MSL -- handoff to Approach",
-            enc_arrival.name.c_str(),
-            enc_arrival.floor_ft, enc_arrival.ceiling_ft,
-            ctx.altitude_ft_msl);
-      }
+      inside_tma = (enc_arrival.ac_class == openair_db::AirspaceClass::TMA ||
+                    enc_arrival.ac_class == openair_db::AirspaceClass::CTR);
     }
-    if (!fire_handoff && s_arrival_timer > 20.0f) {
-      auto ofp = simbrief_ofp::get();
-      if (ofp.valid && !ofp.navlog.empty()) {
-        double dist_nm = traffic_geometry::distance_nm(
-            ctx.latitude, ctx.longitude,
-            ofp.navlog.back().lat, ofp.navlog.back().lon);
-        // With airspace data present the TMA crossing above is authoritative;
-        // only a close-in safety net applies. Without it, the 50 NM fallback.
-        const double trigger_nm = have_airspace ? 12.0 : 50.0;
-        if (dist_nm <= trigger_nm) {
-          fire_handoff = true;
-          logging::info("IFR arrival: %s (%.1f NM, t=%.0fs) -- handoff to Approach",
-                        have_airspace ? "close-in safety net" : "50 NM fallback (no airspace data)",
-                        dist_nm, s_arrival_timer);
+
+    // ETA to the STAR-terminating IAF (e.g. PIRUV) -- the gate for ENTERING the
+    // APPROACH phase. Same IAF selection as the cleared-approach trigger: the
+    // no-STAR direct IAF, else the STAR's last fix. <0 = not resolvable
+    // (AFIS / no-STAR field -> fall back to the legacy TMA/distance trigger).
+    double iaf_eta_s = -1.0;
+    int iaf_route_idx_local = -1;
+    {
+      std::string iaf = s_no_star_direct_iaf;
+      if (iaf.empty())
+        iaf = cifp_reader::star_last_fix(ctx.cifp_dir, s_assigned_dest_icao,
+                                         s_assigned_star_name);
+      if (!iaf.empty()) {
+        for (int i = std::max(0, s_route_fix_idx);
+             i < static_cast<int>(s_route_fixes.size()); ++i) {
+          const auto &f = s_route_fixes[i];
+          if (f.ident == iaf && (f.lat != 0.0 || f.lon != 0.0)) {
+            const double gs = ctx.groundspeed_kts > 40.0f
+                                  ? static_cast<double>(ctx.groundspeed_kts)
+                                  : 120.0;
+            iaf_eta_s = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
+                                                      f.lat, f.lon) /
+                        gs * 3600.0;
+            iaf_route_idx_local = i;
+            break;
+          }
         }
       }
     }
-  }
 
-  if (fire_handoff) {
-    if (build_approach_handoff(ctx, callsign, out_text, enc_arrival)) {
-      rb(false);
-      return true;
+    // Stage B condition: enter APPROACH within ~90 s of the IAF. Without a
+    // resolvable IAF (AFIS / no-STAR) fall back to the legacy trigger (TMA entry,
+    // or the 12/50 NM distance net) so those fields still transition.
+    bool enter_approach = false;
+    if (iaf_eta_s >= 0.0) {
+      // Enter only when the route TRACKER has sequenced to within 2 fixes of the
+      // IAF AND it is straight-line close. The guard MUST be tracker-index based,
+      // NOT distance: on the looping SALE3P, COLLO (idx 8, an IAF overflown
+      // mid-STAR) sits ~2 NM from PIRUV (idx 12) geographically, so a DISTANCE
+      // "within 2 fixes" test fired APPROACH at COLLO -- 4 fixes early (LFLP
+      // 2026-07-16). Only the SEQUENCE distinguishes them. The tracker is kept
+      // reliable through wide/direct flying by the resync in poll_route_tracker.
+      enter_approach = (iaf_eta_s <= 90.0 && iaf_route_idx_local >= 0 &&
+                        s_route_fix_idx >= iaf_route_idx_local - 2);
+    } else if (inside_tma) {
+      enter_approach = true;
+    } else if (s_arrival_timer > 20.0f) {
+      auto ofp = simbrief_ofp::get();
+      if (ofp.valid && !ofp.navlog.empty()) {
+        const double dist_nm = traffic_geometry::distance_nm(
+            ctx.latitude, ctx.longitude, ofp.navlog.back().lat,
+            ofp.navlog.back().lon);
+        enter_approach = dist_nm <= (have_airspace ? 12.0 : 50.0);
+      }
     }
-    // No dedicated Approach controller — transition silently so poll_approach
-    // handles the local INFO/Tower/AFIS handoff at the FAF.
-    s_enroute_approach_handoff_issued = true;
-    s_enroute_approach_freq_mhz = 0.0f;
-    atc_state_machine::set_state(AS::IFR_APPROACH_CONTACT);
-    logging::info("IFR arrival: no Approach controller -- current sector handles approach to established");
+
+    if (enter_approach) {
+      logging::info("IFR arrival: entering APPROACH (IAF eta=%.0fs, enc='%s')",
+                    iaf_eta_s, enc_arrival.name.c_str());
+      if (build_approach_handoff(ctx, callsign, out_text, enc_arrival,
+                                 /*enter_approach=*/true)) {
+        rb(false);
+        return true; // caller only speaks when out_text is non-empty
+      }
+      // No dedicated Approach controller -- silent transition so poll_approach
+      // drives the local INFO/Tower/AFIS handoff at the FAF.
+      s_enroute_approach_handoff_issued = true;
+      s_enroute_approach_freq_mhz = 0.0f;
+      atc_state_machine::set_state(AS::IFR_APPROACH_CONTACT);
+      logging::info("IFR arrival: no Approach controller -- current sector handles approach to established");
+      return false;
+    }
+
+    // (Stage A removed: the intermediate TMA frequency handoff is now done by the
+    // boundary-driven sector-change handler (poll_acc_sector_change), which hands
+    // off to GENEVA/CHAMBERY when the aircraft CROSSES the TMA boundary -- not at
+    // a route point. That's the ONLY place frequency handoffs fire now, so they
+    // are purely boundary-based (LFLP 2026-07-15).)
   }
 
   return false;
@@ -5830,6 +6367,8 @@ int current_cleared_alt_ft() {
   if (s_sid_step1_alt_ft > 0) return s_sid_step1_alt_ft;
   return 0;
 }
+
+int current_speed_restriction_kt() { return s_last_speed_limit_kt; }
 
 // ── Helpers for poll_approach ─────────────────────────────────────────────
 
@@ -6177,6 +6716,49 @@ std::string poll_route_tracker(const xplane_context::XPlaneContext &ctx) {
   if (s_route_tracker_tick < 1.0f) return {};
   s_route_tracker_tick = 0.0f;
 
+  // RESYNC (user pb2, LFLP 2026-07-16): if the aircraft flew WIDE of the current
+  // fix (never entered its 1.5 NM capture zone) and then rejoined the STAR at a
+  // LATER fix, jump the tracker forward to whatever route fix it is now flying over
+  // (within ~2 NM) -- do not stay frozen on the skipped fix. The tracker froze at
+  // PINOT after a post-SALEV divergence, so the whole ARRIVAL->APPROACH gate (which
+  // reads s_route_fix_idx) stalled and Chambery never cleared the approach. Scan
+  // from the current index forward and take the FURTHEST fix within capture so all
+  // skipped fixes are passed at once.
+  {
+    int resync_idx = -1;
+    for (int i = s_route_fix_idx; i < static_cast<int>(s_route_fixes.size()); ++i) {
+      const auto &fi = s_route_fixes[i];
+      if (fi.lat == 0.0 && fi.lon == 0.0)
+        continue;
+      // Do NOT let a geographically-clustered APPROACH fix hijack the resync while
+      // still on the STAR: on the LFLP RNAV, LP403 sits ~2 NM from COLLO, so the
+      // resync jumped the tracker PAST the IAF (PIRUV) -- which broke the STAR
+      // descent (targeted LP402 5000 instead of the FL090 step) AND the approach-
+      // clearance anchor (LFLP 2026-07-16 regression). Approach-proc fixes only
+      // become resync targets once the approach is actually cleared.
+      if (fi.is_approach_proc && !s_approach_cleared_issued)
+        continue;
+      if (traffic_geometry::distance_nm(ctx.latitude, ctx.longitude, fi.lat,
+                                        fi.lon) <= 2.0)
+        resync_idx = i; // keep the furthest fix currently within capture
+    }
+    if (resync_idx > s_route_fix_idx) {
+      const auto &rf = s_route_fixes[resync_idx];
+      const int skipped = resync_idx - s_route_fix_idx;
+      const int nxt = resync_idx + 1;
+      std::string ni = (nxt < static_cast<int>(s_route_fixes.size()))
+                           ? s_route_fixes[nxt].ident
+                           : "end of route";
+      char rbuf[176];
+      std::snprintf(rbuf, sizeof(rbuf),
+                    "Track: resync to %s (skipped %d), next: %s",
+                    rf.ident.c_str(), skipped, ni.c_str());
+      logging::info("[route] %s", rbuf);
+      s_route_fix_idx = resync_idx + 1; // advance past the overflown fix
+      return rbuf;
+    }
+  }
+
   const auto &fix = s_route_fixes[s_route_fix_idx];
 
   // Skip fixes whose position is unknown.
@@ -6411,12 +6993,12 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
   // When the enclosing TRACON/CTR changes or disappears while in approach
   // descent, the current controller (e.g. Melun) hands off to the next sector
   // controller (e.g. Paris FIR Information) or to the destination TOWER/AFIS.
-  // Uses the same 30-second polling as en-route sector-change sub-phase 1.5.
+  // Uses the same 15-second polling as en-route sector-change sub-phase 1.5.
   if (state == AS::IFR_APPROACH_DESCENT && !s_approach_tower_handed_off &&
       airspace_db::enabled()) {
     s_approach_sector_check_sec -= dt;
     if (s_approach_sector_check_sec <= 0.0f) {
-      s_approach_sector_check_sec = 30.0f;
+      s_approach_sector_check_sec = 15.0f;
 
       // Approach-phase pick: lower-ceiling tiebreak drives Geneva -> Chambery
       // as the aircraft descends below FL115 (both floor 1000; plain pick_next
@@ -6439,6 +7021,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       // fragment->controller path as the initial handoff, trying TRACON then TWR
       // (Chambery has no TRACON in the data -> resolves to Chambery TWR 118.30).
       bool force_forward = false;
+      std::string forced_label; // spoken label when freq comes via the facility link
       bool stay = false;      // openair says: still in current sector -> no handoff
       int  new_ceiling = 0;   // openair ceiling of the sector we hand off to
       if (openair_db::ready()) {
@@ -6452,13 +7035,34 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
             if (p != std::string::npos) { frag = frag.substr(0, p); break; }
           }
           while (!frag.empty() && frag.back() == ' ') frag.pop_back();
+          // Freq via the FACILITY link so a terminal field whose TRACON is labelled
+          // differently still resolves: CHAMBERY (twr) -> facility LFLB -> the LFLB
+          // TRACON 121.205/123.70. Keep the spoken label as the field ("Chambery
+          // Approach"), never the tracon's name ("Lyon"). Was handing off on the
+          // Chambery TWR 118.30 (LFLP 2026-07-15).
           const airspace_db::Controller *oc = nullptr;
           if (!frag.empty()) {
             oc = airspace_db::find_by_role_name_contains(
                 airspace_db::ControllerRole::TRACON, frag);
-            if (!oc)
-              oc = airspace_db::find_by_role_name_contains(
-                  airspace_db::ControllerRole::TWR, frag);
+            if (oc && !oc->freqs_khz.empty()) {
+              forced_label = controller_label_for(oc) + " Approach";
+            } else {
+              const airspace_db::Controller *named =
+                  airspace_db::find_by_role_name_contains(
+                      airspace_db::ControllerRole::TWR, frag);
+              if (named && !named->facility_id.empty()) {
+                const airspace_db::Controller *fact =
+                    airspace_db::find_by_role_facility(
+                        airspace_db::ControllerRole::TRACON, named->facility_id);
+                if (fact && !fact->freqs_khz.empty())
+                  oc = fact; // freq source = LFLB tracon (121.205/123.70)
+              }
+              if ((!oc || oc->freqs_khz.empty()) && named &&
+                  !named->freqs_khz.empty())
+                oc = named; // last resort: the tower itself
+              if (named)
+                forced_label = controller_label_for(named) + " Approach";
+            }
           }
           if (oc && !oc->freqs_khz.empty()) {
             const uint32_t of = oc->freqs_khz.front();
@@ -6495,14 +7099,34 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
 
       if (best) {
         uint32_t new_freq_khz = best->freqs_khz.front();
+        const float acom_seed =
+            (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
         if (s_approach_sector_freq_khz == 0) {
-          // Seed silently: pilot already on this sector's frequency.
-          s_approach_sector_freq_khz = new_freq_khz;
-          s_approach_sector_ceiling_ft = new_ceiling; // openair ceiling (0 if atc.dat pick)
-          logging::info("[approach] sector baseline: %s %.3f MHz floor=%dft",
-                        best->name.c_str(),
-                        static_cast<float>(new_freq_khz) / 1000.0f,
-                        best->floor_ft);
+          // Baseline = the sector the pilot is ACTUALLY on (their active COM), NOT
+          // the resolved inner TMA. After the silent ARRIVAL->APPROACH flip the
+          // pilot may still be on the OUTER sector (Geneva) while find_enclosing
+          // already resolves the INNER TMA (Chambery). Seeding the inner freq here
+          // marked the Geneva->Chambery handoff "done" without it happening,
+          // leaving the pilot stuck on Geneva which then wrongly cleared the
+          // approach (LFLP 2026-07-16). Seeding the current freq lets the
+          // change-detection below fire the real handoff on the next poll.
+          if (std::fabs(acom_seed - static_cast<float>(new_freq_khz) / 1000.0f) <
+              0.005f) {
+            s_approach_sector_freq_khz = new_freq_khz;
+            s_approach_sector_ceiling_ft = new_ceiling;
+            logging::info("[approach] sector baseline: %s %.3f MHz floor=%dft",
+                          best->name.c_str(),
+                          static_cast<float>(new_freq_khz) / 1000.0f,
+                          best->floor_ft);
+          } else {
+            s_approach_sector_freq_khz =
+                static_cast<uint32_t>(std::lround(acom_seed * 1000.0f));
+            s_approach_sector_ceiling_ft = 0; // outer sector -> inner always wins
+            logging::info("[approach] sector baseline = current freq %.3f MHz "
+                          "(inner %s %.3f pending handoff)",
+                          acom_seed, best->name.c_str(),
+                          static_cast<float>(new_freq_khz) / 1000.0f);
+          }
         } else if (new_freq_khz != s_approach_sector_freq_khz &&
                    (force_forward || [&] {
                      // "Lowest enclosing volume in charge": do NOT hand off
@@ -6539,7 +7163,10 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           // Sector changed to another controller (e.g. Melun → Paris FIR Info).
           s_approach_sector_freq_khz = new_freq_khz;
           s_approach_sector_ceiling_ft = new_ceiling; // track for the next more-terminal test
-          std::string new_label = controller_label_for(best);
+          // Use the facility-link label ("Chambery Approach") when set, so the
+          // handoff isn't spoken as the differently-named tracon ("Lyon").
+          std::string new_label =
+              !forced_label.empty() ? forced_label : controller_label_for(best);
           float new_mhz = static_cast<float>(new_freq_khz) / 1000.0f;
           // Defer label switch — see s_pending_controller_label comment.
           s_pending_controller_label = new_label;
@@ -6686,8 +7313,25 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
   // approach-proc fix" fired it one fix PAST the IAF (LFMN R22LZ: at MN261
   // instead of approaching MUS). Time-based (eta), so it scales with GS. A
   // descent is folded in only if the next fix would otherwise be busted.
+  // FREQUENCY gate (LFLP 2026-07-17 regression): the clearance must be spoken by
+  // the controller the pilot is ACTUALLY on -- not just resolved from the airspace.
+  // on_destination_terminal() confirms the aircraft is in the terminal TMA
+  // (Chambery), but the aircraft descends INTO that airspace while still on the
+  // OUTER freq (Geneva) between the "contact Chambery" handoff and the pilot's
+  // switch -- so Geneva was speaking "cleared RNAV approach" on 119.530. Require
+  // the active COM to match the terminal approach freq (set by the handoff). When
+  // no approach freq is latched yet (< 100), stay permissive.
+  const float active_com_clr =
+      (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
+  const bool on_terminal_freq =
+      s_enroute_approach_freq_mhz < 100.0f ||
+      std::fabs(active_com_clr - s_enroute_approach_freq_mhz) < 0.010f;
   if (!s_approach_cleared_issued && !dest_is_afis && out_text &&
-      !s_route_fixes.empty()) {
+      !s_route_fixes.empty() && on_destination_terminal(ctx) && on_terminal_freq) {
+    // Option B: only fire once the aircraft is on the destination's TERMINAL
+    // controller (in the terminal TMA -- e.g. Chambery), never from an outer TMA
+    // (Geneva). Combined with the on-terminal gate, the eta window below issues it
+    // shortly after the terminal check-in, >=3 NM before the IAF (LFLP 2026-07-15).
     // Anchor the "cleared approach" at the SELECTED IAF -- the STAR-terminating
     // IAF (star_last_fix) or the no-STAR direct IAF -- NOT the first approach-proc
     // route fix. On an approach with several IAFs (LFLP R04-Z: COLLO/PIRUV/TOLNA)
@@ -6722,7 +7366,17 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         const double eta = traffic_geometry::distance_nm(
                                ctx.latitude, ctx.longitude, iaf.lat, iaf.lon) /
                            gs * 3600.0;
-        if (eta <= 60.0) {
+        // On-terminal already gates this to the Chambery TMA; fire across a wider
+        // window (<=180 s, ~10 NM) so it lands right after the terminal check-in
+        // rather than waiting to ~3 NM (Option B). Still >=3 NM before the IAF.
+        // Sequence guard (same as the ARRIVAL->APPROACH trigger): the route TRACKER
+        // must be within 2 fixes of the IAF -- SEQUENCE, not distance. On the
+        // looping SALE3P, COLLO sits ~2 NM from PIRUV but 4 fixes earlier, so a
+        // distance test fired the clearance at COLLO (LFLP 2026-07-16). The resync
+        // keeps the tracker reliable through wide flying.
+        logging::info("[dbg appclr] eta=%.0f route_idx=%d iaf_idx=%d (need>=%d) "
+                      "on_term=1", eta, s_route_fix_idx, iaf_idx, iaf_idx - 2);
+        if (eta <= 180.0 && s_route_fix_idx >= iaf_idx - 2) {
           const std::string phrase = approach_clearance_phrase(ctx);
           if (!phrase.empty()) {
             s_approach_cleared_issued = true;
@@ -6824,8 +7478,8 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       if (!at_faf && (s_approach_faf.lat != 0.0 || s_approach_faf.lon != 0.0)) {
         double dist_nm = traffic_geometry::distance_nm(
             ctx.latitude, ctx.longitude, s_approach_faf.lat, s_approach_faf.lon);
-        logging::debug("[approach] faf dist=%.1f NM route=%d/%d",
-                       dist_nm, s_route_fix_idx, s_faf_route_idx);
+        logging::info("[approach] faf dist=%.1f NM route=%d/%d",
+                      dist_nm, s_route_fix_idx, s_faf_route_idx);
         at_faf = (dist_nm < 2.0);
       }
     } else if (s_approach_faf.lat != 0.0 || s_approach_faf.lon != 0.0) {
@@ -6940,11 +7594,14 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           std::snprintf(buf, sizeof(buf),
                         "%s, contact %s on %d.%03d, %s.",
                         cs.c_str(), ctrl_label.c_str(), khz / 1000, khz % 1000, final_call);
-          // Update speaker label + pending handoff freq so the next TTS
-          // response is spoken as "Reims Prunay Information:" (not still
-          // "Melun:"), and the sector-checkin ack + handoff-reissue paths
-          // know which frequency the pilot must switch to.
-          s_current_controller_label = ctrl_label;
+          // Set the label as PENDING (not current): the handoff is spoken by the
+          // CURRENT controller (Chambery Approach) and the label swaps to Tower only
+          // when the pilot actually reaches 118.200 (deferred-swap promoter). Setting
+          // s_current here made the handoff read "Tower:" while still on 121.205, and
+          // the wrong-freq reminder said "you are still with Tower, contact the next
+          // controller on 118.200" instead of "still with Chambery Approach, contact
+          // Tower on 118.200" (LFLP 2026-07-17).
+          s_pending_controller_label = ctrl_label;
           s_pending_handoff_freq_mhz = tower_mhz;
           s_sector_checkin_pending   = true;
         } else {

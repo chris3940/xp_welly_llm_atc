@@ -1,6 +1,7 @@
 /*
  * xp_wellys_atc - AI-powered ATC voice communication for X-Plane 12
  * Copyright (C) 2026 thWelly & Claude (Anthropic)
+ * Copyright (C) 2026 Christopher P. Potter (Linux port + IFR extensions)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

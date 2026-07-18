@@ -99,6 +99,12 @@ const Controller *find_by_role_near(ControllerRole role, double lat, double lon,
 const Controller *find_by_role_name_contains(ControllerRole role,
                                              const std::string &fragment);
 
+// Find a controller of a given role at a specific FACILITY (ICAO), independent of
+// its display name (a facility's approach can be labelled differently from its
+// TMA/tower). Returns the first match that has frequencies, or nullptr.
+const Controller *find_by_role_facility(ControllerRole role,
+                                        const std::string &facility_id);
+
 } // namespace airspace_db
 
 #endif // AIRSPACE_DB_HPP

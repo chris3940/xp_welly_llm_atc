@@ -363,6 +363,16 @@ install-data:
 	@# in-plugin downloader has a target dir on first launch even
 	@# before the user has downloaded anything.
 	@mkdir -p "$(PLUGIN_DIR)/Resources/models"
+	@# Hand-maintained overlays (additional airspace + per-airport overrides).
+	@# Copied when present; repo is the source of truth so they overwrite.
+	@if [ -f Resources/airspace+.txt ]; then \
+	    cp "Resources/airspace+.txt" "$(PLUGIN_DIR)/Resources/"; \
+	    echo "Installed: $(PLUGIN_DIR)/Resources/airspace+.txt"; \
+	fi
+	@if [ -f Resources/airport+.json ]; then \
+	    cp "Resources/airport+.json" "$(PLUGIN_DIR)/Resources/"; \
+	    echo "Installed: $(PLUGIN_DIR)/Resources/airport+.json"; \
+	fi
 	@mkdir -p "$(PLUGIN_DIR)/data"
 	@if [ ! -f "$(PLUGIN_DIR)/data/settings.json" ]; then \
 	    cp data/settings.json "$(PLUGIN_DIR)/data/"; \
@@ -463,6 +473,9 @@ endif
 	    echo "WARNING: espeak-ng-data missing — run 'make build' first"; \
 	fi
 	@mkdir -p "$(DIST_STAGE)/Resources/models"
+	@# ── Hand-maintained overlays (additional airspace + per-airport overrides) ──
+	@[ -f Resources/airspace+.txt ] && cp "Resources/airspace+.txt" "$(DIST_STAGE)/Resources/" || true
+	@[ -f Resources/airport+.json ] && cp "Resources/airport+.json" "$(DIST_STAGE)/Resources/" || true
 	@# ── Data files ──
 	@mkdir -p "$(DIST_STAGE)/data/atc_profiles/eu/vfr" \
 	          "$(DIST_STAGE)/data/atc_profiles/eu/ifr" \

@@ -774,19 +774,42 @@ apply_post_transition_hooks(const intent_parser::PilotMessage &msg,
           mismatches.end());
 
       if (!mismatches.empty()) {
-        // First mismatch drives the correction. Prefix with callsign.
-        const std::string &cs = g_state.session_callsign_;
-        resp.text = (cs.empty() ? "" : cs + ", ") + mismatches[0].correction +
-                    ".";
-        resp.next_state     = g_state.state_;  // stay in current state
-        resp.requires_readback = true;         // re-arm the timer
-        logging::info(
-            "Readback error: field=%s expected=%s stated=%s (ok_fields=%zu)",
-            mismatches[0].field.c_str(), mismatches[0].expected.c_str(),
-            mismatches[0].stated.empty() ? "(missing)"
-                                         : mismatches[0].stated.c_str(),
-            g_state.readback_ok_fields_.size());
-        return;  // do NOT clear readback state
+        // Anti-loop: after 2 failed pilot attempts of the SAME clearance, ACCEPT it
+        // rather than loop "negative, readback" forever. Voxtral garbles NUMBERS
+        // (210->110) that no context bias or CONTAINS check can recover, and with
+        // the serialize gate a stuck readback blocks every following clearance
+        // (LFLP 2026-07-17). The pilot has clearly acknowledged; one correction is
+        // fair, then assume STT garble and move on.
+        static std::string s_rb_last_cl;
+        static int s_rb_fails = 0;
+        if (s_rb_last_cl != g_state.last_clearance_text_) {
+          s_rb_last_cl = g_state.last_clearance_text_;
+          s_rb_fails = 0;
+        }
+        ++s_rb_fails;
+        if (s_rb_fails < 2) {
+          // First mismatch drives the correction. Prefix with callsign.
+          const std::string &cs = g_state.session_callsign_;
+          resp.text = (cs.empty() ? "" : cs + ", ") + mismatches[0].correction +
+                      ".";
+          resp.next_state     = g_state.state_;  // stay in current state
+          resp.requires_readback = true;         // re-arm the timer
+          logging::info(
+              "Readback error: field=%s expected=%s stated=%s (ok_fields=%zu)",
+              mismatches[0].field.c_str(), mismatches[0].expected.c_str(),
+              mismatches[0].stated.empty() ? "(missing)"
+                                           : mismatches[0].stated.c_str(),
+              g_state.readback_ok_fields_.size());
+          return;  // do NOT clear readback state
+        }
+        logging::info("Readback accepted after %d attempts (STT garble assumed): "
+                      "field=%s expected=%s stated=%s",
+                      s_rb_fails, mismatches[0].field.c_str(),
+                      mismatches[0].expected.c_str(),
+                      mismatches[0].stated.empty() ? "(missing)"
+                                                   : mismatches[0].stated.c_str());
+        s_rb_fails = 0;
+        // fall through -> clear the readback state (accept)
       }
     }
     bump_gen();

@@ -1,5 +1,12 @@
 /*
  * xp_wellys_atc - headless IFR test CLI
+ * Copyright (C) 2026 thWelly & Claude (Anthropic)
+ * Copyright (C) 2026 Christopher P. Potter (Linux port + IFR extensions)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
  * REPL for IFR approach simulation. The aircraft starts near the STAR
  * entry and the user can fly it step by step (fly/goto/poll) while
@@ -19,6 +26,7 @@
 #include "atc/intent_parser.hpp"
 #include "core/xplane_context.hpp"
 #include "data/cifp_reader.hpp"
+#include "data/openair_db.hpp"
 #include "data/simbrief_ofp.hpp"
 #include "persistence/settings.hpp"
 
@@ -28,6 +36,7 @@
 #include <cstdio>
 #include <exception>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -46,6 +55,7 @@ using xplane_context::FrequencyType;
 
 // Running simulated time (seconds). Advanced by poll/fly commands.
 static double g_now_secs = 0.0;
+
 
 // ── String helpers ────────────────────────────────────────────────────
 
@@ -119,14 +129,36 @@ void run_polls(float dt) {
     }
   }
 
+  // Log every ATC state change with position so the replay shows exactly WHERE
+  // DESCENT->ARRIVAL->APPROACH fired (relative to the STAR fixes / IAF).
+  static std::string s_last_state;
+  auto log_state = [&]() {
+    const char *nm = atc_state_machine::state_name(atc_state_machine::get_state());
+    if (nm && s_last_state != nm) {
+      std::printf(">> STATE %-20s -> %-22s @ lat=%.4f lon=%.4f pa=%.0fft t=%.0fs\n",
+                  s_last_state.empty() ? "(init)" : s_last_state.c_str(), nm,
+                  ctx.latitude, ctx.longitude,
+                  static_cast<double>(ctx.pressure_alt_ft), g_now_secs);
+      s_last_state = nm;
+    }
+  };
+  log_state();
+
+  // Order mirrors atc_session::update(): sid -> profile enforcement -> enroute
+  // -> descent -> arrival -> approach.
   std::string out;
+  bool rb = false;
   if (engine::poll_departure_handoff(ctx, dt, &out)) { emit("dep", out); out.clear(); }
   if (engine::poll_sid_climb(ctx, dt, &out))         { emit("sid", out); out.clear(); }
+  if (engine::poll_profile_enforcement(ctx, dt, &out, &rb)) { emit("profile", out); out.clear(); }
   if (engine::poll_enroute(ctx, dt, &out))           { emit("enroute", out); out.clear(); }
+  if (engine::poll_descent(ctx, dt, &out, &rb))      { emit("descent", out); out.clear(); }
+  if (engine::poll_arrival(ctx, dt, &out, &rb))      { emit("arrival", out); out.clear(); }
   if (engine::poll_approach(ctx, dt, &out))          { emit("approach", out); out.clear(); }
   if (engine::poll_approach_alignment(ctx, dt, &out)){ emit("align", out); out.clear(); }
   if (engine::poll_readback_reminder(ctx, g_now_secs, &out)) { emit("readback", out); out.clear(); }
   if (engine::poll_go_around(ctx, g_now_secs, &out)) { emit("go_around", out); out.clear(); }
+  log_state();
 }
 
 // ── Command handlers ──────────────────────────────────────────────────
@@ -174,6 +206,8 @@ void cmd_set(std::string &callsign, const std::string &rest) {
       ctx.groundspeed_kts = std::stof(value);
     } else if (field == "vs") {
       ctx.vertical_speed_fpm = std::stof(value);
+    } else if (field == "cruise") {
+      ctx.ifr_cruise_alt_ft = static_cast<int>(std::stof(value));
     } else if (field == "cifp_dir") {
       ctx.cifp_dir = value;
     } else if (field == "dest") {
@@ -219,12 +253,25 @@ void cmd_set(std::string &callsign, const std::string &rest) {
       settings::set_atc_profile(up);
       atc_templates::reload();
       flight_phase::reload();
+    } else if (field == "navlog_clear") {
+      auto ofp = simbrief_ofp::get();
+      ofp.navlog.clear();
+      simbrief_ofp::set(ofp);
     } else if (field == "navlog_fix") {
-      // Append a navlog fix: set navlog_fix ABDIL
+      // Rich form (replay): set navlog_fix <ident> <lat> <lon> <alt_ft> <stage> <sidstar0|1>
+      // Minimal form still works: set navlog_fix ABDIL
       auto ofp = simbrief_ofp::get();
       simbrief_ofp::NavlogFix f;
-      f.ident = value;
-      f.is_sid_star = true;
+      std::istringstream iss(value);
+      std::string stage;
+      int sidstar = 0;
+      iss >> f.ident;
+      if (iss >> f.lat >> f.lon >> f.alt_ft >> stage >> sidstar) {
+        f.stage = stage;
+        f.is_sid_star = (sidstar != 0);
+      } else {
+        f.is_sid_star = true;
+      }
       ofp.navlog.push_back(f);
       simbrief_ofp::set(ofp);
     } else if (field == "approach_desig") {
@@ -346,6 +393,19 @@ void cmd_jump(const std::string &rest) {
   } else {
     std::fprintf(stderr, "Usage: jump approach|enroute <alt_ft>|predep\n");
   }
+}
+
+void cmd_enc() {
+  auto &ctx = xplane_context::g_cli_ctx;
+  const int alt = static_cast<int>(ctx.altitude_ft_msl);
+  auto inner = openair_db::find_enclosing(ctx.latitude, ctx.longitude, alt);
+  std::printf("find_enclosing @ %.4f,%.4f %d ft -> INNERMOST '%s' class=%d floor=%d ceil=%d\n",
+              ctx.latitude, ctx.longitude, alt, inner.name.c_str(),
+              static_cast<int>(inner.ac_class), inner.floor_ft, inner.ceiling_ft);
+  auto all = openair_db::find_all_enclosing(ctx.latitude, ctx.longitude, alt);
+  for (const auto &e : all)
+    std::printf("   enclosing: '%s' class=%d floor=%d ceil=%d\n", e.name.c_str(),
+                static_cast<int>(e.ac_class), e.floor_ft, e.ceiling_ft);
 }
 
 void cmd_state(const std::string &callsign) {
@@ -486,6 +546,8 @@ int run(xplane_context::XPlaneContext ctx, std::string callsign) {
       cmd_goto(rest);
     else if (cmd == "jump")
       cmd_jump(rest);
+    else if (cmd == "enc")
+      cmd_enc();
     else if (cmd == "state")
       cmd_state(callsign);
     else if (cmd == "reset")

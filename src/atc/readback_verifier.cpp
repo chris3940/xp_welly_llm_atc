@@ -1,6 +1,7 @@
 /*
  * xp_wellys_atc - AI-powered ATC voice communication for X-Plane 12
  * Copyright (C) 2026 thWelly & Claude (Anthropic)
+ * Copyright (C) 2026 Christopher P. Potter (Linux port + IFR extensions)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -45,6 +46,11 @@ static void replace_word(std::string &s, const std::string &from,
 // "niner zero" → "9 0",  "decimal" → ".",  "fife" → "5", etc.
 static std::string normalize_phonetics(const std::string &raw) {
   std::string s = to_lower(raw);
+  // Strip commas so a thousands-separated number reads back correctly: Voxtral
+  // renders "5000" as "5,000", which split the digits and made the alt extractor
+  // report (missing) -> false "negative, 5000 feet" on a CORRECT readback (LFLP
+  // 2026-07-17). Removing the ',' char is safe -- commas carry no meaning here.
+  s.erase(std::remove(s.begin(), s.end(), ','), s.end());
   // Order matters: longer words first to avoid partial matches.
   static const std::pair<const char *, const char *> kMap[] = {
       {"niner",   "9"}, {"seven",   "7"}, {"eight",   "8"},
@@ -280,6 +286,53 @@ static int extract_speed(const std::string &norm) {
   return -1;
 }
 
+// Collapse a spoken compound "<hundreds> hundred <tens>" that Voxtral renders in
+// pure-digit form -- "two hundred ten" -> "200, 10" -> normalised "200 10".
+// A human controller hears 210; the digit-space merge below would instead splice
+// it into "20010" and never match 210 (LFLP 2026-07-18, "reduce speed 210 knots"
+// read back as "200, 10 knots"). Rewrite "(\d)00 <1-2 digits>" -> hundreds*100+tens
+// so "200 10"->"210", "100 20"->"120", "200 5"->"205". Only fires when the trailing
+// group is < 100, so a genuine "5000 100" style pair is left untouched.
+static std::string collapse_compound_hundreds(const std::string &s) {
+  static const std::regex kCompound(R"((\d)00\s+(\d{1,2})\b)");
+  std::string out;
+  std::smatch m;
+  auto begin = s.cbegin();
+  while (std::regex_search(begin, s.cend(), m, kCompound)) {
+    out.append(m.prefix().first, m.prefix().second);
+    const int v = std::stoi(m[1]) * 100 + std::stoi(m[2]);
+    out += std::to_string(v);
+    begin = m[0].second;
+  }
+  out.append(begin, s.cend());
+  return out;
+}
+
+// Does the normalised readback CONTAIN the expected numeric value? Merges spaces
+// between digits first ("2 1 0"/"2 10" -> "210") so a spaced digit run still
+// matches. Used as a fallback when the field EXTRACTOR fails on a garbled prefix:
+// Voxtral renders "flight level" as fit/flat/plate/table level or "flat of L", which
+// breaks extraction even though the NUMBER ("210") is right there -> false "negative"
+// (LFLP 2026-07-17). CONTAINS the expected value is robust to any prefix garble.
+// Also tries a compound-hundreds collapse ("200 10" -> "210") before merging, for
+// the "two hundred ten" spoken form (LFLP 2026-07-18).
+static bool readback_contains(const std::string &norm, int value) {
+  const std::string target = std::to_string(value);
+  for (const std::string &variant : {norm, collapse_compound_hundreds(norm)}) {
+    std::string s;
+    for (size_t i = 0; i < variant.size(); ++i) {
+      if (variant[i] == ' ' && i > 0 && i + 1 < variant.size() &&
+          std::isdigit(static_cast<unsigned char>(variant[i - 1])) &&
+          std::isdigit(static_cast<unsigned char>(variant[i + 1])))
+        continue; // drop a space sitting between two digits
+      s += variant[i];
+    }
+    if (s.find(target) != std::string::npos)
+      return true;
+  }
+  return false;
+}
+
 std::vector<Mismatch> check(const std::string &clearance_text,
                             const std::string &readback_text) {
   std::vector<Mismatch> out;
@@ -309,7 +362,9 @@ std::vector<Mismatch> check(const std::string &clearance_text,
   int cl_fl = extract_fl(cl);
   if (cl_fl > 0) {
     int rb_fl = extract_fl(rb);
-    if (rb_fl <= 0 || rb_fl != cl_fl) {
+    // Accept when the readback CONTAINS the expected FL even if the "flight level"
+    // prefix was garbled (fit/flat/plate level) so the extractor missed it.
+    if ((rb_fl <= 0 || rb_fl != cl_fl) && !readback_contains(rb, cl_fl)) {
       Mismatch m;
       m.field    = "fl";
       m.expected = std::to_string(cl_fl);
@@ -325,8 +380,10 @@ std::vector<Mismatch> check(const std::string &clearance_text,
     int cl_alt = extract_alt_ft(cl);
     if (cl_alt > 0) {
       int rb_alt = extract_alt_ft(rb);
-      // Allow ±100 ft tolerance for minor STT digit transpositions.
-      if (rb_alt <= 0 || std::abs(rb_alt - cl_alt) > 100) {
+      // Allow ±100 ft tolerance; also accept when the readback CONTAINS the value
+      // (garbled "feet"/prefix but the number is present).
+      if ((rb_alt <= 0 || std::abs(rb_alt - cl_alt) > 100) &&
+          !readback_contains(rb, cl_alt)) {
         Mismatch m;
         m.field    = "alt";
         m.expected = std::to_string(cl_alt);
@@ -373,7 +430,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
   int cl_spd = extract_speed(cl);
   if (cl_spd > 0) {
     int rb_spd = extract_speed(rb);
-    if (rb_spd <= 0 || rb_spd != cl_spd) {
+    if ((rb_spd <= 0 || rb_spd != cl_spd) && !readback_contains(rb, cl_spd)) {
       Mismatch m;
       m.field    = "speed";
       m.expected = std::to_string(cl_spd);

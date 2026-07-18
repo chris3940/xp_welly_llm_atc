@@ -173,6 +173,18 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
 bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
                             std::string *out_text);
 
+// Unified in-front-profile enforcement, dispatched once per frame before the
+// per-phase poll_* handlers. Runs the same three checks -- altitude crossing
+// (readback), speed restriction (readback), cleared-level compliance nag
+// (advisory) -- in EVERY airborne IFR phase, so no phase is silently
+// unmonitored. Coordinates with the poll_approach walker + descend-to-enter via
+// the shared cleared-altitude state; see engine.cpp for the priority order and
+// per-check phase applicability. out_requires_readback is set true only for the
+// altitude/speed clearances, false for the advisory nag.
+bool poll_profile_enforcement(const xplane_context::XPlaneContext &ctx, float dt,
+                              std::string *out_text,
+                              bool *out_requires_readback = nullptr);
+
 // IFR en-route management: fires while in IFR_ENROUTE_CRUISE (on Centre).
 // Three sub-functions:
 //   1. ~90-120 s after Centre check-in: "direct {fix}, when able." (navlog
@@ -259,6 +271,10 @@ std::vector<std::string> upcoming_route_fix_idents();
 // pilot is most likely to read back — nudges Voxtral away from off-by-15
 // number-conversion errors ("2000 feet" → digit token "2015").
 int current_cleared_alt_ft();
+
+// Active speed restriction (kt) in force, for the STT context bias so the pilot's
+// readback digits are anchored ("210" was misheard as "110"). 0 = no restriction.
+int current_speed_restriction_kt();
 
 // Frequency the pilot was last instructed to switch to (MHz).
 // Set whenever a handoff is issued (departure, TMA exit, en-route).
