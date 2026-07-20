@@ -832,6 +832,30 @@ static void submit_recording_to_stt() {
     if (!spoken.empty())
       airport_ctx += " runway " + spoken;                 // ("two two left")
   }
+  // Landing-phase read-back anchors (IFR final approach / Tower / landing).
+  // Voxtral garbles the landing read-back hard -- "cleared to land" -> "Climb to
+  // 9", "established" / "report established" -> "Establish 1-0-4" -- because the
+  // airport freq list is suppressed here and ONLY the runway is biased, so there
+  // is no anchor for the actual phrases (LFLP build-77 2026-07-20). Bias the exact
+  // spoken read-backs (digit + word runway forms) so Voxtral has something to lock
+  // onto. Targeted (a handful of tokens), so it does not re-flood the context that
+  // was deliberately thinned at these states.
+  {
+    const atc_state_machine::ATCState st_now = atc_state_machine::get_state();
+    if (st_now == atc_state_machine::ATCState::IFR_APPROACH_DESCENT ||
+        st_now == atc_state_machine::ATCState::IFR_APPROACH_TOWER ||
+        st_now == atc_state_machine::ATCState::IFR_LANDING_CLEARED) {
+      airport_ctx += " report established cleared to land go around";
+      if (!locked_rwy.empty()) {
+        airport_ctx += " cleared to land runway " + locked_rwy +
+                       " established runway " + locked_rwy;
+        const std::string spoken_rwy = spell_runway(locked_rwy);
+        if (!spoken_rwy.empty())
+          airport_ctx += " cleared to land runway " + spoken_rwy +
+                         " established runway " + spoken_rwy;
+      }
+    }
+  }
   // Prefer the locked session callsign once Tower has accepted one —
   // that's the exact phrasing the controller will use back. Before
   // the lock fires, fall back to the user's configured phonetic

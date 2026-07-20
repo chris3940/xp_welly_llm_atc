@@ -521,4 +521,25 @@ std::vector<std::string> matched_fields(const std::string &clearance_text,
   return ok;
 }
 
+std::vector<std::string> fields_present(const std::string &clearance_text) {
+  std::vector<std::string> f;
+  if (clearance_text.empty())
+    return f;
+  const std::string cl = normalise(clearance_text);
+  if (extract_runway(cl) >= 0)
+    f.push_back("runway");
+  const int fl = extract_fl(cl);
+  if (fl > 0)
+    f.push_back("fl");
+  if (fl == 0 && extract_alt_ft(cl) > 0)
+    f.push_back("alt");
+  if (!extract_freq(cl).empty())
+    f.push_back("freq");
+  if (!extract_squawk(cl).empty())
+    f.push_back("squawk");
+  if (extract_speed(cl) > 0)
+    f.push_back("speed");
+  return f;
+}
+
 } // namespace readback_verifier

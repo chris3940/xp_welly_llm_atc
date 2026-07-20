@@ -2068,6 +2068,14 @@ void process_transcript(Input in, Done done) {
 
     atc_state_machine::set_state(AS::IFR_APPROACH_DESCENT);
 
+    // Arm the descent/maintain read-back for this check-in clearance. This Path-B
+    // ack previously armed NOTHING, so when the cleared-approach (runway) arrived
+    // moments later the pilot's descent read-back was verified against the runway
+    // ("negative, runway zero four"). With the multi-item queue this alt item
+    // coexists with the approach runway item -- read them back together in one
+    // transmission OR one at a time, each clears independently (LFLP 2026-07-20).
+    atc_state_machine::arm_readback(buf);
+
     // Build route fix list now that STAR + approach waypoints are complete.
     init_route_fixes(ctx);
     if (!s_approach_faf.ident.empty()) {
@@ -6864,6 +6872,33 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
       }
     }
 
+    // ── Early terminal frequency handoff (decoupled from the APPROACH phase) ──
+    // As soon as the aircraft enters the DESTINATION's controlling terminal TMA
+    // (e.g. CHAMBERY TMA, which works LFLP -- Annecy has no approach of its own),
+    // hand the frequency to that approach controller. poll_acc_sector_change()
+    // DEFERS while on_destination_terminal (it owns non-dest sectors), so the
+    // dest-terminal handoff is OURS and there is no double "contact". This fires
+    // Stage A: speak "contact <approach>" + arm the sector check-in but STAY in
+    // IFR_ARRIVAL -- no walker, no clearance. The pilot talks to the terminal
+    // controller while flying the STAR; the cleared-approach still waits for the
+    // IAF-eta gate below (Stage B), which then silent-flips to APPROACH_DESCENT
+    // (deduped by controller label via s_arrival_freq_handoff_label). Robust
+    // across airports: keyed on on_destination_terminal (same terminal controller
+    // as the dest), NOT facility==dest. ICAO Doc 4444: transfer of control at the
+    // TMA boundary, approach clearance at/approaching the IAF -- so hand off
+    // early, clear for the approach at the IAF. Fixes the ~40 s spent on the
+    // previous (ACC) controller while already inside the terminal TMA (LFLP
+    // 2026-07-20). Stage A deduplicates, so it fires once on entry then falls
+    // through until the IAF gate.
+    if (!enter_approach && inside_tma && !s_assigned_dest_icao.empty() &&
+        openair_db::ready() && on_destination_terminal(ctx)) {
+      if (build_approach_handoff(ctx, callsign, out_text, enc_arrival,
+                                 /*enter_approach=*/false)) {
+        rb(false);
+        return true;
+      }
+    }
+
     if (enter_approach) {
       logging::info("IFR arrival: entering APPROACH (IAF eta=%.0fs, enc='%s')",
                     iaf_eta_s, enc_arrival.name.c_str());
@@ -6881,11 +6916,13 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
       return false;
     }
 
-    // (Stage A removed: the intermediate TMA frequency handoff is now done by the
-    // boundary-driven sector-change handler (poll_acc_sector_change), which hands
-    // off to GENEVA/CHAMBERY when the aircraft CROSSES the TMA boundary -- not at
-    // a route point. That's the ONLY place frequency handoffs fire now, so they
-    // are purely boundary-based (LFLP 2026-07-15).)
+    // Frequency handoffs are boundary-driven: enroute + non-dest TMA sectors
+    // (GENEVA, Milan sub-CTAs) by poll_acc_sector_change() on boundary crossing;
+    // the DESTINATION's terminal TMA (CHAMBERY for LFLP) by the Stage A block
+    // ABOVE on TMA entry (poll_acc_sector_change defers there via
+    // on_destination_terminal). Both fire on CROSSING a boundary, never at a
+    // route point (LFLP 2026-07-15/20). The approach CLEARANCE is separate and
+    // waits for the IAF-eta gate (Stage B).
   }
 
   // ARRIVAL course enforcement. Previously OMITTED (the STAR is curved and

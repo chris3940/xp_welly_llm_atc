@@ -144,7 +144,17 @@ struct AtcMachineState {
   // apply_post_transition_hooks() whenever resp.requires_readback is
   // true, cleared on init/stop/reset/airport-change and whenever the
   // readback expectation resolves. Surfaced in the UI clearance display.
+  // With the multi-item queue below this is the JOINED cache of every pending
+  // clearance (kept as RAW ATC text so the verifier + substring/regex consumers
+  // + UI keep working).
   std::string last_clearance_text_;
+
+  // Multi-item readback queue: the RAW text of each clearance still awaiting a
+  // read-back. Merged latest-wins PER FIELD (see rb_merge), so different-field
+  // clearances -- e.g. "descend 6500" and "cleared RNAV Zulu approach runway
+  // 04" -- coexist and the pilot may read them all back in one transmission OR
+  // piecemeal (each clears independently). Empty <=> readback_pending_ false.
+  std::vector<std::string> pending_clearances_;
 
   // Fields that have already been correctly read back in a prior turn of the
   // current readback exchange. Prevents the "loop" where the pilot reads back
@@ -196,6 +206,94 @@ static AtcMachineState g_state;
 static std::atomic<std::thread::id> g_flight_loop_thread_id{};
 
 inline void bump_gen() { ++g_state.gen; }
+
+// ── Multi-item readback queue helpers ──────────────────────────────────────
+// fl and alt share the "altitude" clearance slot (a clearance sets one or the
+// other). runway / speed / freq / squawk are independent slots, so several
+// clearances can be outstanding at once.
+static std::string rb_overlap_class(const std::string &field) {
+  return field == "fl" ? std::string("alt") : field;
+}
+
+// Rebuild the joined clearance-text cache + pending flag from the item list.
+// The cache stays RAW ATC text (joined) so substring/regex consumers -- the
+// engine's freq-handoff auto-clear + alt-readback detection, and the UI --
+// keep working unchanged.
+static void rb_rebuild_cache() {
+  std::string joined;
+  for (const auto &c : g_state.pending_clearances_) {
+    if (!joined.empty())
+      joined += "  ";
+    joined += c;
+  }
+  g_state.last_clearance_text_ = joined;
+  g_state.readback_pending_ = !g_state.pending_clearances_.empty();
+}
+
+// Full reset of readback state (replaces the identical inline six-field resets).
+static void rb_clear() {
+  bump_gen();
+  g_state.readback_pending_ = false;
+  g_state.pending_clearances_.clear();
+  g_state.last_clearance_text_.clear();
+  g_state.readback_ok_fields_.clear();
+  g_state.readback_pending_since_secs_ = 0.0;
+  g_state.readback_last_reminder_secs_ = 0.0;
+  g_state.readback_reminder_count_ = 0;
+}
+
+// Add a clearance to the pending set, latest-wins PER FIELD: a new clearance
+// evicts any pending clearance that shares a field with it, so different-field
+// clearances coexist (the pilot can read them back together or one at a time).
+// A clearance with no verifiable field replaces the whole set (single-slot
+// legacy behaviour for "report established"-type acks).
+static void rb_merge(const std::string &text) {
+  bump_gen();
+  const auto keys = readback_verifier::fields_present(text);
+  if (keys.empty()) {
+    g_state.pending_clearances_.clear();
+  } else {
+    std::set<std::string> kc;
+    for (const auto &k : keys)
+      kc.insert(rb_overlap_class(k));
+    auto &pc = g_state.pending_clearances_;
+    pc.erase(std::remove_if(pc.begin(), pc.end(),
+                            [&](const std::string &c) {
+                              for (const auto &f :
+                                   readback_verifier::fields_present(c))
+                                if (kc.count(rb_overlap_class(f)))
+                                  return true;
+                              return false;
+                            }),
+             pc.end());
+  }
+  g_state.pending_clearances_.push_back(text);
+  rb_rebuild_cache();
+  g_state.readback_ok_fields_.clear();
+  g_state.readback_pending_since_secs_ = g_state.last_now_secs_;
+  g_state.readback_last_reminder_secs_ = g_state.last_now_secs_;
+  g_state.readback_reminder_count_ = 0;
+}
+
+// Drop every pending clearance whose fields have ALL been read back (accumulated
+// in readback_ok_fields_). Partial clearances (some fields still owed) stay.
+// Unverifiable clearances stay until timeout/accept.
+static void rb_remove_matched() {
+  auto &pc = g_state.pending_clearances_;
+  pc.erase(std::remove_if(pc.begin(), pc.end(),
+                          [&](const std::string &c) {
+                            const auto fs =
+                                readback_verifier::fields_present(c);
+                            if (fs.empty())
+                              return false;
+                            for (const auto &f : fs)
+                              if (!g_state.readback_ok_fields_.count(f))
+                                return false;
+                            return true;
+                          }),
+           pc.end());
+  rb_rebuild_cache();
+}
 
 inline void assert_flight_loop_thread() {
   auto expected = g_flight_loop_thread_id.load();
@@ -379,6 +477,14 @@ void set_readback_pending(bool v) {
   assert_flight_loop_thread();
   bump_gen();
   g_state.readback_pending_ = v;
+  // Keep the multi-item queue consistent: a false here (e.g. crosscountry_flow
+  // cancelling a stale readback) must also drop the pending clearance list, or
+  // the joined cache would resurrect a "pending" state on the next rebuild.
+  if (!v) {
+    g_state.pending_clearances_.clear();
+    g_state.last_clearance_text_.clear();
+    g_state.readback_ok_fields_.clear();
+  }
 }
 
 void set_was_airborne(bool v) {
@@ -438,26 +544,14 @@ void clear_ifr_squawk() {
 
 void arm_readback(const std::string &clearance_text) {
   assert_flight_loop_thread();
-  bump_gen();
-  g_state.readback_pending_            = true;
-  g_state.last_clearance_text_         = clearance_text;
-  g_state.readback_ok_fields_.clear();
-  g_state.readback_pending_since_secs_ = g_state.last_now_secs_;
-  g_state.readback_last_reminder_secs_ = g_state.last_now_secs_;
-  g_state.readback_reminder_count_     = 0;
+  rb_merge(clearance_text); // cumulative, latest-wins per field
 }
 
 void cancel_readback() {
   assert_flight_loop_thread();
   if (!g_state.readback_pending_)
     return;
-  bump_gen();
-  g_state.readback_pending_ = false;
-  g_state.last_clearance_text_.clear();
-  g_state.readback_ok_fields_.clear();
-  g_state.readback_pending_since_secs_ = 0.0;
-  g_state.readback_last_reminder_secs_ = 0.0;
-  g_state.readback_reminder_count_     = 0;
+  rb_clear();
 }
 
 // ── Lifecycle ───────────────────────────────────────────────────────
@@ -480,7 +574,8 @@ void init() {
   g_state.history_.clear();
   g_state.last_now_secs_ = 0.0;
   g_state.last_clearance_text_.clear();
-    g_state.readback_ok_fields_.clear();
+  g_state.pending_clearances_.clear();
+  g_state.readback_ok_fields_.clear();
   g_state.readback_pending_since_secs_ = 0.0;
   g_state.readback_last_reminder_secs_ = 0.0;
   g_state.readback_reminder_count_ = 0;
@@ -509,7 +604,8 @@ void stop() {
   g_state.history_.clear();
   g_state.last_now_secs_ = 0.0;
   g_state.last_clearance_text_.clear();
-    g_state.readback_ok_fields_.clear();
+  g_state.pending_clearances_.clear();
+  g_state.readback_ok_fields_.clear();
   g_state.last_tower_response_text_.clear();
   g_state.readback_pending_since_secs_ = 0.0;
   g_state.readback_last_reminder_secs_ = 0.0;
@@ -530,7 +626,8 @@ void reset() {
   g_state.history_.clear();
   g_state.last_now_secs_ = 0.0;
   g_state.last_clearance_text_.clear();
-    g_state.readback_ok_fields_.clear();
+  g_state.pending_clearances_.clear();
+  g_state.readback_ok_fields_.clear();
   g_state.last_tower_response_text_.clear();
   g_state.readback_pending_since_secs_ = 0.0;
   g_state.readback_last_reminder_secs_ = 0.0;
@@ -555,7 +652,8 @@ void disregard(const xplane_context::XPlaneContext &ctx,
   traffic_dialog::reset();
   g_state.readback_pending_ = false;
   g_state.last_clearance_text_.clear();
-    g_state.readback_ok_fields_.clear();
+  g_state.pending_clearances_.clear();
+  g_state.readback_ok_fields_.clear();
   g_state.last_tower_response_text_.clear();
 
   if (!flight_phase::is_airborne(phase)) {
@@ -644,13 +742,7 @@ std::string consume_readback_reminder(double now_secs) {
         std::strcmp(cur, "IFR/APPROACH_CONTACT") == 0   ||
         std::strcmp(cur, "IFR/APPROACH_DESCENT") == 0   ||
         std::strcmp(cur, "IFR/APPROACH_TOWER") == 0;
-    bump_gen();
-    g_state.readback_pending_ = false;
-    g_state.last_clearance_text_.clear();
-    g_state.readback_ok_fields_.clear();
-    g_state.readback_pending_since_secs_ = 0.0;
-    g_state.readback_last_reminder_secs_ = 0.0;
-    g_state.readback_reminder_count_ = 0;
+    rb_clear();
     if (is_ifr_inflight) {
       // Stay in current state — the pilot is heads-down flying; going to IDLE
       // here would wipe all poll_enroute/poll_descent/poll_approach statics and
@@ -744,94 +836,77 @@ apply_post_transition_hooks(const intent_parser::PilotMessage &msg,
       // clearance as acknowledged.
       logging::info("Readback silently accepted (intent=%s) — all fields matched",
                     intent_parser::intent_name(msg.intent));
-      bump_gen();
-      g_state.readback_pending_ = false;
-      g_state.last_clearance_text_.clear();
-      g_state.readback_ok_fields_.clear();
-      g_state.readback_pending_since_secs_ = 0.0;
-      g_state.readback_last_reminder_secs_ = 0.0;
-      g_state.readback_reminder_count_ = 0;
+      rb_clear();
     }
   }
   // Track readback state.
   if (msg.intent == intent_parser::PilotIntent::READBACK) {
     // Verify the readback when a clearance is pending.
     if (g_state.readback_pending_ && !g_state.last_clearance_text_.empty()) {
-      // Accumulate fields the pilot got right in this turn.
+      // Accumulate the fields the pilot got right this turn (across turns).
       for (const auto &f : readback_verifier::matched_fields(
                g_state.last_clearance_text_, msg.raw_transcript))
         g_state.readback_ok_fields_.insert(f);
 
-      // Filter mismatches: skip fields already verified in a prior turn.
-      // This breaks the cycling loop where the pilot reads back altitude
-      // in one turn and squawk in the next but never both in one go.
-      auto mismatches = readback_verifier::check(g_state.last_clearance_text_,
-                                                 msg.raw_transcript);
-      mismatches.erase(
-          std::remove_if(mismatches.begin(), mismatches.end(),
-                         [](const readback_verifier::Mismatch &m) {
-                           return g_state.readback_ok_fields_.count(m.field) > 0;
-                         }),
-          mismatches.end());
+      // Multi-item: retire every pending clearance whose fields are now all
+      // read back. Several clearances can be outstanding at once (e.g.
+      // "descend 6500" + "cleared approach runway 04"); each clears
+      // independently, so the pilot may read them back in one transmission OR
+      // one at a time.
+      rb_remove_matched();
 
-      if (!mismatches.empty()) {
-        // Anti-loop: after 2 failed pilot attempts of the SAME clearance, ACCEPT it
-        // rather than loop "negative, readback" forever. Voxtral garbles NUMBERS
-        // (210->110) that no context bias or CONTAINS check can recover, and with
-        // the serialize gate a stuck readback blocks every following clearance
-        // (LFLP 2026-07-17). The pilot has clearly acknowledged; one correction is
-        // fair, then assume STT garble and move on.
-        static std::string s_rb_last_cl;
-        static int s_rb_fails = 0;
-        if (s_rb_last_cl != g_state.last_clearance_text_) {
-          s_rb_last_cl = g_state.last_clearance_text_;
+      if (!g_state.pending_clearances_.empty()) {
+        // Still owe something -> prompt the first OUTSTANDING item. Skip fields
+        // already verified in a prior turn (breaks the piecemeal cycling loop).
+        auto mismatches = readback_verifier::check(g_state.last_clearance_text_,
+                                                   msg.raw_transcript);
+        mismatches.erase(
+            std::remove_if(mismatches.begin(), mismatches.end(),
+                           [](const readback_verifier::Mismatch &m) {
+                             return g_state.readback_ok_fields_.count(m.field) > 0;
+                           }),
+            mismatches.end());
+
+        if (!mismatches.empty()) {
+          // Anti-loop: after 2 failed attempts of the SAME outstanding set,
+          // ACCEPT rather than loop "negative, readback" forever (Voxtral
+          // garbles NUMBERS 210->110 no bias can recover; LFLP 2026-07-17).
+          static std::string s_rb_last_cl;
+          static int s_rb_fails = 0;
+          if (s_rb_last_cl != g_state.last_clearance_text_) {
+            s_rb_last_cl = g_state.last_clearance_text_;
+            s_rb_fails = 0;
+          }
+          ++s_rb_fails;
+          if (s_rb_fails < 2) {
+            // First outstanding item drives the correction. Prefix callsign.
+            const std::string &cs = g_state.session_callsign_;
+            resp.text = (cs.empty() ? "" : cs + ", ") +
+                        mismatches[0].correction + ".";
+            resp.next_state = g_state.state_; // stay in current state
+            // The pending set stays armed; nothing to re-arm here.
+            logging::info(
+                "Readback outstanding: field=%s expected=%s stated=%s "
+                "(pending=%zu)",
+                mismatches[0].field.c_str(), mismatches[0].expected.c_str(),
+                mismatches[0].stated.empty() ? "(missing)"
+                                             : mismatches[0].stated.c_str(),
+                g_state.pending_clearances_.size());
+            return; // do NOT clear -- still owe the outstanding item(s)
+          }
+          logging::info("Readback accepted after %d attempts (STT garble "
+                        "assumed): field=%s",
+                        s_rb_fails, mismatches[0].field.c_str());
           s_rb_fails = 0;
+          // fall through -> clear all (accept)
         }
-        ++s_rb_fails;
-        if (s_rb_fails < 2) {
-          // First mismatch drives the correction. Prefix with callsign.
-          const std::string &cs = g_state.session_callsign_;
-          resp.text = (cs.empty() ? "" : cs + ", ") + mismatches[0].correction +
-                      ".";
-          resp.next_state     = g_state.state_;  // stay in current state
-          resp.requires_readback = true;         // re-arm the timer
-          logging::info(
-              "Readback error: field=%s expected=%s stated=%s (ok_fields=%zu)",
-              mismatches[0].field.c_str(), mismatches[0].expected.c_str(),
-              mismatches[0].stated.empty() ? "(missing)"
-                                           : mismatches[0].stated.c_str(),
-              g_state.readback_ok_fields_.size());
-          return;  // do NOT clear readback state
-        }
-        logging::info("Readback accepted after %d attempts (STT garble assumed): "
-                      "field=%s expected=%s stated=%s",
-                      s_rb_fails, mismatches[0].field.c_str(),
-                      mismatches[0].expected.c_str(),
-                      mismatches[0].stated.empty() ? "(missing)"
-                                                   : mismatches[0].stated.c_str());
-        s_rb_fails = 0;
-        // fall through -> clear the readback state (accept)
       }
     }
-    bump_gen();
-    g_state.readback_pending_ = false;
-    g_state.last_clearance_text_.clear();
-    g_state.readback_ok_fields_.clear();
-    g_state.readback_pending_since_secs_ = 0.0;
-    g_state.readback_last_reminder_secs_ = 0.0;
-    g_state.readback_reminder_count_ = 0;
+    rb_clear();
   } else if (resp.requires_readback) {
-    bump_gen();
-    g_state.readback_pending_ = true;
-    // Snapshot the clearance text for the UI clearance display.
-    g_state.last_clearance_text_ = resp.text;
-    // Start the reminder timer the moment the readback becomes due —
-    // last_now_secs_ is the heartbeat written by process() each frame
-    // and tracks the same monotonic clock that consume_readback_reminder
-    // will be polled against.
-    g_state.readback_pending_since_secs_ = g_state.last_now_secs_;
-    g_state.readback_last_reminder_secs_ = g_state.last_now_secs_;
-    g_state.readback_reminder_count_ = 0;
+    // Template/state-machine clearance needing a read-back: merge into the
+    // pending set (cumulative, latest-wins per field) like the proactive polls.
+    rb_merge(resp.text);
   } else if (g_state.readback_pending_ && !resp.text.empty()) {
     if (resp.next_state != g_state.state_) {
       // A NEW clearance (it changes state) was issued while an earlier
@@ -841,15 +916,9 @@ apply_post_transition_hooks(const intent_parser::PilotMessage &msg,
       // read-back: non-cumulative, latest wins. Without this the stale speed
       // read-back hijacked the landing read-back ("negative, N knots" while
       // the pilot read back the landing clearance -- LFMN R22LZ 2026-07-12).
-      // KNOWN LIMITATION: a genuinely-required earlier read-back is dropped
-      // when ATC issues a new clearance before the pilot reads it back.
-      bump_gen();
-      g_state.readback_pending_ = false;
-      g_state.last_clearance_text_.clear();
-      g_state.readback_ok_fields_.clear();
-      g_state.readback_pending_since_secs_ = 0.0;
-      g_state.readback_last_reminder_secs_ = 0.0;
-      g_state.readback_reminder_count_ = 0;
+      // (A non-readback response that changes state drops the pending set; the
+      // per-field multi-item merge is on the requires_readback path above.)
+      rb_clear();
     } else {
       // Non-clearance reply (LM-_INVALID "say again", a same-state
       // acknowledgement) during the read-back window: KEEP the pending
@@ -867,13 +936,7 @@ apply_post_transition_hooks(const intent_parser::PilotMessage &msg,
   // silences every other hint at the next airport.
   if (resp.next_state == ATCState::EN_ROUTE ||
       resp.next_state == ATCState::IDLE) {
-    bump_gen();
-    g_state.readback_pending_ = false;
-    g_state.last_clearance_text_.clear();
-    g_state.readback_ok_fields_.clear();
-    g_state.readback_pending_since_secs_ = 0.0;
-    g_state.readback_last_reminder_secs_ = 0.0;
-    g_state.readback_reminder_count_ = 0;
+    rb_clear();
   }
 
   // Lock runway on first clearance that references a runway. Same fallback
@@ -1187,6 +1250,9 @@ void check_auto_correction(flight_phase::FlightPhase phase, float dt,
         internal::transition_to(new_state, reason.c_str());
         bump_gen();
         g_state.readback_pending_ = false;
+        g_state.pending_clearances_.clear();
+        g_state.last_clearance_text_.clear();
+        g_state.readback_ok_fields_.clear();
         if (new_state == ATCState::IDLE) {
           if (!g_state.assigned_runway_.empty()) {
             logging::info("Runway lock released (auto-correction)");

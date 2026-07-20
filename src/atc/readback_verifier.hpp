@@ -39,6 +39,12 @@ std::vector<Mismatch> check(const std::string &clearance_text,
 std::vector<std::string> matched_fields(const std::string &clearance_text,
                                         const std::string &readback_text);
 
+// Returns the verifiable field tokens ("runway", "fl", "alt", "freq", "squawk",
+// "speed") that appear in the clearance. Used by the multi-item readback queue
+// to merge/expire pending clearances per field (latest-wins), so several
+// clearances can be outstanding at once and read back together or piecemeal.
+std::vector<std::string> fields_present(const std::string &clearance_text);
+
 } // namespace readback_verifier
 
 #endif // READBACK_VERIFIER_HPP
