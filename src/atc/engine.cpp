@@ -2257,10 +2257,20 @@ void process_transcript(Input in, Done done) {
     // leaving/close phrase. Bare "at parking" / "parking" is deliberately
     // NOT here — it matches taxi-to-parking and "at the parking position"
     // garble. The real arrival call is "at the (parking) stand".
+    // A taxi-clearance READBACK echoes "report on stand" / "taxi to <parking>" --
+    // that is the instruction coming back, NOT an at-stand arrival report, so it
+    // must not fire the IFR closure while the aircraft is still taxiing in (LFMN
+    // 2026-07-20: closure fired on the taxi readback, before the stand). The real
+    // arrival call is a bare "on/at the stand" (no "report", no "taxi to").
+    const bool taxi_readback_echo =
+        tx_contains("report on stand") || tx_contains("taxi to");
+    const bool at_stand_report =
+        !taxi_readback_echo &&
+        (tx_contains("at the stand") || tx_contains("at stand") ||
+         tx_contains("on stand") || tx_contains("on the stand") ||
+         tx_contains("parking stand"));
     const bool closure_keyword =
-        tx_contains("at the stand") || tx_contains("at stand") ||
-        tx_contains("on stand") || tx_contains("on the stand") ||
-        tx_contains("parking stand") ||
+        at_stand_report ||
         tx_contains("leaving frequency") || tx_contains("leave the frequency") ||
         tx_contains("leave frequency") || tx_contains("shut down") ||
         tx_contains("close ifr") || tx_contains("close flight plan");
@@ -8014,6 +8024,14 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           is_info_svc = true;
         }
         s_approach_tower_handed_off = true;
+        // Hold the alignment "confirm established" nag for a bit after the Tower
+        // handoff: without this it fires on the Tower freq BEFORE the pilot's first
+        // Tower call, spoken with the stale Approach label ("Nice Approach: confirm
+        // established" while the pilot is on 118.700 about to check in -- LFMN
+        // 2026-07-20, "weird, I just called in"). By the time it elapses the pilot
+        // has normally checked in + been cleared (-> LANDING_CLEARED, poll stops),
+        // so it only ever fires for a genuinely-late, off-centerline aircraft.
+        s_alignment_cooldown = 45.0f;
         const std::string &cs_s2 = atc_state_machine::session_callsign();
         const std::string &cs2 = cs_s2.empty() ? settings::pilot_callsign() : cs_s2;
         char buf[128];
