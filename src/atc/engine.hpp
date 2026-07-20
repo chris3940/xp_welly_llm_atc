@@ -1,6 +1,7 @@
 /*
  * xp_wellys_atc - AI-powered ATC voice communication for X-Plane 12
  * Copyright (C) 2026 thWelly & Claude (Anthropic)
+ * Copyright (C) 2026 Christopher P. Potter (Linux port + IFR extensions)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -255,6 +256,16 @@ const std::string &pending_departure_label();
 // Exposed so atc_session can include it in the STT pre-context on each PTT.
 const std::string &assigned_star_name();
 
+// Spoken plain-language form of the assigned STAR ("SALEV THREE PAPA") for the STT
+// context bias -- matches what ATC speaks so the pilot's readback is recognised.
+// Empty when no STAR is assigned.
+std::string assigned_star_spoken();
+
+// Spoken approach identity ("RNAV Zulu approach runway 04") for the STT context
+// bias -- matches what ATC speaks (NATO variant word + runway). Empty when no
+// approach is assigned.
+std::string assigned_approach_spoken(const xplane_context::XPlaneContext &ctx);
+
 // Idents of the UPCOMING route fixes (from the current tracker position to the
 // end of the route table). This includes the CIFP STAR + approach procedure
 // waypoints (e.g. GIROL, AMFOU, TIPIK, MUS on LFMN ABDI8R) that are NOT in the
@@ -298,6 +309,12 @@ bool poll_ground_runway_change(const xplane_context::XPlaneContext &ctx,
 // Returns empty string when no new event has occurred.
 // Must be called every frame from atc_session::update().
 std::string poll_route_tracker(const xplane_context::XPlaneContext &ctx);
+
+// One-shot informational note for the transcript (System line), e.g. when the
+// destination weather forced a non-preferred approach. Returns the note and
+// clears it; empty when there is nothing pending. Drain every frame from
+// atc_session::update() alongside poll_route_tracker().
+std::string take_pending_transcript_note();
 
 } // namespace engine
 

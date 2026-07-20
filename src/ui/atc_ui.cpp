@@ -36,6 +36,7 @@
 #include "core/xplane_context.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/airspace_db.hpp"
+#include "data/openair_db.hpp"
 #include "data/simbrief_ofp.hpp"
 #include "data/traffic_context.hpp"
 #include "persistence/model_manifest.hpp"
@@ -2594,6 +2595,65 @@ static void draw_ifr_tab() {
       ImGui::TextDisabled("CIFP: path unknown (X-Plane not loaded yet)");
     } else if (!ofp.valid) {
       ImGui::TextDisabled("CIFP: load OFP below to check dep/arr airports");
+    }
+  }
+  ImGui::Spacing();
+
+  // ── Enclosing airspace (Navigraph openair -- the ACCURATE geometry the IFR
+  //    sector/handoff logic uses, unlike the coarse atc.dat model on the En-Route
+  //    tab). Recomputed at 2 Hz so it is cheap even while the tab is open. ──
+  ImGui::SeparatorText("Enclosing Airspace (openair)");
+  {
+    const auto &ctx = xplane_context::get();
+    if (!openair_db::ready()) {
+      ImGui::TextDisabled("openair not loaded (no airspace.txt)");
+    } else {
+      auto class_name = [](openair_db::AirspaceClass c) -> const char * {
+        switch (c) {
+        case openair_db::AirspaceClass::TMA: return "TMA";
+        case openair_db::AirspaceClass::CTA: return "CTA";
+        case openair_db::AirspaceClass::CTR: return "CTR";
+        case openair_db::AirspaceClass::FIR: return "FIR";
+        case openair_db::AirspaceClass::UIR: return "UIR";
+        default: return "?";
+        }
+      };
+      static double s_last_t = -1.0;
+      static std::vector<openair_db::AirspaceEntry> s_encl;
+      static openair_db::AirspaceEntry s_inner;
+      // FL-aware effective altitude: openair ceilings are flight levels written as
+      // "MSL" feet, so above the transition altitude compare pressure altitude
+      // (mirrors engine::openair_alt). No-op at QNH 1013.
+      const float ta = ctx.transition_alt_ft > 0.0f ? ctx.transition_alt_ft : 5000.0f;
+      const int alt = static_cast<int>(ctx.altitude_ft_msl > ta
+                                           ? ctx.pressure_alt_ft
+                                           : ctx.altitude_ft_msl);
+      const double now = ImGui::GetTime();
+      if (now - s_last_t > 0.5) {
+        s_last_t = now;
+        s_encl = openair_db::find_all_enclosing(ctx.latitude, ctx.longitude, alt);
+        s_inner = openair_db::find_enclosing(ctx.latitude, ctx.longitude, alt);
+      }
+      ImGui::Text("Aircraft %.4f, %.4f  %d ft MSL (airspace cmp %d ft)",
+                  ctx.latitude, ctx.longitude,
+                  static_cast<int>(ctx.altitude_ft_msl), alt);
+      if (s_encl.empty()) {
+        ImGui::TextDisabled("outside all indexed airspaces");
+      } else {
+        for (const auto &e : s_encl) {
+          const bool is_inner =
+              !s_inner.name.empty() && e.name == s_inner.name &&
+              e.ac_class == s_inner.ac_class;
+          if (is_inner)
+            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
+                               "> %-3s %s  [%d-%d ft]", class_name(e.ac_class),
+                               e.name.c_str(), e.floor_ft, e.ceiling_ft);
+          else
+            ImGui::Text("  %-3s %s  [%d-%d ft]", class_name(e.ac_class),
+                        e.name.c_str(), e.floor_ft, e.ceiling_ft);
+        }
+        ImGui::TextDisabled("> innermost (drives IFR sector/handoff)");
+      }
     }
   }
   ImGui::Spacing();

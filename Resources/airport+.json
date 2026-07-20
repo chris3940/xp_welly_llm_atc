@@ -1,0 +1,40 @@
+{
+  "_comment": "xp_wellys_atc - per-airport overrides (generic). Supplements Navigraph/apt.dat/atc.dat with hand-maintained per-ICAO data. Covers: (1) runway-in-use config (arrival/departure runways, wind-gated), (2) preferred approach by weather, (3) additional airport info (delegated controllers + freqs, AFIS/Tower names). Loaded from <plugin>/Resources/airport+.json. LOADER NOT BUILT YET (v4.4.0). Schema is PROVISIONAL - confirm before wiring.",
+  "_schema": {
+    "<ICAO>": {
+      "runway_config": [
+        "ordered, first match wins. {arrival, departure, max_tailwind_kt?, wind_min_dir?, wind_max_dir?}. arrival/departure may differ and be opposite. no wind field = always."
+      ],
+      "approaches": [
+        "arrival-only. {runway, designator, min_vis_m?, max_vis_m?, min_ceiling_ft?, max_ceiling_ft?, min_rvr_m?}. first match (in file order) whose weather gates hold wins. gates use the DESTINATION METAR (dest_visibility_m / dest_ceiling_ft / per-runway RVR), not local DataRef."
+      ],
+      "controllers": [
+        "additional airport info: controllers/freqs missing from atc.dat. {role, name, freq_mhz}. role = approach|tower|ground|delivery|atis|info."
+      ]
+    }
+  },
+
+  "LFMN": {
+    "runway_config": [
+      { "arrival": "04L", "departure": "04R", "max_tailwind_kt": 7 },
+      { "arrival": "22R", "departure": "22L" }
+    ],
+    "approaches": [
+      { "runway": "04L", "designator": "R04LA", "min_vis_m": 10000, "min_ceiling_ft": 2500 },
+      { "runway": "04L", "designator": "R04LZ" }
+    ]
+  },
+
+  "LFLP": {
+    "runway_config": [
+      { "arrival": "04", "departure": "22", "max_tailwind_kt": 7 },
+      { "arrival": "22", "departure": "04" }
+    ],
+    "approaches": [
+      { "runway": "04", "designator": "R04-Z" }
+    ],
+    "controllers": [
+      { "role": "approach", "name": "Chambery Approach", "freq_mhz": 121.205, "alt_freqs_mhz": [123.700] }
+    ]
+  }
+}

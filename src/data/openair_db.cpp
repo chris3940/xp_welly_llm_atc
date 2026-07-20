@@ -12,6 +12,7 @@
 #include "data/openair_db.hpp"
 #include "core/logging.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -114,15 +115,14 @@ static bool is_indexed(AirspaceClass c) {
 std::vector<Entry> s_entries;
 std::atomic<bool> s_ready{false};
 
-static void load(const std::string &path) {
+static std::vector<Entry> load_file(const std::string &path) {
+  std::vector<Entry> entries;
   FILE *f = std::fopen(path.c_str(), "r");
   if (!f) {
     logging::info("openair_db: file not found (%s)", path.c_str());
-    s_ready = true;
-    return;
+    return entries;
   }
 
-  std::vector<Entry> entries;
   bool active = false;
   Entry cur;
 
@@ -163,6 +163,14 @@ static void load(const std::string &path) {
           cur.ac_class = AirspaceClass::CTA;
         else if (n.find("FIR") != std::string::npos)
           cur.ac_class = AirspaceClass::FIR;
+        else if (n.find("DELEGATED") != std::string::npos ||
+                 n.find("SKYGUIDE") != std::string::npos ||
+                 n.find("MUAC") != std::string::npos)
+          // Cross-border delegation polygon (overlay): named by delegation
+          // marker, not by "CTA"/"FIR" type, and often "AC C" (ICAO class C).
+          // Index as an enroute CTA so find_enclosing returns it and
+          // resolve_sector_controller routes it to the delegated ACC.
+          cur.ac_class = AirspaceClass::CTA;
         active = is_indexed(cur.ac_class);
       }
       continue;
@@ -203,9 +211,32 @@ static void load(const std::string &path) {
   }
 
   std::fclose(f);
+  logging::info("openair_db: parsed %zu entries from %s", entries.size(),
+                path.c_str());
+  return entries;
+}
+
+// Compose base + optional overlay. Overlay entries are appended and WIN on a
+// same-name collision (a hand-maintained polygon replaces the vendor one).
+static void load(const std::string &base, const std::string &overlay) {
+  std::vector<Entry> entries = load_file(base);
+  if (!overlay.empty()) {
+    std::vector<Entry> ov = load_file(overlay);
+    if (!ov.empty()) {
+      for (const auto &o : ov)
+        entries.erase(
+            std::remove_if(entries.begin(), entries.end(),
+                           [&](const Entry &e) { return e.name == o.name; }),
+            entries.end());
+      for (auto &o : ov)
+        entries.push_back(std::move(o));
+      logging::info(
+          "openair_db: +%zu overlay entries from %s (overlay wins on name)",
+          ov.size(), overlay.c_str());
+    }
+  }
   s_entries = std::move(entries);
-  logging::info("openair_db: loaded %zu airspace entries from %s",
-                s_entries.size(), path.c_str());
+  logging::info("openair_db: %zu airspace entries indexed", s_entries.size());
   s_ready = true;
 }
 
@@ -213,12 +244,13 @@ std::thread s_thread;
 
 } // namespace
 
-void init(std::string path) {
+void init(std::string path, std::string overlay_path) {
   if (path.empty()) {
     s_ready = true;
     return;
   }
-  s_thread = std::thread([p = std::move(path)]() { load(p); });
+  s_thread = std::thread(
+      [b = std::move(path), o = std::move(overlay_path)]() { load(b, o); });
 }
 
 void stop() {

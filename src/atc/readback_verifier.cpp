@@ -246,6 +246,21 @@ static std::string fl_to_speech(int fl) {
 
 // ── Public API ────────────────────────────────────────────────────────────
 
+// Spelled tens/teens -> value, for the "N hundred TEN" word form Voxtral emits when
+// the STT context biases spoken numbers (LFLP 2026-07-18). Returns -1 if not a word.
+static int spelled_low(const std::string &w) {
+  static const std::pair<const char *, int> kLow[] = {
+      {"ten", 10},      {"eleven", 11},  {"twelve", 12},   {"thirteen", 13},
+      {"fourteen", 14}, {"fifteen", 15}, {"sixteen", 16},  {"seventeen", 17},
+      {"eighteen", 18}, {"nineteen", 19}, {"twenty", 20},  {"thirty", 30},
+      {"forty", 40},    {"fifty", 50},   {"sixty", 60},    {"seventy", 70},
+      {"eighty", 80},   {"ninety", 90}};
+  for (const auto &p : kLow)
+    if (w == p.first)
+      return p.second;
+  return -1;
+}
+
 // Returns the assigned speed in knots (e.g. 250) or -1 if the text carries no
 // speed restriction. Anchored on "speed" so a wind read-out ("... 01 knots")
 // never matches; the digits may follow "speed" after filler ("speed, 250",
@@ -273,6 +288,26 @@ static int extract_speed(const std::string &norm) {
     const int v = std::stoi(m[1]);
     if (v >= 100)
       return v;
+  }
+  // "two hundred [and] ten" / "two hundred 10" -- COMPOUND spoken speed. Capture the
+  // tens remainder after "hundred" so 210 verifies (not just 200). The remainder is a
+  // digit run ("2 hundred 10") OR a spelled tens/teens ("two hundred ten"), the forms
+  // Voxtral emits once the STT context biases the spoken value (LFLP 2026-07-18,
+  // "reduce speed 210 knots" read back as "to 110"/"two hundred ten"). Listed
+  // explicitly so "two hundred knots" (no remainder) falls through to the plain rule.
+  static const std::regex kHundredCompound(
+      R"((\d)\s*hundred(?:\s+and)?\s+(\d{1,2}|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety))",
+      std::regex_constants::icase);
+  if (std::regex_search(norm, m, kHundredCompound)) {
+    const std::string t = m[2].str();
+    const int rem = std::isdigit(static_cast<unsigned char>(t[0]))
+                        ? std::stoi(t)
+                        : spelled_low(t);
+    if (rem >= 0 && rem < 100) {
+      const int v = std::stoi(m[1]) * 100 + rem;
+      if (v >= 100)
+        return v;
+    }
   }
   // "two hundred knots" -- normalize_phonetics maps the digit word ("two"->"2")
   // but NOT "hundred", so expand "<n> hundred" -> n*100 here.

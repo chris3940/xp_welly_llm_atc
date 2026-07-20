@@ -77,6 +77,9 @@ static int frame_counter = 0;
 static std::string s_metar_airport;
 static int         s_metar_qnh_hpa = 0;
 static int         s_metar_tick    = 0;
+static float       s_metar_visibility_m = -1.0f; // dest METAR vis (m); -1 = none
+static float       s_metar_ceiling_ft   = -1.0f; // dest METAR ceiling (ft MSL); -1 = none
+static std::string s_metar_raw;                   // raw dest METAR (for per-runway RVR)
 
 // Parse integer QNH (hPa) from a raw METAR string.
 // Returns 0 when neither Q- nor A-field is found or passes the range check.
@@ -104,6 +107,86 @@ static int parse_qnh_from_metar(const char *metar) {
     }
   }
   return 0;
+}
+
+// Parse prevailing visibility (metres) from a raw METAR. Handles CAVOK (>=10 km),
+// the ICAO 4-digit metre group (9999 => >=10 km), and the US "<n>SM" form.
+// Returns -1.0f when no visibility group is found (leaves the region value in use).
+static float parse_visibility_from_metar(const char *metar) {
+  if (!metar || !*metar)
+    return -1.0f;
+  const std::string s(metar);
+  if (s.find("CAVOK") != std::string::npos)
+    return 10000.0f;
+  // ICAO metre group: a stand-alone 4-digit token (optionally trailing "NDV").
+  // The date/time (ddhhmmZ) and wind (dddffKT) tokens have trailing non-space
+  // chars so they are skipped; the first pure 4-digit token is the visibility.
+  for (const char *p = metar; *p;) {
+    const bool at_start = (p == metar || p[-1] == ' ');
+    if (at_start && std::isdigit((unsigned char)p[0]) &&
+        std::isdigit((unsigned char)p[1]) && std::isdigit((unsigned char)p[2]) &&
+        std::isdigit((unsigned char)p[3])) {
+      const char a = p[4];
+      const bool pure = (a == ' ' || a == '\0');
+      const bool ndv = (a == 'N' && p[5] == 'D' && p[6] == 'V');
+      if (pure || ndv) {
+        const int v = (p[0] - '0') * 1000 + (p[1] - '0') * 100 +
+                      (p[2] - '0') * 10 + (p[3] - '0');
+        return (v >= 9999) ? 10000.0f : static_cast<float>(v);
+      }
+    }
+    while (*p && *p != ' ')
+      ++p;
+    while (*p == ' ')
+      ++p;
+  }
+  // US statute miles: "<n>SM" (fractions ignored -- coarse gate only).
+  auto pos = s.find("SM");
+  if (pos != std::string::npos && pos > 0) {
+    size_t b = pos;
+    while (b > 0 && std::isdigit((unsigned char)s[b - 1]))
+      --b;
+    if (b < pos)
+      return static_cast<float>(std::atoi(s.c_str() + b)) * 1609.34f;
+  }
+  return -1.0f;
+}
+
+// Parse the ceiling (feet AGL) from a raw METAR = lowest BKN/OVC/VV layer.
+// CAVOK/NSC/NCD/SKC/CLR => no ceiling (returns 999999). Returns -1.0f only when
+// the METAR is empty. FEW/SCT are not ceilings and are ignored.
+static float parse_ceiling_agl_from_metar(const char *metar) {
+  if (!metar || !*metar)
+    return -1.0f;
+  const std::string s(metar);
+  if (s.find("CAVOK") != std::string::npos || s.find("NSC") != std::string::npos ||
+      s.find("NCD") != std::string::npos || s.find("SKC") != std::string::npos ||
+      s.find("CLR") != std::string::npos)
+    return 999999.0f;
+  float lowest = 999999.0f;
+  for (const char *p = metar; *p;) {
+    if (p == metar || p[-1] == ' ') {
+      int hundreds = -1;
+      if (((p[0] == 'B' && p[1] == 'K' && p[2] == 'N') ||
+           (p[0] == 'O' && p[1] == 'V' && p[2] == 'C')) &&
+          std::isdigit((unsigned char)p[3]) && std::isdigit((unsigned char)p[4]) &&
+          std::isdigit((unsigned char)p[5]))
+        hundreds = (p[3] - '0') * 100 + (p[4] - '0') * 10 + (p[5] - '0');
+      else if (p[0] == 'V' && p[1] == 'V' && std::isdigit((unsigned char)p[2]) &&
+               std::isdigit((unsigned char)p[3]) && std::isdigit((unsigned char)p[4]))
+        hundreds = (p[2] - '0') * 100 + (p[3] - '0') * 10 + (p[4] - '0');
+      if (hundreds >= 0) {
+        const float ft = static_cast<float>(hundreds) * 100.0f;
+        if (ft < lowest)
+          lowest = ft;
+      }
+    }
+    while (*p && *p != ' ')
+      ++p;
+    while (*p == ' ')
+      ++p;
+  }
+  return lowest;
 }
 
 static XPLMDataRef dr_com1_standby = nullptr;
@@ -1324,6 +1407,11 @@ void update() {
   // Falls back to aircraft local pressure DataRef (more stable than regional
   // model), then to regional model. Regional gives standard 1013 hPa until
   // real weather downloads — aircraft local updates sooner.
+  // Destination METAR weather for the approach-selection gate (updated in the
+  // METAR block below; mirror the cached values into ctx every frame).
+  ctx.dest_metar_visibility_m = s_metar_visibility_m;
+  ctx.dest_metar_ceiling_ft   = s_metar_ceiling_ft;
+  ctx.dest_metar              = s_metar_raw;
   if (s_metar_qnh_hpa > 0) {
     ctx.qnh_hpa  = s_metar_qnh_hpa;
     ctx.qnh_inhg = static_cast<float>(s_metar_qnh_hpa) / 33.8639f;
@@ -1698,11 +1786,29 @@ void update() {
                 XPLMDebugString(dbuf);
               }
             }
+            // Visibility + ceiling + raw string for the approach-selection gate
+            // (RNAV Alpha/Zulu keys on the ARRIVAL field's reported weather).
+            s_metar_visibility_m = parse_visibility_from_metar(metar_buf.buffer);
+            const float ceil_agl = parse_ceiling_agl_from_metar(metar_buf.buffer);
+            if (ceil_agl < 0.0f) {
+              s_metar_ceiling_ft = -1.0f;
+            } else {
+              float elev = 0.0f;
+              auto eit = elevation_cache_.find(s_metar_airport);
+              if (eit != elevation_cache_.end())
+                elev = eit->second;
+              s_metar_ceiling_ft = ceil_agl + elev; // AGL -> MSL
+            }
+            s_metar_raw.assign(metar_buf.buffer);
           } else {
             // No METAR (custom weather) — reset on airport change so we
             // don't carry over a stale hPa from the previous airport.
-            if (airport_changed)
+            if (airport_changed) {
               s_metar_qnh_hpa = 0;
+              s_metar_visibility_m = -1.0f;
+              s_metar_ceiling_ft = -1.0f;
+              s_metar_raw.clear();
+            }
           }
         } else {
           s_metar_qnh_hpa = 0;

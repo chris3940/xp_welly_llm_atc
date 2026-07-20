@@ -1,6 +1,7 @@
 /*
  * xp_wellys_atc - AI-powered ATC voice communication for X-Plane 12
  * Copyright (C) 2026 thWelly & Claude (Anthropic)
+ * Copyright (C) 2026 Christopher P. Potter (Linux port + IFR extensions)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -259,6 +260,8 @@ static const std::vector<std::pair<std::string, std::string>> kPhraseAliases = {
     {"race information",  "reims information"}, // Voxtral: "Race Information" mishearing
     {"chamber area",
      "chambery"},              // "chamber area approach" → "chambery approach"
+    {"sale of", "salev"}, // Voxtral: "direct sale of" -> SALEV (fix by Mont Saleve)
+    {"saleve",  "salev"}, // Voxtral spells the SALEV fix as French "Saleve"
     {"romeo mayrou", "romeo"}, // "rome, mayrou" (Voxtral split) → "romeo"
     {"can be", "climbing to"}, // "can be 6500 feet" → "climbing to 6500 feet"
     {"post it", "report"},     // "post it established" → "report established"

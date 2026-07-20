@@ -1,6 +1,7 @@
 /*
  * xp_wellys_atc - AI-powered ATC voice communication for X-Plane 12
  * Copyright (C) 2026 thWelly & Claude (Anthropic)
+ * Copyright (C) 2026 Christopher P. Potter (Linux port + IFR extensions)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -1131,6 +1132,36 @@ bool check_freq_precondition(const PilotMessage &msg, const XPlaneContext &ctx,
         s == "IFR/APPROACH_DESCENT" || s == "IFR/APPROACH_TOWER"  ||
         s == "IFR/LANDING_CLEARED")
       return false;
+  }
+  // Post-landing RUNWAY_VACATED on the GROUND frequency: after landing, Tower
+  // hands the pilot to Ground ("contact ground on X"); a runway-vacated call on
+  // Ground must NOT be answered "contact Tower" (the VFR intent_frequency lists
+  // RUNWAY_VACATED as TOWER-only, and IDLE isn't exempted above). Ground simply
+  // acknowledges and taxis them in. Gated on was_airborne() so a pre-departure
+  // call is never affected (user 2026-07-19: LFMN vacated on Ground -> "contact
+  // Tower"). A subsequent "at the stand" still triggers the IFR closure handler.
+  if (msg.intent == PI::RUNWAY_VACATED && ctx.frequency_type == FT::GROUND &&
+      atc_state_machine::was_airborne()) {
+    auto vars_v = build_vars(msg, ctx);
+    // Give the REAL taxi-to-parking (with the actual taxiway) in ONE reply, and
+    // require a readback so the pilot's readback is consumed -- NOT re-parsed as a
+    // fresh REQUEST_TAXI that fired a SECOND "taxi to GA parking via X" (the
+    // "VFR reply and IFR one" double, user 2026-07-19). Was a generic "taxi to the
+    // apron" ack.
+    resp.text = atc_templates::fill(
+        "{callsign}, taxi to general aviation parking {nearest_taxiway}, "
+        "report on stand.",
+        vars_v);
+    resp.next_state = internal::get_state_ref();
+    resp.requires_readback = true;
+    // Arm readback-pending explicitly: this guard path short-circuits before the
+    // state-machine hook that would otherwise set it, so without this the pilot's
+    // taxi readback (contains "taxi") is re-classified REQUEST_TAXI -> a second
+    // taxi clearance (the double).
+    internal::set_readback_pending(true);
+    logging::info("Post-landing RUNWAY_VACATED on Ground -- taxi to parking (not "
+                  "contact Tower, single reply)");
+    return true;
   }
   std::string intent_key = intent_parser::intent_template_key(msg.intent);
   std::string rejection = flight_phase::check_frequency_precondition(

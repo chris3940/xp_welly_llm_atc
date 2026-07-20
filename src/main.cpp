@@ -41,6 +41,7 @@
 #include "backends/manager.hpp"
 #include "core/logging.hpp"
 #include "core/xplane_context.hpp"
+#include "data/airport_overrides.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/airspace_db.hpp"
 #include "data/openair_db.hpp"
@@ -151,6 +152,15 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
   phraseology_hints::init();
   ui_strings::init();
   airport_vrps::init();
+  // Resolve <plugin>/Resources/ paths early: the openair overlay
+  // (airspace+.txt, below) is located relative to the plugin root, and the
+  // loader/downloader read models_dir() from it later.
+  model_paths::init();
+  // Per-airport overrides (weather-gated preferred approach, runway config).
+  airport_overrides::init(
+      model_paths::plugin_root().empty()
+          ? std::string()
+          : model_paths::plugin_root() + "/Resources/airport+.json");
   {
     char raw[2048] = {};
     XPLMGetSystemPath(raw);
@@ -172,7 +182,13 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
     if (!sys.empty() && sys.back() != '/' && sys.back() != '\\')
       sys += '/';
     airspace_db::init(sys + "Custom Data/1200 atc data/Earth nav data/atc.dat");
-    openair_db::init(sys + "Custom Data/airspaces/airspace.txt");
+    // Base vendor airspace + optional hand-maintained overlay shipped in the
+    // plugin (sub-CTAs, cross-border delegation). Overlay wins on same name.
+    const std::string overlay =
+        model_paths::plugin_root().empty()
+            ? std::string()
+            : model_paths::plugin_root() + "/Resources/airspace+.txt";
+    openair_db::init(sys + "Custom Data/airspaces/airspace.txt", overlay);
   }
   xplane_context::init();
   traffic_context::init();
@@ -181,11 +197,9 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
   audio_recorder::init();
   audio_player::init();
   backends::init();
-  // Resolve <plugin>/Resources/{models,espeak-ng-data} paths once.
-  // Both the loader (model SHA256 + backend instantiation) and the
-  // downloader (P5) read these. Initialised before the loader since
-  // the loader walks models_dir() on startup.
-  model_paths::init();
+  // model_paths::init() already ran above (moved before openair_db so the
+  // airspace+.txt overlay path resolves). The loader (model SHA256 + backend
+  // instantiation) and downloader (P5) read models_dir() from it.
   atc_state_machine::init();
   traffic_dialog::init();
   atc_ui::init();

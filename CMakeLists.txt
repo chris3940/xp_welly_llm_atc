@@ -217,6 +217,7 @@ add_library(xp_atc_engine OBJECT
     src/atc/flows/crosscountry_flow.cpp
     src/backends/manager.cpp
     src/data/airport_vrps.cpp
+    src/data/airport_overrides.cpp
     src/data/airspace_db.cpp
     src/data/openair_db.cpp
     src/data/cifp_reader.cpp

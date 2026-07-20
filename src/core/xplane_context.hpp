@@ -129,7 +129,20 @@ struct XPlaneContext {
   float wind_direction_deg = 0.0f;
   float wind_speed_kt = 0.0f;
   float visibility_m = 9999.0f;
+  // Destination-airport METAR visibility (metres), parsed from the filed IFR
+  // destination's METAR (XPLMGetMETARForAirport). -1 = unavailable (custom
+  // weather / not yet downloaded). Used for the approach-selection weather gate
+  // so the RNAV Alpha/Zulu choice keys on the ARRIVAL field's reported vis, not
+  // the region value sampled at the aircraft en route. (LFMN 2026-07-19.)
+  float dest_metar_visibility_m = -1.0f;
   float cloud_base_ft_msl = 99999.0f;
+  // Destination-airport METAR ceiling (feet MSL) = lowest BKN/OVC/VV layer +
+  // field elevation. Large value (>=99999) = no ceiling (CAVOK/NSC/SKC). -1 =
+  // unavailable. Pairs with dest_metar_visibility_m for the approach gate.
+  float dest_metar_ceiling_ft = -1.0f;
+  // Raw destination METAR string (for per-runway RVR parsing at the approach
+  // gate, where the arrival runway is known). Empty = unavailable.
+  std::string dest_metar;
   int cloud_type = 0; // 0=clear,1=few,2=scattered,3=broken,4=overcast
   float temperature_c = 15.0f;
   float dewpoint_c = 10.0f;

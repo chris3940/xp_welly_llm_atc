@@ -38,8 +38,14 @@ struct AirspaceEntry {
 
 // Parse CTR / TMA / CTA / FIR / UIR entries from an OpenAir-format airspace
 // file (e.g. X-Plane "Custom Data/airspaces/airspace.txt").
-// Pass an empty path to disable (headless tools, no Custom Data).
-void init(std::string path);
+// Pass an empty base path to disable (headless tools, no Custom Data).
+//
+// overlay_path (optional): a second OpenAir file (e.g.
+// "<plugin>/Resources/airspace+.txt") whose entries are APPENDED after the
+// base, and WIN on a same-name collision -- for hand-maintained polygons that
+// are missing or too coarse in the vendor file (sub-CTAs, cross-border
+// delegation such as LFFF->LSAS). Empty/absent overlay = base only.
+void init(std::string path, std::string overlay_path = {});
 void stop();
 
 // Returns true once init() has finished (success or file-absent).

@@ -1,6 +1,7 @@
 /*
  * xp_wellys_atc - AI-powered ATC voice communication for X-Plane 12
  * Copyright (C) 2026 thWelly & Claude (Anthropic)
+ * Copyright (C) 2026 Christopher P. Potter (Linux port + IFR extensions)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -139,6 +140,23 @@ static void push_transcript(TranscriptEntry e) {
 // current ATC message — stored per-entry so that historical messages are not
 // retroactively relabelled when the active controller changes.
 static std::string current_tower_label() {
+  // Post-landing on the GROUND frequency: after the Tower->Ground handoff the
+  // engine's controller label is still "Tower" (stale). Label ground responses as
+  // "<airport> Ground" (user 2026-07-19: transcript showed "Tower" on the taxi-in
+  // call). State is IDLE by then, so key on airborne-then-on-ground + GROUND freq.
+  {
+    const auto &cx0 = xplane_context::get();
+    if (cx0.on_ground && atc_state_machine::was_airborne() &&
+        cx0.frequency_type == xplane_context::FrequencyType::GROUND) {
+      std::string apt = !cx0.nearest_airport_name.empty()
+                            ? cx0.nearest_airport_name
+                            : cx0.nearest_airport_id;
+      auto sep = apt.find_first_of(" -");
+      if (sep != std::string::npos)
+        apt = apt.substr(0, sep);
+      return apt.empty() ? "Ground" : apt + " Ground";
+    }
+  }
   const std::string &ctrl = engine::current_controller_label();
   if (!ctrl.empty())
     return ctrl;
@@ -845,6 +863,47 @@ static void submit_recording_to_stt() {
       airport_ctx += " " + nato_words[nato_words.size() - 2] +
                      " " + nato_words[nato_words.size() - 1];
     }
+    // Digit-form callsign variant, e.g. "November 750 X-Ray Papa": pilots say the
+    // number block as one group ("seven-fifty") and Voxtral renders it as digits,
+    // so biasing the digit form alongside the NATO-word form anchors partial
+    // callsigns like "750 X-Ray Papa" / "November 750 ..." that otherwise garble
+    // to "750XR" / "750X3" / "X River Park" (user 2026-07-19). Number WORDS are
+    // collapsed into a contiguous digit run; the prefix + trailing letters stay.
+    {
+      auto nato_digit = [](const std::string &w) -> char {
+        static const std::pair<const char *, char> kN[] = {
+            {"zero", '0'},  {"one", '1'},  {"two", '2'},   {"three", '3'},
+            {"four", '4'},  {"five", '5'}, {"six", '6'},   {"seven", '7'},
+            {"eight", '8'}, {"nine", '9'}, {"niner", '9'}};
+        std::string lw = w;
+        for (char &c : lw)
+          c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (const auto &p : kN)
+          if (lw == p.first)
+            return p.second;
+        return 0;
+      };
+      std::string digit_form;
+      for (const auto &word : nato_words) {
+        const char d = nato_digit(word);
+        if (d) {
+          if (!digit_form.empty() &&
+              std::isdigit(static_cast<unsigned char>(digit_form.back())))
+            digit_form += d; // continue the digit run (Seven Five Zero -> 750)
+          else {
+            if (!digit_form.empty())
+              digit_form += ' ';
+            digit_form += d;
+          }
+        } else {
+          if (!digit_form.empty())
+            digit_form += ' ';
+          digit_form += word;
+        }
+      }
+      if (!digit_form.empty() && digit_form != phonetic)
+        airport_ctx += " " + digit_form;
+    }
   }
   // Arrival-ground pruning: once the aircraft has flown and is back on the
   // ground (post-landing at the destination), the enroute route content —
@@ -875,11 +934,71 @@ static void submit_recording_to_stt() {
       const std::string &star = engine::assigned_star_name();
       if (!star.empty())
         airport_ctx += " " + star;
+      // Spoken plain-language STAR ("SALEV THREE PAPA"): ATC speaks this form
+      // (alpha-64) so the pilot reads it back that way -- bias it or the coded
+      // form alone makes Voxtral hear "side of 3 Papa" (user 2026-07-19).
+      const std::string star_spoken = engine::assigned_star_spoken();
+      if (!star_spoken.empty() && star_spoken != star) {
+        airport_ctx += " " + star_spoken;
+        // Digit-form variant too ("SALEV 3 Papa"): Voxtral renders the validity
+        // number as a DIGIT, so bias the digit form alongside the word form
+        // ("SALEV THREE PAPA") to anchor the readback (user 2026-07-19). Convert
+        // the single number WORD in the spoken designator to a digit.
+        static const std::pair<const char *, char> kW2D[] = {
+            {"Zero", '0'},  {"One", '1'},  {"Two", '2'},   {"Three", '3'},
+            {"Four", '4'},  {"Five", '5'}, {"Six", '6'},   {"Seven", '7'},
+            {"Eight", '8'}, {"Nine", '9'}};
+        std::string digit_form;
+        std::string word;
+        auto flush = [&](const std::string &w) {
+          char d = 0;
+          for (const auto &p : kW2D)
+            if (w == p.first) { d = p.second; break; }
+          if (!digit_form.empty())
+            digit_form += ' ';
+          if (d)
+            digit_form += d;
+          else
+            digit_form += w;
+        };
+        for (char c : star_spoken) {
+          if (c == ' ') { if (!word.empty()) { flush(word); word.clear(); } }
+          else word += c;
+        }
+        if (!word.empty())
+          flush(word);
+        if (!digit_form.empty() && digit_form != star_spoken)
+          airport_ctx += " " + digit_form;
+      }
+      // Spoken approach identity ("RNAV Zulu approach runway 04"): ATC speaks the
+      // NATO variant word so bias it or the readback garbles ("Zulu" -> "zero",
+      // "04" -> "zero for"; user 2026-07-19).
+      const std::string appr_spoken =
+          engine::assigned_approach_spoken(ctx_for_whisper);
+      if (!appr_spoken.empty())
+        airport_ctx += " " + appr_spoken;
+      // Callsign-dilution guard (user 2026-07-19: N750XP is recognised well in
+      // DEPARTURE / ENROUTE but worse in ARRIVAL / APPROACH). Once in the terminal
+      // arrival/approach phase the whole ENROUTE navlog is behind the aircraft --
+      // ~60 stale fix tokens that dilute the callsign and the live approach vocab.
+      // Drop them there and rely on the tracker-FORWARD upcoming fixes (STAR +
+      // approach) below, which are the actual readback vocabulary. Cruise/descent
+      // keeps the full navlog (upcoming enroute fixes still matter there).
+      const auto st = atc_state_machine::get_state();
+      using AS = atc_state_machine::ATCState;
+      const auto upcoming = engine::upcoming_route_fix_idents();
+      const bool prune_navlog =
+          !upcoming.empty() &&
+          (st == AS::IFR_ARRIVAL || st == AS::IFR_APPROACH_CONTACT ||
+           st == AS::IFR_APPROACH_DESCENT || st == AS::IFR_APPROACH_TOWER ||
+           st == AS::IFR_LANDING_CLEARED);
       int fix_count = 0;
-      for (const auto &fix : ofp.navlog) {
-        if (!fix.ident.empty() && fix_count < 60) {
-          airport_ctx += " " + fix.ident;
-          ++fix_count;
+      if (!prune_navlog) {
+        for (const auto &fix : ofp.navlog) {
+          if (!fix.ident.empty() && fix_count < 60) {
+            airport_ctx += " " + fix.ident;
+            ++fix_count;
+          }
         }
       }
       // CIFP STAR + approach procedure waypoints from the engine's route table.
@@ -887,7 +1006,7 @@ static void submit_recording_to_stt() {
       // the STAR/APPCH fixes), so "direct <STAR fix>" readbacks garble without
       // them (AMFOU -> "I'm full", LFMN ABDI8R 2026-07-13). Deduped against what
       // the navlog already added. Only the upcoming fixes (tracker-forward).
-      for (const auto &id : engine::upcoming_route_fix_idents()) {
+      for (const auto &id : upcoming) {
         if ((" " + airport_ctx + " ").find(" " + id + " ") == std::string::npos) {
           airport_ctx += " " + id;
           if (++fix_count >= 90)
@@ -1108,6 +1227,35 @@ static void submit_recording_to_stt() {
     // Anchor the value inside the full phrase AND standalone, so both the whole
     // read-back ("reduce speed 210 knots or less") and a terse "210 knots" match.
     airport_ctx += " reduce speed " + kt + " knots or less " + kt + " knots";
+    // Also bias the SPOKEN word forms ("two hundred ten" / "two hundred and ten"):
+    // Voxtral garbles the bare digits ("210" -> "to 110"), and a word anchor gives it
+    // the phrase to reach for (LFLP 2026-07-18). Only when there is a tens remainder
+    // (a round "two hundred" is already covered by the digit form). The readback
+    // verifier parses these forms back to the value (extract_speed compound rule).
+    const int h = cur_spd_kt / 100, r = cur_spd_kt % 100;
+    if (h > 0 && r > 0) {
+      static const char *kOnes[] = {"zero", "one",   "two",   "three", "four",
+                                    "five", "six",   "seven", "eight", "nine"};
+      static const char *kTeens[] = {"ten",      "eleven",  "twelve",
+                                     "thirteen", "fourteen", "fifteen",
+                                     "sixteen",  "seventeen", "eighteen",
+                                     "nineteen"};
+      static const char *kTens[] = {"",      "",      "twenty",  "thirty",
+                                    "forty", "fifty", "sixty",   "seventy",
+                                    "eighty", "ninety"};
+      std::string rem;
+      if (r >= 10 && r < 20)
+        rem = kTeens[r - 10];
+      else if (r >= 20) {
+        rem = kTens[r / 10];
+        if (r % 10)
+          rem += std::string(" ") + kOnes[r % 10];
+      } else
+        rem = kOnes[r];
+      const std::string base = std::string(kOnes[h]) + " hundred";
+      airport_ctx += " " + base + " " + rem + " knots";
+      airport_ctx += " " + base + " and " + rem + " knots";
+    }
   }
 
   if (g_transcript_log_) {
@@ -1300,6 +1448,18 @@ void update() {
           static_cast<double>(XPLMGetElapsedTime()),
           TranscriptKind::System,
           track_event,
+          {},
+          {},
+      });
+    }
+    // Informational engine note (e.g. weather forced a non-preferred approach)
+    // -> transcript System line. Log.txt already has the detailed reason.
+    const std::string note = engine::take_pending_transcript_note();
+    if (!note.empty()) {
+      push_transcript(TranscriptEntry{
+          static_cast<double>(XPLMGetElapsedTime()),
+          TranscriptKind::System,
+          note,
           {},
           {},
       });
