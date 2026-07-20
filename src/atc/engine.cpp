@@ -5266,9 +5266,10 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
     static int s_last_suppressed_target = 0; // dedup the per-frame diagnostic
     if (fc.alt_target_ft != s_last_suppressed_target) {
       s_last_suppressed_target = fc.alt_target_ft;
-      logging::info("[dbg prof] crossing %s -> %d ft SUPPRESSED: below inner-TMA "
-                    "transfer floor %d ft (belongs to inner controller)",
-                    fc.ident.c_str(), fc.alt_target_ft, xfer_floor);
+      if (settings::debug_logging())
+        logging::info("[dbg prof] crossing %s -> %d ft SUPPRESSED: below inner-TMA "
+                      "transfer floor %d ft (belongs to inner controller)",
+                      fc.ident.c_str(), fc.alt_target_ft, xfer_floor);
     }
     return false;
   }
@@ -5293,11 +5294,12 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   const AltHint hint = fc.alt_is_fl ? AltHint::FlightLevel : AltHint::Auto;
   const std::string clr = format_alt_clearance(fc.alt_target_ft, hint, ctx.qnh_hpa, ta);
   *out_text = callsign + ", descend " + clr + ".";
-  logging::info("[dbg prof] crossing %s -> descend %s @ PA %.0f (%.1f NM, TOD %.1f NM, "
-                "lose %.0f ft, st=%d)",
-                fc.ident.c_str(), clr.c_str(),
-                static_cast<double>(ctx.pressure_alt_ft), fc.dist_nm, tod_dist,
-                alt_to_lose, static_cast<int>(atc_state_machine::get_state()));
+  if (settings::debug_logging())
+    logging::info("[dbg prof] crossing %s -> descend %s @ PA %.0f (%.1f NM, TOD %.1f NM, "
+                  "lose %.0f ft, st=%d)",
+                  fc.ident.c_str(), clr.c_str(),
+                  static_cast<double>(ctx.pressure_alt_ft), fc.dist_nm, tod_dist,
+                  alt_to_lose, static_cast<int>(atc_state_machine::get_state()));
   return true;
 }
 
@@ -5381,7 +5383,7 @@ bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
   // DIAGNOSTIC (alpha-20): which fix drove the cap + the tracker index, to pin the
   // premature-200kt bug (LP403 issued at COLLO). Remove once the LFLP looping-RNAV
   // enforcement is fixed.
-  {
+  if (settings::debug_logging()) {
     const FixCompliance dfc = check_next_fix(ctx, 60.0);
     logging::info("[dbg spd] issuing %d kt @ PA %.0f ft -- check_next_fix: %s idx=%d "
                   "dist=%.1f near=%d spd_tgt=%d (route_idx=%d/%d)",
@@ -5780,9 +5782,10 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
               s_dbg_dist_sec -= dt;
               if (s_dbg_dist_sec <= 0.0f) {
                 s_dbg_dist_sec = 15.0f;
-                logging::info("[dbg dist] to %s: routed %.1f NM (leg-by-leg) vs "
-                              "straight %.1f NM (route idx %d, tracker %d)",
-                              step.ident.c_str(), rd, dist_nm, ri, s_route_fix_idx);
+                if (settings::debug_logging())
+                  logging::info("[dbg dist] to %s: routed %.1f NM (leg-by-leg) vs "
+                                "straight %.1f NM (route idx %d, tracker %d)",
+                                step.ident.c_str(), rd, dist_nm, ri, s_route_fix_idx);
               }
               dist_nm = rd;
             }
@@ -6595,7 +6598,7 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
     const int cleared = engine::current_cleared_alt_ft();
     // Diagnostic: 1 Hz snapshot of the descend-to-enter gate inputs, so a flight
     // log shows exactly why it fires or not (remove once validated in-sim).
-    if (tma_ceil > 0)
+    if (tma_ceil > 0 && settings::debug_logging())
       logging::info("[dbg dte] tma_ceil=%d target=%d alt=%.0f cleared=%d floor=%d "
                     "last=%d -> %s",
                     tma_ceil, target_ft, static_cast<double>(ctx.altitude_ft_msl),
@@ -8059,9 +8062,10 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         // looping SALE3P, COLLO sits ~2 NM from PIRUV but 4 fixes earlier, so a
         // distance test fired the clearance at COLLO (LFLP 2026-07-16). The resync
         // keeps the tracker reliable through wide flying.
-        logging::info("[dbg appclr] eta=%.0f route_idx=%d iaf_idx=%d (need>=%d) "
-                      "on_term=1 checkin_pending=%d", eta, s_route_fix_idx,
-                      iaf_idx, iaf_idx - 2, s_sector_checkin_pending ? 1 : 0);
+        if (settings::debug_logging())
+          logging::info("[dbg appclr] eta=%.0f route_idx=%d iaf_idx=%d (need>=%d) "
+                        "on_term=1 checkin_pending=%d", eta, s_route_fix_idx,
+                        iaf_idx, iaf_idx - 2, s_sector_checkin_pending ? 1 : 0);
         // Wait until the pilot has CHECKED IN on the terminal (approach)
         // controller before issuing the clearance. Firing while a handoff is still
         // pending clears the approach on the NEW freq before the pilot arrives --
