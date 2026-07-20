@@ -30,6 +30,7 @@ add_executable(xp_wellys_atc_tests
     test_state_history.cpp
     test_state_revert_guard.cpp
     test_multi_clearance.cpp
+    test_parking.cpp
     test_phraseology_hints.cpp
     test_airport_vrps.cpp
     test_traffic_geometry.cpp

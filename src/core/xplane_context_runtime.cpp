@@ -53,6 +53,8 @@ static XPLMDataRef dr_com1_freq = nullptr;
 static XPLMDataRef dr_com2_freq = nullptr;
 static XPLMDataRef dr_active_com = nullptr;
 static XPLMDataRef dr_aircraft_icao = nullptr;
+static XPLMDataRef dr_acf_size_x = nullptr;
+static XPLMDataRef dr_acf_en_type = nullptr;
 static XPLMDataRef dr_aircraft_tailnum = nullptr;
 static XPLMDataRef dr_ifr_destination = nullptr;
 static XPLMDataRef dr_avionics_on = nullptr;
@@ -197,6 +199,7 @@ static XPLMDataRef dr_transponder_mode = nullptr;
 // ── Airport frequency + runway cache (built from apt.dat) ───────
 static std::unordered_map<std::string, AirportFrequencies> freq_cache_;
 static std::unordered_map<std::string, std::vector<RunwayInfo>> runway_cache_;
+static std::unordered_map<std::string, std::vector<ParkingStand>> parking_cache_;
 static std::unordered_map<std::string, std::string> name_cache_;
 // Airport reference point (lat,lon) — midpoint of first runway, for range
 // checks during frequency-driven active-airport switching.
@@ -319,6 +322,12 @@ static void populate_ctx_from_cache(const std::string &icao,
     ctx.runways.clear();
     ctx.active_runway.clear();
   }
+
+  auto pk_it = parking_cache_.find(icao);
+  if (pk_it != parking_cache_.end())
+    ctx.airport_parking = pk_it->second;
+  else
+    ctx.airport_parking.clear();
 }
 
 // Find an airport whose frequency table contains `freq_khz` within realistic
@@ -637,6 +646,7 @@ struct AptParseData {
       holding;
   std::unordered_map<std::string, int> transition_alts;
   std::unordered_map<std::string, std::vector<TaxiwayMidpoint>> taxiways;
+  std::unordered_map<std::string, std::vector<ParkingStand>> parking;
 };
 
 static void parse_apt_file(const std::string &path, AptParseData &d) {
@@ -652,6 +662,7 @@ static void parse_apt_file(const std::string &path, AptParseData &d) {
   auto &elevations = d.elevations;
   auto &holding = d.holding;
   auto &transition_alts = d.transition_alts;
+  auto &parking = d.parking;
 
   std::string current_icao;
 
@@ -876,6 +887,71 @@ static void parse_apt_file(const std::string &path, AptParseData &d) {
       continue;
     }
 
+    // Parking / ramp start: code 1300 (position + equipment + name) immediately
+    // followed by its code 1301 (ICAO size code + operation type). Captured for
+    // the post-landing taxi-to-parking stand selection.
+    if (code == 1300) {
+      if (current_icao.empty())
+        continue;
+      std::istringstream iss(line);
+      std::vector<std::string> t;
+      std::string tok;
+      while (iss >> tok)
+        t.push_back(tok);
+      if (t.size() < 7) // 1300 lat lon hdg type equipment name...
+        continue;
+      ParkingStand ps;
+      try {
+        ps.lat = std::stod(t[1]);
+        ps.lon = std::stod(t[2]);
+      } catch (...) { // NOLINT(bugprone-empty-catch)
+        continue;
+      }
+      // Equipment is '|'-separated (jets|turboprops|props|helos, any subset) --
+      // tokenize so "props" is not matched inside "turboprops".
+      {
+        const std::string &e = t[5];
+        std::size_t p = 0;
+        while (p <= e.size()) {
+          const std::size_t q = e.find('|', p);
+          const std::string w =
+              e.substr(p, q == std::string::npos ? std::string::npos : q - p);
+          if (w == "jets")
+            ps.jets = true;
+          else if (w == "turboprops")
+            ps.turboprops = true;
+          else if (w == "props")
+            ps.props = true;
+          else if (w == "helos")
+            ps.helos = true;
+          if (q == std::string::npos)
+            break;
+          p = q + 1;
+        }
+      }
+      std::string name;
+      for (std::size_t i = 6; i < t.size(); ++i)
+        name += (i > 6 ? " " : "") + t[i];
+      ps.name = name;
+      parking[current_icao].push_back(ps);
+      continue;
+    }
+    if (code == 1301) {
+      auto it = current_icao.empty() ? parking.end()
+                                     : parking.find(current_icao);
+      if (it == parking.end() || it->second.empty())
+        continue;
+      std::istringstream iss(line);
+      std::string code_tok, size_tok, op_tok;
+      iss >> code_tok >> size_tok >> op_tok;
+      ParkingStand &ps = it->second.back(); // 1301 attaches to the prior 1300
+      if (!size_tok.empty())
+        ps.size_code = static_cast<char>(
+            std::toupper(static_cast<unsigned char>(size_tok[0])));
+      ps.general_aviation = (op_tok == "general_aviation");
+      continue;
+    }
+
     // Land runway: code 100
     if (code == 100) {
       if (current_icao.empty())
@@ -1064,6 +1140,8 @@ static void build_towered_cache() {
     data.transition_alts[k] = v;
   for (auto &[k, v] : custom.taxiways)
     data.taxiways[k] = std::move(v);
+  for (auto &[k, v] : custom.parking)
+    data.parking[k] = std::move(v);
 
   if (!custom.freqs.empty() || !custom.runways.empty()) {
     char log[256];
@@ -1084,6 +1162,7 @@ static void build_towered_cache() {
   holding_cache_ = std::move(data.holding);
   transition_alt_cache_ = std::move(data.transition_alts);
   taxiway_midpoint_cache_ = std::move(data.taxiways);
+  parking_cache_ = std::move(data.parking);
   towered_cache_ready_ = true;
 
   // Count towered airports for log
@@ -1128,6 +1207,9 @@ void init() {
       XPLMFindDataRef("sim/cockpit2/radios/actuators/audio_com_selection");
   dr_aircraft_icao = XPLMFindDataRef("sim/aircraft/view/acf_ICAO");
   dr_aircraft_tailnum = XPLMFindDataRef("sim/aircraft/view/acf_tailnum");
+  // Aircraft profile for GA-stand selection: wingspan (m) + engine type.
+  dr_acf_size_x = XPLMFindDataRef("sim/aircraft/view/acf_size_x");
+  dr_acf_en_type = XPLMFindDataRef("sim/aircraft/prop/acf_en_type");
   dr_ifr_destination =
       XPLMFindDataRef("sim/flightmodel/misc/destination_airport_id");
   dr_avionics_on = XPLMFindDataRef("sim/cockpit/electrical/avionics_on");
@@ -1233,6 +1315,22 @@ void update() {
     char buf[64] = {};
     XPLMGetDatab(dr_aircraft_tailnum, buf, 0, sizeof(buf) - 1);
     ctx.aircraft_tail_number = buf;
+  }
+  // Aircraft wingspan (acf_size_x = model width in metres) -> ICAO size code, and
+  // engine type -> jet / turboprop / prop, for GA-stand selection.
+  if (dr_acf_size_x)
+    ctx.aircraft_wingspan_m = XPLMGetDataf(dr_acf_size_x);
+  if (dr_acf_en_type) {
+    int en[8] = {};
+    XPLMGetDatavi(dr_acf_en_type, en, 0, 1); // engine 0
+    // acf_en_type: 2/8 = turboprop (free/fixed turbine); 4/5/6/7 = jet/rocket;
+    // else reciprocating/electric = prop.
+    if (en[0] == 4 || en[0] == 5 || en[0] == 6 || en[0] == 7)
+      ctx.aircraft_engine_kind = EngineKind::Jet;
+    else if (en[0] == 2 || en[0] == 8)
+      ctx.aircraft_engine_kind = EngineKind::Turboprop;
+    else
+      ctx.aircraft_engine_kind = EngineKind::Prop;
   }
   // Destination ICAO: SimBrief OFP takes priority when loaded.
   // Fall back to X-Plane FMS (destination entry) or the aircraft DataRef only

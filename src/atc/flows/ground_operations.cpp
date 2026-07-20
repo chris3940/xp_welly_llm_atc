@@ -1151,15 +1151,28 @@ bool check_freq_precondition(const PilotMessage &msg, const XPlaneContext &ctx,
        msg.intent == PI::REPORT_HOLDING_SHORT) &&
       ctx.frequency_type == FT::GROUND && atc_state_machine::was_airborne()) {
     auto vars_v = build_vars(msg, ctx);
-    // Give the REAL taxi-to-parking (with the actual taxiway) in ONE reply, and
-    // require a readback so the pilot's readback is consumed -- NOT re-parsed as a
-    // fresh REQUEST_TAXI that fired a SECOND "taxi to GA parking via X" (the
-    // "VFR reply and IFR one" double, user 2026-07-19). Was a generic "taxi to the
-    // apron" ack.
-    resp.text = atc_templates::fill(
-        "{callsign}, taxi to general aviation parking {nearest_taxiway}, "
-        "report on stand.",
-        vars_v);
+    // Pick a size/type-appropriate general-aviation STAND from apt.dat (rows
+    // 1300/1301) for the arriving aircraft -- a Falcon 7X (Code C jet) and a TBM
+    // (Code A turboprop) get different stands. Named stand when resolvable, else
+    // the generic "general aviation parking {taxiway}" fallback (user 2026-07-20).
+    const std::string ga_stand = xplane_context::pick_ga_stand(
+        ctx.airport_parking,
+        xplane_context::icao_size_code_for_wingspan(ctx.aircraft_wingspan_m),
+        ctx.aircraft_engine_kind, ctx.latitude, ctx.longitude);
+    // Give the REAL taxi-to-parking in ONE reply, and require a readback so the
+    // pilot's readback is consumed -- NOT re-parsed as a fresh REQUEST_TAXI that
+    // fired a SECOND "taxi to GA parking via X" (the "VFR reply and IFR one"
+    // double, user 2026-07-19).
+    if (!ga_stand.empty()) {
+      vars_v["stand"] = ga_stand;
+      resp.text = atc_templates::fill(
+          "{callsign}, taxi to {stand}, report on stand.", vars_v);
+    } else {
+      resp.text = atc_templates::fill(
+          "{callsign}, taxi to general aviation parking {nearest_taxiway}, "
+          "report on stand.",
+          vars_v);
+    }
     resp.next_state = internal::get_state_ref();
     resp.requires_readback = true;
     // Arm readback-pending explicitly: this guard path short-circuits before the

@@ -133,4 +133,58 @@ airport_pos_for(const std::string &) {
 }
 #endif
 
+char icao_size_code_for_wingspan(float w) {
+  if (w < 15.0f)
+    return 'A';
+  if (w < 24.0f)
+    return 'B';
+  if (w < 36.0f)
+    return 'C';
+  if (w < 52.0f)
+    return 'D';
+  if (w < 65.0f)
+    return 'E';
+  return 'F';
+}
+
+std::string pick_ga_stand(const std::vector<ParkingStand> &stands,
+                          char ac_size_code, EngineKind ac_engine, double ac_lat,
+                          double ac_lon) {
+  auto eq_ok = [&](const ParkingStand &s) {
+    switch (ac_engine) {
+    case EngineKind::Jet:
+      return s.jets;
+    case EngineKind::Turboprop:
+      return s.turboprops || s.props;
+    case EngineKind::Prop:
+    default:
+      return s.props || s.turboprops;
+    }
+  };
+  const double kdeg2rad = 0.017453292519943295;
+  const double coslat = std::cos(ac_lat * kdeg2rad);
+  auto d2 = [&](const ParkingStand &s) {
+    const double dlat = s.lat - ac_lat;
+    const double dlon = (s.lon - ac_lon) * coslat;
+    return dlat * dlat + dlon * dlon;
+  };
+  const ParkingStand *best_fit = nullptr;      // smallest size >= ac, then nearest
+  const ParkingStand *best_fallback = nullptr; // largest eq-ok GA, then nearest
+  for (const auto &s : stands) {
+    if (!s.general_aviation || !eq_ok(s))
+      continue;
+    if (!best_fallback || s.size_code > best_fallback->size_code ||
+        (s.size_code == best_fallback->size_code &&
+         d2(s) < d2(*best_fallback)))
+      best_fallback = &s;
+    if (s.size_code < ac_size_code)
+      continue; // too small for this aircraft
+    if (!best_fit || s.size_code < best_fit->size_code ||
+        (s.size_code == best_fit->size_code && d2(s) < d2(*best_fit)))
+      best_fit = &s;
+  }
+  const ParkingStand *pick = best_fit ? best_fit : best_fallback;
+  return pick ? pick->name : std::string();
+}
+
 } // namespace xplane_context

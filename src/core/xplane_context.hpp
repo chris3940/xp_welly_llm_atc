@@ -45,6 +45,36 @@ struct RunwayInfo {
   int surface_code = 0;  // 1=asphalt, 2=concrete, etc.
 };
 
+enum class EngineKind { Prop = 0, Turboprop = 1, Jet = 2 };
+
+// A parking position from apt.dat: row 1300 (lat/lon + equipment + name) plus its
+// row 1301 (ICAO size code + operation type). Used to taxi an arriving aircraft to
+// a size/type-appropriate general-aviation stand by name.
+struct ParkingStand {
+  std::string name; // e.g. "GA Ramp Start 12"
+  double lat = 0.0;
+  double lon = 0.0;
+  char size_code = 'A';           // ICAO width code A..F (row 1301)
+  bool general_aviation = false;  // row 1301 operation == general_aviation
+  bool jets = false;              // row 1300 equipment flags
+  bool turboprops = false;
+  bool props = false;
+  bool helos = false;
+};
+
+// ICAO wingspan size code from wingspan in metres: A<15, B<24, C<36, D<52, E<65,
+// else F. Derives the aircraft's size code from its wingspan.
+char icao_size_code_for_wingspan(float wingspan_m);
+
+// Pick the best-fit general-aviation stand for an aircraft: the SMALLEST GA stand
+// whose size >= ac_size_code AND whose equipment accepts ac_engine, tie-broken by
+// nearest to (ac_lat, ac_lon). Falls back to the largest engine-compatible GA stand
+// when none is big enough (e.g. a Code-C bizjet where the biggest GA stand is B).
+// Returns the stand name, or "" when the airport has no GA stand. SDK-free.
+std::string pick_ga_stand(const std::vector<ParkingStand> &stands,
+                          char ac_size_code, EngineKind ac_engine, double ac_lat,
+                          double ac_lon);
+
 enum class FrequencyType {
   UNKNOWN,
   DELIVERY,
@@ -152,6 +182,12 @@ struct XPlaneContext {
   double airport_lat = 0.0;         // airport position (for range checks)
   double airport_lon = 0.0;
   std::vector<RunwayInfo> runways;
+  // General-aviation parking stands at the nearest airport (apt.dat 1300/1301),
+  // for the post-landing taxi-to-parking clearance. Empty until parsed.
+  std::vector<ParkingStand> airport_parking;
+  // Aircraft profile for stand selection (read from DataRefs each frame).
+  float aircraft_wingspan_m = 0.0f;
+  EngineKind aircraft_engine_kind = EngineKind::Prop;
   std::string active_runway;               // wind-determined, e.g. "28", "09L"
   std::string active_runway_holding_point; // apt.dat 1201 node name at
                                            // hold-short, e.g. "A3"
