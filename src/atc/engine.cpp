@@ -199,6 +199,7 @@ static int round_to_fl(int feet); // defined near poll_sid_climb
 static void init_route_fixes(const xplane_context::XPlaneContext &ctx); // defined near poll_approach
 static void build_sid_route_table(const xplane_context::XPlaneContext &ctx); // departure half of the route table
 static std::string controller_label_for(const airspace_db::Controller *ctrl); // defined near handoff helpers
+static std::string openair_sector_label(const std::string &name); // openair NAME -> label ("MARSEILLE CTA..." -> "Marseille")
 static bool resolve_sector_controller(const openair_db::AirspaceEntry &enc,
                                       bool terminal, std::string *out_label,
                                       float *out_mhz); // unified handoff resolver
@@ -578,6 +579,17 @@ void training_jump_enroute(int cleared_alt_ft) {
     }
     if (s_current_controller_label.empty())
       s_current_controller_label = "Control";
+    // Prefer the accurate openair sector NAME for the label (e.g. "Marseille" over
+    // the broad atc.dat "France") while keeping the atc.dat frequency above
+    // (openair = geometry + name, atc.dat = frequency; LFMN 2026-07-20).
+    if (openair_db::ready()) {
+      const std::string oa = openair_sector_label(
+          openair_db::find_enclosing(ctx.latitude, ctx.longitude,
+                                     openair_alt(ctx))
+              .name);
+      if (!oa.empty())
+        s_current_controller_label = oa;
+    }
   }
 
   // Hardening 2: an IFR training jump has no destination / STAR / approach
@@ -732,6 +744,16 @@ void training_jump_arrival() {
     }
     if (s_current_controller_label.empty())
       s_current_controller_label = "Control";
+    // Accurate openair sector NAME for the label (e.g. "Marseille" over the broad
+    // atc.dat "France"), keeping the atc.dat frequency (LFMN 2026-07-20).
+    if (openair_db::ready()) {
+      const std::string oa = openair_sector_label(
+          openair_db::find_enclosing(ctx.latitude, ctx.longitude,
+                                     openair_alt(ctx))
+              .name);
+      if (!oa.empty())
+        s_current_controller_label = oa;
+    }
   }
   atc_state_machine::set_session_callsign(settings::pilot_callsign());
   atc_state_machine::set_state(atc_state_machine::ATCState::IFR_ARRIVAL);
@@ -2918,6 +2940,33 @@ static std::string controller_location(const std::string &raw) {
 // facility airport city (e.g. LFLB → "Chambery") over the abstract org name
 // stored in NAME (e.g. "LYON"), which may cover multiple cities.
 static std::string delegated_callsign(const std::string &org); // defined near resolve_acc_controller
+
+// Derive a spoken controller label from an openair sector NAME (design principle:
+// openair = geometry + NAME, atc.dat = frequency). "MARSEILLE CTA SECTOR 2" ->
+// "Marseille". Used when the aircraft is inside a NAMED enroute openair sector whose
+// own controller/frequency is not in atc.dat: keep the accurate openair name for the
+// label while taking the frequency from the atc.dat CTR fallback -- otherwise a
+// MARSEILLE sector is announced as the broad atc.dat "France" even though the IFR
+// tab (openair) resolves MARSEILLE (LFMN 2026-07-20).
+static std::string openair_sector_label(const std::string &name) {
+  std::string n = name;
+  for (const char *kw :
+       {" CTA", " TMA", " CTR", " FIR", " UIR", " SECTOR", " SEC"}) {
+    const auto p = n.find(kw);
+    if (p != std::string::npos) {
+      n = n.substr(0, p);
+      break;
+    }
+  }
+  while (!n.empty() && n.back() == ' ')
+    n.pop_back();
+  if (n.empty())
+    return "";
+  n[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(n[0])));
+  for (std::size_t i = 1; i < n.size(); ++i)
+    n[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(n[i])));
+  return n;
+}
 
 static std::string controller_label_for(const airspace_db::Controller *ctrl) {
   if (!ctrl)
@@ -6325,9 +6374,10 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
 
   std::string new_label;
   float new_mhz = 0.0f;
+  openair_db::AirspaceEntry enc; // hoisted: the atc.dat fallback reuses its NAME
   if (openair_db::ready()) {
-    const openair_db::AirspaceEntry enc = openair_db::find_enclosing(
-        ctx.latitude, ctx.longitude, openair_alt(ctx));
+    enc = openair_db::find_enclosing(ctx.latitude, ctx.longitude,
+                                     openair_alt(ctx));
     // openair geometry drives the controller for BOTH terminal TMAs (Geneva /
     // Chambery) AND enroute sub-sectors / cross-border delegation (Milan
     // sub-CTAs, LFFF->LSAS) via the unified resolver. The atc.dat CTR picker
@@ -6356,8 +6406,14 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
         sector_picker::pick_next(ctrs, s_acc_visited_sector_freqs);
     if (!best)
       return false;
-    new_label = controller_label_for(best);
     new_mhz = static_cast<float>(best->freqs_khz.front()) / 1000.0f;
+    // Label from the openair sector NAME when the aircraft is inside a named
+    // enroute openair sector (e.g. MARSEILLE CTA) that had no own atc.dat freq --
+    // take the atc.dat CTR FREQUENCY here but keep the accurate openair name for
+    // the label, else a MARSEILLE sector is announced as the broad atc.dat "France"
+    // (LFMN 2026-07-20). Falls back to the atc.dat label when openair is absent.
+    const std::string oa_label = openair_sector_label(enc.name);
+    new_label = oa_label.empty() ? controller_label_for(best) : oa_label;
   }
   if (new_mhz <= 0.0f)
     return false;
@@ -8126,6 +8182,17 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
                                                        : AltHint::Feet,
                                           ctx.qnh_hpa, ctx.transition_alt_ft);
               s_enroute_cleared_alt_ft = fc.alt_target_ft;
+            }
+            // QNH with the approach clearance: the pilot flies the approach /
+            // descends to minima against this QNH, so ICAO passes it with the
+            // clearance (user 2026-07-20). Append only when a descend-to-feet
+            // clause (which already carries QNH via format_alt_clearance) was not
+            // added, to avoid stating it twice.
+            if (ctx.qnh_hpa > 0 && msg.find("QNH") == std::string::npos) {
+              char qbuf[24];
+              std::snprintf(qbuf, sizeof(qbuf), ", QNH %d", ctx.qnh_hpa);
+              msg += qbuf;
+              s_qnh_stated = true;
             }
             msg += ".";
             *out_text = msg;
