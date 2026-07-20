@@ -1140,8 +1140,16 @@ bool check_freq_precondition(const PilotMessage &msg, const XPlaneContext &ctx,
   // acknowledges and taxis them in. Gated on was_airborne() so a pre-departure
   // call is never affected (user 2026-07-19: LFMN vacated on Ground -> "contact
   // Tower"). A subsequent "at the stand" still triggers the IFR closure handler.
-  if (msg.intent == PI::RUNWAY_VACATED && ctx.frequency_type == FT::GROUND &&
-      atc_state_machine::was_airborne()) {
+  // Also accept REPORT_HOLDING_SHORT: a post-landing "runway vacated, holding
+  // point Golf 1" reports the holding point where the aircraft stopped after
+  // vacating -- the pilot IS ready to taxi in. The "holding point" keyword makes
+  // the parser pick REPORT_HOLDING_SHORT over RUNWAY_VACATED, but post-landing
+  // (was_airborne + on GROUND) both mean the same thing here (user 2026-07-20:
+  // "leaving a runway you can report the holding point where you are, it should
+  // work"). was_airborne() keeps the PRE-departure holding-short report untouched.
+  if ((msg.intent == PI::RUNWAY_VACATED ||
+       msg.intent == PI::REPORT_HOLDING_SHORT) &&
+      ctx.frequency_type == FT::GROUND && atc_state_machine::was_airborne()) {
     auto vars_v = build_vars(msg, ctx);
     // Give the REAL taxi-to-parking (with the actual taxiway) in ONE reply, and
     // require a readback so the pilot's readback is consumed -- NOT re-parsed as a
