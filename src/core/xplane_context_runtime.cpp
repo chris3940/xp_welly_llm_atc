@@ -949,6 +949,7 @@ static void parse_apt_file(const std::string &path, AptParseData &d) {
         ps.size_code = static_cast<char>(
             std::toupper(static_cast<unsigned char>(size_tok[0])));
       ps.general_aviation = (op_tok == "general_aviation");
+      ps.op_airline = (op_tok == "airline");
       continue;
     }
 

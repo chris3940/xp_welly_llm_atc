@@ -85,14 +85,26 @@ TEST_CASE("ga-stand: TBM (Code A turboprop) -> a size-A stand", "[parking]") {
   REQUIRE(a_stand);
 }
 
-TEST_CASE("ga-stand: no GA stand -> empty", "[parking]") {
+TEST_CASE("ga-stand: no stand / airline-only -> empty", "[parking]") {
   std::vector<ParkingStand> none;
   REQUIRE(pick_ga_stand(none, 'A', EngineKind::Prop, 0.0, 0.0).empty());
-  // A stand that isn't general_aviation is ignored.
+  // An explicit AIRLINE gate is excluded even when it's the only stand.
   ParkingStand airline;
   airline.name = "Gate 10";
   airline.size_code = 'C';
   airline.jets = true;
-  airline.general_aviation = false;
+  airline.op_airline = true;
   REQUIRE(pick_ga_stand({airline}, 'A', EngineKind::Jet, 0.0, 0.0).empty());
+}
+
+TEST_CASE("ga-stand: untagged (no 1301) stand used as non-airline fallback",
+          "[parking]") {
+  // Custom scenery ramp start without operation metadata: not general_aviation,
+  // not airline -> should still be picked via the non-airline fallback pass.
+  ParkingStand ramp;
+  ramp.name = "Ramp 5";
+  ramp.size_code = 'B';
+  ramp.jets = true;
+  ramp.props = true;
+  REQUIRE(pick_ga_stand({ramp}, 'A', EngineKind::Jet, 0.0, 0.0) == "Ramp 5");
 }

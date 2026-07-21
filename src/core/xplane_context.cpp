@@ -14,6 +14,7 @@
 #include "core/xplane_context.hpp"
 
 #include <cmath>
+#include <functional>
 
 namespace xplane_context {
 
@@ -168,23 +169,36 @@ std::string pick_ga_stand(const std::vector<ParkingStand> &stands,
     const double dlon = (s.lon - ac_lon) * coslat;
     return dlat * dlat + dlon * dlon;
   };
-  const ParkingStand *best_fit = nullptr;      // smallest size >= ac, then nearest
-  const ParkingStand *best_fallback = nullptr; // largest eq-ok GA, then nearest
-  for (const auto &s : stands) {
-    if (!s.general_aviation || !eq_ok(s))
-      continue;
-    if (!best_fallback || s.size_code > best_fallback->size_code ||
-        (s.size_code == best_fallback->size_code &&
-         d2(s) < d2(*best_fallback)))
-      best_fallback = &s;
-    if (s.size_code < ac_size_code)
-      continue; // too small for this aircraft
-    if (!best_fit || s.size_code < best_fit->size_code ||
-        (s.size_code == best_fit->size_code && d2(s) < d2(*best_fit)))
-      best_fit = &s;
-  }
-  const ParkingStand *pick = best_fit ? best_fit : best_fallback;
-  return pick ? pick->name : std::string();
+  // One pass over the stands that pass `eligible`: smallest fitting size (>= the
+  // aircraft) nearest wins; else the largest engine-compatible stand (nearest).
+  auto run = [&](const std::function<bool(const ParkingStand &)> &eligible) {
+    const ParkingStand *best_fit = nullptr;      // smallest size >= ac, nearest
+    const ParkingStand *best_fallback = nullptr; // largest eq-ok, nearest
+    for (const auto &s : stands) {
+      if (!eligible(s) || !eq_ok(s))
+        continue;
+      if (!best_fallback || s.size_code > best_fallback->size_code ||
+          (s.size_code == best_fallback->size_code &&
+           d2(s) < d2(*best_fallback)))
+        best_fallback = &s;
+      if (s.size_code < ac_size_code)
+        continue; // too small for this aircraft
+      if (!best_fit || s.size_code < best_fit->size_code ||
+          (s.size_code == best_fit->size_code && d2(s) < d2(*best_fit)))
+        best_fit = &s;
+    }
+    const ParkingStand *pick = best_fit ? best_fit : best_fallback;
+    return pick ? pick->name : std::string();
+  };
+  // Prefer stands explicitly tagged general_aviation (basic XP12 apt.dat). Fall
+  // back to any NON-airline stand -- custom sceneries often have ramp starts
+  // (row 1300) without the row-1301 metadata, so nothing is tagged
+  // general_aviation and the GA-only pass finds nothing (LFMN_JustSim, user
+  // 2026-07-21). Airline gates stay excluded.
+  std::string r = run([](const ParkingStand &s) { return s.general_aviation; });
+  if (r.empty())
+    r = run([](const ParkingStand &s) { return !s.op_airline; });
+  return r;
 }
 
 } // namespace xplane_context

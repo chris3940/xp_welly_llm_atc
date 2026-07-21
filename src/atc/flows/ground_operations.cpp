@@ -1159,6 +1159,13 @@ bool check_freq_precondition(const PilotMessage &msg, const XPlaneContext &ctx,
         ctx.airport_parking,
         xplane_context::icao_size_code_for_wingspan(ctx.aircraft_wingspan_m),
         ctx.aircraft_engine_kind, ctx.latitude, ctx.longitude);
+    logging::info(
+        "[dbg parking] airport=%s stands=%zu wingspan=%.1fm size=%c engine=%d "
+        "-> '%s'",
+        ctx.nearest_airport_id.c_str(), ctx.airport_parking.size(),
+        static_cast<double>(ctx.aircraft_wingspan_m),
+        xplane_context::icao_size_code_for_wingspan(ctx.aircraft_wingspan_m),
+        static_cast<int>(ctx.aircraft_engine_kind), ga_stand.c_str());
     // Give the REAL taxi-to-parking in ONE reply, and require a readback so the
     // pilot's readback is consumed -- NOT re-parsed as a fresh REQUEST_TAXI that
     // fired a SECOND "taxi to GA parking via X" (the "VFR reply and IFR one"

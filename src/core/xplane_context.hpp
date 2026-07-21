@@ -56,6 +56,7 @@ struct ParkingStand {
   double lon = 0.0;
   char size_code = 'A';           // ICAO width code A..F (row 1301)
   bool general_aviation = false;  // row 1301 operation == general_aviation
+  bool op_airline = false;        // row 1301 operation == airline (exclude for GA)
   bool jets = false;              // row 1300 equipment flags
   bool turboprops = false;
   bool props = false;

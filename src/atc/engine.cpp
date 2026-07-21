@@ -169,6 +169,12 @@ static std::string s_arrival_freq_handoff_label;
 // 20–30 seconds later in the approach clearance.  Reset when a new enroute
 // phase begins (new flight, sector entry).
 static bool s_qnh_stated = false;
+// True after a training jump DIRECTLY into ARRIVAL/APPROACH (no en-route phase),
+// until the first Approach check-in ack consumes it. Makes that first descent
+// clearance say "descend FLxx" (fresh) rather than "continue descent to FLxx"
+// -- there was no prior en-route/Centre clearance to CONTINUE (LFMN jump-to-APP
+// 2026-07-21).
+static bool s_jump_no_enroute_descent = false;
 static float s_enroute_app_check_sec = 0.0f; // throttle TMA-entry poll to 1 Hz
 static float s_descent_timer        = 0.0f; // time spent in IFR_DESCENT (guards 50 NM fallback)
 static float s_descent_arrival_check_sec = 0.0f; // throttle DESCENT->ARRIVAL poll to 1 Hz
@@ -470,6 +476,7 @@ void reset() {
   s_enroute_deviation_cooldown_sec = 0.0f;
   s_cruise_stepup_issued = false;
   s_qnh_stated = false;
+  s_jump_no_enroute_descent = false;
   s_descent_timer = 0.0f;
   s_enroute_sector_freq_khz = 0;
   s_enroute_visited_sector_freqs.clear();
@@ -555,6 +562,7 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_navlog_alt_step_idx = 0;
   s_route_step_idx = 0;
   s_qnh_stated = false;
+  s_jump_no_enroute_descent = false;
   s_descent_timer = 0.0f;
 
   // Hardening 1: seed the controller label from the enclosing CTR sector at
@@ -664,6 +672,7 @@ void training_jump_approach() {
   // Hardening 3 (see training_jump_enroute): lock the callsign so an RNAV
   // IAF ident readback ("Lima Papa 403") can't hijack it mid-approach.
   atc_state_machine::set_session_callsign(settings::pilot_callsign());
+  s_jump_no_enroute_descent = true; // no en-route descent -> first ack "descend"
   atc_state_machine::set_state(atc_state_machine::ATCState::IFR_APPROACH_CONTACT);
   // Set a temporary approach label so the transcript doesn't fall back to
   // the nearest airport name during check-in (training jump skips handoff).
@@ -756,6 +765,7 @@ void training_jump_arrival() {
     }
   }
   atc_state_machine::set_session_callsign(settings::pilot_callsign());
+  s_jump_no_enroute_descent = true; // no en-route descent -> first ack "descend"
   atc_state_machine::set_state(atc_state_machine::ATCState::IFR_ARRIVAL);
   logging::info("training_jump_arrival: dest=%s controller=%s (position on the "
                 "STAR, descending, under ACC, before the TMA)",
@@ -2052,8 +2062,13 @@ void process_transcript(Input in, Done done) {
     // "Continue descent" = aircraft already at/below target, no new altitude.
     // "Continue descent to X" = Centre already cleared this altitude; pilot is descending.
     // "Descend X" = Approach issues a new (lower) target not previously cleared.
+    // A jump directly into ARRIVAL/APPROACH had no spoken en-route descent, so
+    // "continue descent" is wrong here -- force a fresh "descend" (LFMN jump-to-APP
+    // 2026-07-21). One-shot: consumed at this first check-in.
     const bool initial_ft_from_centre =
-        s_enroute_cleared_alt_ft > 0 && initial_ft == s_enroute_cleared_alt_ft;
+        s_enroute_cleared_alt_ft > 0 && initial_ft == s_enroute_cleared_alt_ft &&
+        !s_jump_no_enroute_descent;
+    s_jump_no_enroute_descent = false;
     char buf[240];
     if (no_descent_needed) {
       // Already level at (within tolerance of) the cleared altitude -> MAINTAIN,
@@ -8770,7 +8785,14 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
 bool poll_approach_alignment(const xplane_context::XPlaneContext &ctx, float dt,
                              std::string *out_text) {
   using AS = atc_state_machine::ATCState;
-  if (atc_state_machine::get_state() != AS::IFR_APPROACH_TOWER)
+  // Fire only AFTER the pilot is cleared to land (LANDING_CLEARED), never in
+  // APPROACH_TOWER before the Tower check-in -- otherwise the "confirm
+  // established" nag fires on the Tower freq while the pilot is still turning
+  // onto final and has not called Tower yet, spoken with the stale Approach
+  // label (LFMN 2026-07-20/21: fired at ~2:40 after the handoff, before check-in;
+  // the earlier 45 s cooldown was too short). Post-clearance it is a genuine
+  // "you are cleared but drifting off centerline" warning.
+  if (atc_state_machine::get_state() != AS::IFR_LANDING_CLEARED)
     return false;
 
   // Only once the pilot has actually switched to the Tower frequency. The
