@@ -422,7 +422,7 @@ static int s_sid_step1_alt_ft = 0; // computed once on first entry
 // handoff fires until the aircraft is this many NM (great-circle) from the
 // departure airport. 0 = no hold (normal continuous climb). Set only for local
 // procedures that keep an aircraft low under an adjacent TMA (LFLP west SIDs:
-// FL110 until ~30 NM out -> avoid a pointless Geneva-APP shuffle). Overridden
+// FL110 until ~20 NM out -> avoid a pointless Geneva-APP shuffle). Overridden
 // when the SID's own minimum crossing altitude is above step-1 (the procedure
 // itself demands a higher climb).
 static float s_sid_hold_release_nm = 0.0f;
@@ -3334,14 +3334,14 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     }
     if (lflp_west) {
       s_sid_step1_alt_ft = 11000; // FL110 — clear of Geneva TMA after SOCOF
-      // Hold FL110 until 30 NM (great-circle) from LFLP before releasing the
+      // Hold FL110 until 20 NM (great-circle) from LFLP before releasing the
       // cruise climb + radar handoff: Chambery keeps west departures low until
       // past ~TOLNA to avoid a pointless short handoff to Geneva APP (user
       // 2026-07-21). Great-circle from the field is a good-enough proxy for the
       // fix here. FUTURE: move this whole west-SID case (hold_alt + release) into
       // airport+.json as a per-airport "departure_holds" section so it is not
       // engine-hardcoded -- the loader (airport_overrides) already exists.
-      s_sid_hold_release_nm = 30.0f;
+      s_sid_hold_release_nm = 20.0f;
     } else {
       int floor_ft = ctx.ifr_sid_min_alt_ft > 0 ? ctx.ifr_sid_min_alt_ft : 5000;
       int cruise_ft =
@@ -8419,9 +8419,16 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       // R22LZ has a DA + runway leg, but its curved final tripped the guess ->
       // bogus "report runway in sight"). Pilot-requested visual approaches are
       // a separate future feature.
+      // MDA/visual ONLY when the approach neither terminates at the runway NOR
+      // publishes a vertical angle. RNAV DA approaches (LFMD R35-Z = 3.5 deg,
+      // LFMN R04LA) end at a fix + missed-approach hold (no runway leg) yet carry
+      // a vertical angle -> they are DA/instrument -> "report established" (user
+      // 2026-07-22: RNAV 35 Z was wrongly read as MDA -> "report runway in sight").
       s_approach_has_visual_final =
           !s_assigned_approach_designator.empty() &&
           !cifp_reader::approach_terminates_at_runway(
+              ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator) &&
+          !cifp_reader::approach_has_vertical_guidance(
               ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator);
       logging::info("[approach] Tower: designator=%s rwy=%s visual-final(MDA)=%d",
                     s_assigned_approach_designator.c_str(),

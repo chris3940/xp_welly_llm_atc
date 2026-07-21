@@ -161,7 +161,8 @@ static std::string extract_position(const PilotMessage &msg,
 // Converts a SID designator to a speakable form for TTS.
 // "ROMA2A" → "ROMA 2 Alpha", "LTP2A" → "LTP 2 Alpha"
 // Pattern: last char = letter, second-to-last = digit.
-static std::string format_sid_for_tts(const std::string &sid) {
+static std::string format_sid_for_tts(const std::string &sid,
+                                      const std::string &last_fix) {
   if (sid.size() < 3)
     return sid;
   char last  = sid.back();
@@ -177,7 +178,18 @@ static std::string format_sid_for_tts(const std::string &sid) {
   char letter = static_cast<char>(std::toupper(static_cast<unsigned char>(last)));
   std::string nato = (letter >= 'A' && letter <= 'Z')
                          ? kNato[letter - 'A'] : std::string(1, letter);
-  return sid.substr(0, sid.size() - 2) + " " + prev + " " + nato;
+  // Point name: a SID is named after its terminating fix, but the ARINC-424
+  // designator truncates that fix to <=6 chars (ROMAM -> "ROMA2A"). ICAO
+  // phraseology speaks the FULL fix name -- "ROMAM two alpha", not "ROMA two
+  // alpha" (user 2026-07-22; same expansion as the STAR arrival calls). Use the
+  // full last fix when the designator prefix is a truncation of it; otherwise
+  // fall back to the designator prefix.
+  std::string prefix = sid.substr(0, sid.size() - 2);
+  std::string point  = prefix;
+  if (!last_fix.empty() && last_fix.size() >= prefix.size() &&
+      last_fix.compare(0, prefix.size(), prefix) == 0)
+    point = last_fix;
+  return point + " " + prev + " " + nato;
 }
 
 // ── Squawk generation ────────────────────────────────────────────────
@@ -416,7 +428,8 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
       {"ifr_sid_phrase", format_sid_for_tts(
                              !ctx.ifr_cifp_sid.empty() ? ctx.ifr_cifp_sid
                              : (!ctx.ifr_sid.empty()   ? ctx.ifr_sid
-                                                       : std::string("SID")))},
+                                                       : std::string("SID")),
+                             ctx.ifr_sid_last_fix)},
       // {ifr_sid_last_fix}: last waypoint on the ATC-assigned SID (from CIFP).
       // Used for ATC-initiated "direct {ifr_sid_last_fix}" shortcut messages.
       {"ifr_sid_last_fix", ctx.ifr_sid_last_fix},

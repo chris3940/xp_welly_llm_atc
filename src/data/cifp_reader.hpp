@@ -160,6 +160,14 @@ bool approach_terminates_at_runway(const std::string &cifp_dir,
                                    const std::string &icao,
                                    const std::string &designator);
 
+// True if any leg of the approach publishes a coded vertical angle (ARINC-424
+// field, e.g. 3.50 deg) -> vertical guidance -> flown to a DECISION ALTITUDE
+// ("report established"). More reliable than runway-leg presence for RNAV DA
+// approaches that end at a fix + missed-approach hold (LFMD R35-Y/Z, LFMN R04LA).
+bool approach_has_vertical_guidance(const std::string &cifp_dir,
+                                    const std::string &icao,
+                                    const std::string &designator);
+
 // Extract the trailing variant letter from an approach designator.
 // Examples: "I04LZ" -> 'Z', "R04-Y" -> 'Y', "I04L" -> 0 (no variant).
 // Handles dash separator emitted by some AIRAC vendors (e.g. LFLP:R04-Y).

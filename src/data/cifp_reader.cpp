@@ -968,6 +968,39 @@ bool approach_terminates_at_runway(const std::string &cifp_dir,
   return false; // no runway leg -> visual / MDA last segment
 }
 
+// True if any leg of the approach carries a coded VERTICAL ANGLE (ARINC-424
+// field f[28], e.g. "-350" = 3.50 deg) -- i.e. the approach publishes vertical
+// guidance (ILS / LOC+GP / LPV / LNAV+VNAV) and is flown to a DECISION ALTITUDE.
+// This is a more reliable DA/MDA signal than runway-leg presence: RNAV DA
+// approaches (LFMD R35-Y/Z, LFMN R04LA) end at a fix + missed-approach hold in the
+// CIFP yet still publish a vertical angle. Combined with
+// approach_terminates_at_runway to pick "report established" (DA) vs "report
+// runway in sight" (MDA/visual) -- user 2026-07-22 (LFMD RNAV 35 Z read as MDA).
+bool approach_has_vertical_guidance(const std::string &cifp_dir,
+                                    const std::string &icao,
+                                    const std::string &designator) {
+  if (cifp_dir.empty() || icao.empty() || designator.empty())
+    return false;
+  std::ifstream in(make_cifp_path(cifp_dir, icao));
+  if (!in.good())
+    return false;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.size() < 6 || line.compare(0, 6, "APPCH:") != 0)
+      continue;
+    auto f = split_csv(line);
+    if (f.size() <= 28)
+      continue;
+    if (trim(f[2]) != designator)
+      continue;
+    const std::string va = trim(f[28]); // vertical angle, e.g. "-350" (3.50 deg)
+    for (char c : va)
+      if (std::isdigit(static_cast<unsigned char>(c)))
+        return true; // any digit present -> a real angle is coded
+  }
+  return false;
+}
+
 // ── best_runway_for_approach ────────────────────────────────────────────
 
 // Headwind alignment score [0, 100].  runway e.g. "04L", wind_from in true deg.
