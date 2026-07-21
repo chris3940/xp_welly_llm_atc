@@ -1520,7 +1520,16 @@ void update() {
   ctx.dest_metar_visibility_m = s_metar_visibility_m;
   ctx.dest_metar_ceiling_ft   = s_metar_ceiling_ft;
   ctx.dest_metar              = s_metar_raw;
-  if (s_metar_qnh_hpa > 0) {
+  // QNH priority: the aircraft-position local pressure DataRef first -- it is the
+  // value that makes the pilot's altimeter read field elevation, i.e. the QNH they
+  // expect ATC to give. The region METAR (s_metar_qnh_hpa) is broader and can be
+  // 1-2 hPa off at a specific field (LFLP: METAR 1020 vs local 1021/1022, user
+  // 2026-07-21), so it is only the fallback when the local DataRef is unavailable.
+  float local_pas = dr_local_pressure ? XPLMGetDataf(dr_local_pressure) : 0.0f;
+  if (local_pas > 80000.0f) { // sane sea-level pressure (Pa); guards a 0/garbage read
+    ctx.qnh_hpa  = static_cast<int>(std::round(local_pas / 100.0f));
+    ctx.qnh_inhg = local_pas / 3386.39f;
+  } else if (s_metar_qnh_hpa > 0) {
     ctx.qnh_hpa  = s_metar_qnh_hpa;
     ctx.qnh_inhg = static_cast<float>(s_metar_qnh_hpa) / 33.8639f;
   } else if (dr_local_pressure) {
@@ -1596,6 +1605,18 @@ void update() {
     ctx.dewpoint_c = dp[0];
   }
 
+  // Transition-aware altitude for atc.dat airspace floor/ceiling tests: above the
+  // transition altitude, airspace boundaries are flight levels (pressure-based),
+  // so compare against pressure alt; below it, MSL. These lookups previously used
+  // raw MSL, so an FL-defined sector floor (e.g. FRANCE CTR floor FL195) was
+  // crossed early at non-standard QNH -- a premature enroute handoff at FL190
+  // (user 2026-07-21). No-op at QNH 1013 (pressure_alt == MSL).
+  const int trans_alt_ft = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+  const float airspace_alt_ft =
+      (ctx.altitude_ft_msl > static_cast<float>(trans_alt_ft))
+          ? ctx.pressure_alt_ft
+          : ctx.altitude_ft_msl;
+
   // Derive frequency type from active COM via airport frequency database.
   // Fallback to airspace_db (atc.dat) TRACON lookup for Approach freqs that
   // aren't listed in the nearest airport's apt.dat entry (common on the way
@@ -1610,7 +1631,7 @@ void update() {
         airspace_db::enabled()) {
       auto khz = static_cast<std::uint32_t>(std::round(active_freq * 1000.0f));
       const auto *ctrl = airspace_db::lookup_by_freq(
-          khz, ctx.latitude, ctx.longitude, ctx.altitude_ft_msl);
+          khz, ctx.latitude, ctx.longitude, airspace_alt_ft);
       if (ctrl && ctrl->role == airspace_db::ControllerRole::TRACON)
         ctx.frequency_type = FrequencyType::APPROACH;
     }
@@ -1621,7 +1642,7 @@ void update() {
     // Refresh enclosing airspaces (atc.dat-based) — cheap when disabled.
     if (airspace_db::enabled()) {
       ctx.enclosing_airspaces = airspace_db::find_enclosing(
-          ctx.latitude, ctx.longitude, ctx.altitude_ft_msl);
+          ctx.latitude, ctx.longitude, airspace_alt_ft);
     } else {
       ctx.enclosing_airspaces.clear();
     }

@@ -418,6 +418,14 @@ static float s_sid_tma_check_sec = 0.0f; // throttle openair_db TMA-exit poll to
 static float s_sid_pos_log_sec  = 0.0f; // throttle periodic position log to 1/60 s
 static float s_sid_climb_timer = 0.0f;
 static int s_sid_step1_alt_ft = 0; // computed once on first entry
+// While > 0, the step-1 level is HELD -- neither the cruise climb nor the radar
+// handoff fires until the aircraft is this many NM (great-circle) from the
+// departure airport. 0 = no hold (normal continuous climb). Set only for local
+// procedures that keep an aircraft low under an adjacent TMA (LFLP west SIDs:
+// FL110 until ~30 NM out -> avoid a pointless Geneva-APP shuffle). Overridden
+// when the SID's own minimum crossing altitude is above step-1 (the procedure
+// itself demands a higher climb).
+static float s_sid_hold_release_nm = 0.0f;
 static float s_sid_deviation_cooldown_sec = 0.0f;
 // Aircraft position when ATC issued the direct-to clearance.
 // Used to build the direct leg (origin → fix) for post-direct deviation check.
@@ -497,6 +505,7 @@ void reset() {
   s_sid_pos_log_sec  = 0.0f;
   s_sid_climb_timer = 0.0f;
   s_sid_step1_alt_ft = 0;
+  s_sid_hold_release_nm = 0.0f;
   s_sid_initialized = false;
   s_sid_deviation_cooldown_sec = 0.0f;
   s_sid_direct_origin_lat = 0.0;
@@ -3235,6 +3244,22 @@ procedure_deviation_nm(const xplane_context::XPlaneContext &ctx,
                        bool sid_star_only, const std::string &direct_fix,
                        double direct_from_lat, double direct_from_lon);
 
+// True while the step-1 hold is active -- a hold distance is set and the aircraft
+// is still within it (great-circle from the departure airport) AND the SID does
+// not itself demand a climb above step-1. Suppresses both the cruise climb and the
+// radar handoff so the aircraft stays at step-1 until clear (LFLP west SIDs).
+static bool sid_step1_hold_active(const xplane_context::XPlaneContext &ctx) {
+  if (s_sid_hold_release_nm <= 0.0f)
+    return false;
+  if (ctx.ifr_sid_min_alt_ft > s_sid_step1_alt_ft)
+    return false; // SID's own minimum demands a higher climb -> do not hold
+  if (s_departure_apt_lat == 0.0 && s_departure_apt_lon == 0.0)
+    return false; // departure fix not captured -> cannot measure -> do not hold
+  const double d = traffic_geometry::distance_nm(
+      ctx.latitude, ctx.longitude, s_departure_apt_lat, s_departure_apt_lon);
+  return d < static_cast<double>(s_sid_hold_release_nm);
+}
+
 bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
                     std::string *out_text) {
   using AS = atc_state_machine::ATCState;
@@ -3251,6 +3276,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     s_sid_initialized = false;
     s_sid_climb_timer = 0.0f;
     s_sid_step1_alt_ft = 0;
+    s_sid_hold_release_nm = 0.0f;
     s_sid_deviation_cooldown_sec = 0.0f;
     s_sid_direct_origin_lat = 0.0;
     s_sid_direct_origin_lon = 0.0;
@@ -3290,7 +3316,12 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     // after SOCOF). All other cases: midpoint between SID minimum and
     // cruise, rounded to the nearest FL.
     bool lflp_west = false;
-    if (ctx.nearest_airport_id == "LFLP" && ctx.active_runway == "04") {
+    // The west-departure SIDs (ROMA2A/LSE2A/LTP2A ...) are RW22 SIDs but can also
+    // be joined off runway 04 under vis/ceiling limits (user 2026-07-21), so the
+    // FL110 (clear-of-Geneva) case must key on the WEST FIX, not the runway. The
+    // gate previously required "04", so a normal ROMA2A off 22 fell through to the
+    // generic FL120 step (LFLP->LFMD 2026-07-21).
+    if (ctx.nearest_airport_id == "LFLP") {
       const std::string &fix = ctx.ifr_sid_last_fix.empty()
                                    ? ctx.ifr_fpl_first_fix
                                    : ctx.ifr_sid_last_fix;
@@ -3303,6 +3334,14 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     }
     if (lflp_west) {
       s_sid_step1_alt_ft = 11000; // FL110 — clear of Geneva TMA after SOCOF
+      // Hold FL110 until 30 NM (great-circle) from LFLP before releasing the
+      // cruise climb + radar handoff: Chambery keeps west departures low until
+      // past ~TOLNA to avoid a pointless short handoff to Geneva APP (user
+      // 2026-07-21). Great-circle from the field is a good-enough proxy for the
+      // fix here. FUTURE: move this whole west-SID case (hold_alt + release) into
+      // airport+.json as a per-airport "departure_holds" section so it is not
+      // engine-hardcoded -- the loader (airport_overrides) already exists.
+      s_sid_hold_release_nm = 30.0f;
     } else {
       int floor_ft = ctx.ifr_sid_min_alt_ft > 0 ? ctx.ifr_sid_min_alt_ft : 5000;
       int cruise_ft =
@@ -3554,7 +3593,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
       }
     }
 
-    if (exited_tma) {
+    if (exited_tma && !sid_step1_hold_active(ctx)) {
       // Look up Centre controller — use ctx.enclosing_airspaces (polygon
       // containment, same source as the sector check and the EN ROUTE tab UI)
       // so the SID handoff and the sector check always agree.
@@ -3700,7 +3739,7 @@ skip_tma_check:;
     bool near_step1 = std::abs(static_cast<int>(ctx.altitude_ft_msl) -
                                s_sid_step1_alt_ft) < 500;
     bool timeout = s_sid_climb_timer > 900.0f; // 15-min safety net
-    if (near_step1 || timeout) {
+    if ((near_step1 || timeout) && !sid_step1_hold_active(ctx)) {
       s_sid_cruise_issued = true;
       s_enroute_cleared_alt_ft =
           cruise_fl * 100; // record for en-route altitude monitoring
