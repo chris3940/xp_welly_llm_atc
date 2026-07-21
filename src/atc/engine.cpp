@@ -7439,6 +7439,32 @@ static void init_route_fixes(const xplane_context::XPlaneContext &ctx) {
     break;
   }
 
+  // 3b. Overshoot guard. The heading-based skip above walks PAST any fix whose
+  // bearing differs from the current heading by >90deg. On a curved STAR entered
+  // from a mid-air training jump the ahead fixes can all read "behind heading",
+  // so the loop skips the ENTIRE route to the end (LFMN jump-to-APP 2026-07-21:
+  // "tracker init: 17 fixes, start idx=17", past the FAF at idx 12 -> the Tower
+  // handoff fired instantly). Snap back to the geographically NEAREST fix: the
+  // aircraft cannot be past a fix it is still far from. No-op on a normal flight
+  // (there the skip stops at the real position, so idx ~= nearest).
+  {
+    int nearest = -1;
+    double best_nm = 1e18;
+    for (int i = 0; i < static_cast<int>(s_route_fixes.size()); ++i) {
+      const auto &rf = s_route_fixes[i];
+      if (rf.lat == 0.0 && rf.lon == 0.0)
+        continue;
+      const double d = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
+                                                     rf.lat, rf.lon);
+      if (d < best_nm) {
+        best_nm = d;
+        nearest = i;
+      }
+    }
+    if (nearest >= 0 && s_route_fix_idx > nearest + 1)
+      s_route_fix_idx = nearest;
+  }
+
   // 4. If a direct-to-IAF was issued before init (e.g. descent clearance "direct QA503"),
   // jump the tracker to that fix so intermediate skipped waypoints don't stall it.
   if (!s_no_star_direct_iaf.empty()) {
