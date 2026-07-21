@@ -1211,6 +1211,13 @@ void init() {
   // Aircraft profile for GA-stand selection: wingspan (m) + engine type.
   dr_acf_size_x = XPLMFindDataRef("sim/aircraft/view/acf_size_x");
   dr_acf_en_type = XPLMFindDataRef("sim/aircraft/prop/acf_en_type");
+  {
+    char b[96];
+    std::snprintf(b, sizeof(b),
+                  "[xp_wellys_atc] [dbg acf] datarefs found: size_x=%d en_type=%d\n",
+                  dr_acf_size_x != nullptr, dr_acf_en_type != nullptr);
+    XPLMDebugString(b);
+  }
   dr_ifr_destination =
       XPLMFindDataRef("sim/flightmodel/misc/destination_airport_id");
   dr_avionics_on = XPLMFindDataRef("sim/cockpit/electrical/avionics_on");
@@ -1317,10 +1324,12 @@ void update() {
     XPLMGetDatab(dr_aircraft_tailnum, buf, 0, sizeof(buf) - 1);
     ctx.aircraft_tail_number = buf;
   }
-  // Aircraft wingspan (acf_size_x = model width in metres) -> ICAO size code, and
-  // engine type -> jet / turboprop / prop, for GA-stand selection.
+  // Aircraft wingspan -> ICAO size code, and engine type -> jet/turboprop/prop,
+  // for GA-stand selection. acf_size_x is the model's SEMI-span (calibrated
+  // against the TBM 930: acf_size_x 6.6 m vs published span 12.82 m, user
+  // 2026-07-21), so double it for the full wingspan.
   if (dr_acf_size_x)
-    ctx.aircraft_wingspan_m = XPLMGetDataf(dr_acf_size_x);
+    ctx.aircraft_wingspan_m = XPLMGetDataf(dr_acf_size_x) * 2.0f;
   if (dr_acf_en_type) {
     int en[8] = {};
     XPLMGetDatavi(dr_acf_en_type, en, 0, 1); // engine 0
