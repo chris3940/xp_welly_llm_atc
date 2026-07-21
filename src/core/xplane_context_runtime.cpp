@@ -1755,6 +1755,16 @@ void update() {
           ctx.active_runway.clear();
         }
 
+        // GA parking stands (apt.dat 1300/1301) for the taxi-to-parking clearance.
+        // This is the per-frame airport-data fill; without it ctx.airport_parking
+        // stayed empty -> pick_ga_stand always returned "" (LFMN JustSim has 158
+        // GA stands; log showed stands=0, user 2026-07-21).
+        auto pk_it = parking_cache_.find(ctx.nearest_airport_id);
+        if (pk_it != parking_cache_.end())
+          ctx.airport_parking = pk_it->second;
+        else
+          ctx.airport_parking.clear();
+
         // Holding point names for all runways (from apt.dat 1201/1202/1204).
         ctx.active_runway_holding_point.clear();
         ctx.runway_holding_points.clear();
