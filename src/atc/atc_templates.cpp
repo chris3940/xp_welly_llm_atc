@@ -211,12 +211,17 @@ std::string fill(const std::string &tmpl,
   return result;
 }
 
-std::string get_prompt(const std::string &key) {
+std::string get_prompt(const std::string &key, const std::string &variant) {
   if (!prompts_loaded_ || !prompts_.contains(key))
     return {};
   auto &entry = prompts_[key];
-  if (entry.is_object() && entry.contains("prompt"))
-    return entry["prompt"].get<std::string>();
+  if (entry.is_object()) {
+    // Phase-aware variant (e.g. "prompt_enroute") when present; else "prompt".
+    if (!variant.empty() && entry.contains(variant) && entry[variant].is_string())
+      return entry[variant].get<std::string>();
+    if (entry.contains("prompt"))
+      return entry["prompt"].get<std::string>();
+  }
   if (entry.is_string())
     return entry.get<std::string>();
   return {};

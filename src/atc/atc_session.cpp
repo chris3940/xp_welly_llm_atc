@@ -782,7 +782,26 @@ static void submit_recording_to_stt() {
   // Dynamic tokens appended below further anchor the specific flight.
   const auto &ctx_for_whisper = xplane_context::get();
 
-  std::string airport_ctx = atc_templates::get_prompt("whisper_prompt");
+  // Phase-aware STT bias: pick the phrase set matching the current phase so
+  // Voxtral's context_bias[] (one entry per token) is not seeded with irrelevant
+  // words -- ground/pattern phrases (taxi, holding point, downwind, ...) mid-cruise
+  // pull mishears, and en-route phrases are noise on short final. En-route IFR ->
+  // climb/descend/contact/direct...; approach+landing -> cleared to land / report
+  // established / runway in sight / vacated; ground+VFR -> the full list (user
+  // 2026-07-22). Falls back to the full "prompt" when a variant is absent.
+  std::string stt_variant;
+  {
+    using S = atc_state_machine::ATCState;
+    const auto s = atc_state_machine::get_state();
+    if (s == S::IFR_RADAR_CONTACT || s == S::IFR_ENROUTE_CRUISE ||
+        s == S::IFR_DESCENT || s == S::IFR_ARRIVAL)
+      stt_variant = "prompt_enroute";
+    else if (s == S::IFR_APPROACH_CONTACT || s == S::IFR_APPROACH_DESCENT ||
+             s == S::IFR_APPROACH_TOWER || s == S::IFR_LANDING_CLEARED)
+      stt_variant = "prompt_approach";
+  }
+  std::string airport_ctx =
+      atc_templates::get_prompt("whisper_prompt", stt_variant);
   if (!airport_ctx.empty())
     airport_ctx += " ";
   // Determine whether the aircraft is airborne mid-IFR (drift-prone state)

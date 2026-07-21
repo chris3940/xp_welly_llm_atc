@@ -49,8 +49,11 @@ std::vector<std::string> valid_intents(bool is_towered,
 std::string fill(const std::string &tmpl,
                  const std::map<std::string, std::string> &vars);
 
-// Get a prompt template by key (e.g. "whisper_prompt", "gpt_classify_prompt")
-std::string get_prompt(const std::string &key);
+// Get a prompt template by key (e.g. "whisper_prompt", "gpt_classify_prompt").
+// `variant` selects an alternate sub-field (e.g. "prompt_enroute" for the
+// phase-aware STT bias); empty -> the default "prompt" field. Falls back to
+// "prompt" when the requested variant is absent.
+std::string get_prompt(const std::string &key, const std::string &variant = "");
 
 // Resolve a controller-level fallback line keyed by name (e.g. "say_again",
 // "garbled_say_again", "say_again_use_standard_phraseology") from the
