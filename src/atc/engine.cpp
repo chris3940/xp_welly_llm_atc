@@ -6620,6 +6620,55 @@ bool poll_altitude_compliance(const xplane_context::XPlaneContext &ctx, float dt
   return true;
 }
 
+// Descend-to-enter-terminal-area: when laterally over a terminal TMA but above its
+// ceiling, step the aircraft down to the highest full-thousand FL strictly below
+// the ceiling. Respects STAR block floors (clamp UP to an active floor; if that
+// reaches/exceeds the ceiling the aircraft cannot enter the TMA yet, so the
+// target_ft < tma_ceil guard suppresses the clearance until the block fix is
+// behind -- Caveat B: respect the fix minimum, defer). Runs in BOTH descent AND
+// arrival so the aircraft is stepped INTO the dest terminal TMA before the approach
+// handoff, not handed off while still above the ceiling (user 2026-07-22, LFLP->
+// LFMD: at FL120 over the FL115 NICE TMA it was handed to Nice while above the
+// ceiling because this ran only in IFR_DESCENT).
+static bool poll_descend_to_enter_tma(const xplane_context::XPlaneContext &ctx,
+                                      std::string *out_text,
+                                      bool *out_requires_readback) {
+  if (!out_text || !openair_db::ready())
+    return false;
+  const int tma_ceil =
+      openair_db::terminal_tma_ceiling(ctx.latitude, ctx.longitude);
+  int target_ft = (tma_ceil > 1000) ? ((tma_ceil - 100) / 1000) * 1000 : 0;
+  const int block_floor = active_block_floor_ft();
+  if (block_floor > 0 && target_ft < block_floor)
+    target_ft = block_floor; // Caveat A/B: never below an active block floor
+  const int cleared = engine::current_cleared_alt_ft();
+  const bool fire = target_ft > 0 && target_ft < tma_ceil &&
+                    static_cast<int>(ctx.altitude_ft_msl) > tma_ceil + 200 &&
+                    cleared > target_ft + 100 &&
+                    s_descent_tma_target_ft != target_ft;
+  if (tma_ceil > 0 && settings::debug_logging())
+    logging::info("[dbg dte] tma_ceil=%d target=%d alt=%.0f cleared=%d floor=%d "
+                  "last=%d -> %s",
+                  tma_ceil, target_ft, static_cast<double>(ctx.altitude_ft_msl),
+                  cleared, block_floor, s_descent_tma_target_ft,
+                  fire ? "FIRE" : "hold");
+  if (!fire)
+    return false;
+  s_descent_tma_target_ft = target_ft;
+  s_enroute_cleared_alt_ft = target_ft; // re-arms poll_altitude_compliance
+  const std::string &cs = atc_state_machine::session_callsign();
+  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
+  const std::string clr =
+      format_alt_clearance(target_ft, AltHint::Auto, ctx.qnh_hpa, ta);
+  *out_text = callsign + ", descend " + clr + ".";
+  if (out_requires_readback)
+    *out_requires_readback = true;
+  logging::info("IFR descent: descend-to-enter terminal area, TMA ceil %d -> %s",
+                tma_ceil, clr.c_str());
+  return true;
+}
+
 bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
                   std::string *out_text,
                   bool *out_requires_readback) {
@@ -6701,59 +6750,10 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
   // re-arms poll_altitude_compliance (both read s_enroute_cleared_alt_ft). This
   // is the primary "get into the TMA" path; the buffer-based TMA-entry advance
   // below is now the fallback for when no ceiling resolves (no openair).
-  if (out_text && openair_db::ready()) {
-    // Fire when the aircraft is laterally OVER a terminal TMA (polygon test),
-    // above its ceiling. Use terminal_tma_ceiling(AIRCRAFT) -- the base TMA the
-    // aircraft is actually over -- NOT descend_to_enter_ceiling(...,dest): the
-    // latter depended on ofp.navlog.back() coords, which are unreliable in-sim
-    // and silently returned 0 (LFMN ABDI8R 2026-07-13: over NICE TMA at FL177,
-    // no descent). Base-TMA logic still ignores a stacked overlying TMA (GENEVA
-    // over CHAMBERY -> 9500). We are already gated to DESCENT near the arrival.
-    const int tma_ceil =
-        openair_db::terminal_tma_ceiling(ctx.latitude, ctx.longitude);
-    // Highest full-thousand flight level strictly below the TMA ceiling.
-    int target_ft = (tma_ceil > 1000) ? ((tma_ceil - 100) / 1000) * 1000 : 0;
-    // Respect STAR block-constraint floors: NEVER clear below an active block
-    // floor ahead (e.g. LFMN MN261 block FL080/FL120). If a floor sits above
-    // the level we'd otherwise pick, clamp up to it; if that clamp pushes the
-    // target at/above the TMA ceiling, the aircraft can't legally enter the TMA
-    // yet (it must stay above the floor), so the target_ft < tma_ceil guard
-    // below suppresses the clearance until the block fix is behind us. ("+"/
-    // at-or-above crossings fold in via the effective-constraint merge later.)
-    const int block_floor = active_block_floor_ft();
-    if (block_floor > 0 && target_ft < block_floor)
-      target_ft = block_floor;
-    const int cleared = engine::current_cleared_alt_ft();
-    // Diagnostic: 1 Hz snapshot of the descend-to-enter gate inputs, so a flight
-    // log shows exactly why it fires or not (remove once validated in-sim).
-    if (tma_ceil > 0 && settings::debug_logging())
-      logging::info("[dbg dte] tma_ceil=%d target=%d alt=%.0f cleared=%d floor=%d "
-                    "last=%d -> %s",
-                    tma_ceil, target_ft, static_cast<double>(ctx.altitude_ft_msl),
-                    cleared, block_floor, s_descent_tma_target_ft,
-                    (target_ft > 0 && target_ft < tma_ceil &&
-                     static_cast<int>(ctx.altitude_ft_msl) > tma_ceil + 200 &&
-                     cleared > target_ft + 100 && s_descent_tma_target_ft != target_ft)
-                        ? "FIRE" : "hold");
-    if (target_ft > 0 && target_ft < tma_ceil &&
-        static_cast<int>(ctx.altitude_ft_msl) > tma_ceil + 200 &&
-        cleared > target_ft + 100 && s_descent_tma_target_ft != target_ft) {
-      s_descent_tma_target_ft = target_ft;
-      s_enroute_cleared_alt_ft = target_ft; // re-arms poll_altitude_compliance
-      const std::string &cs = atc_state_machine::session_callsign();
-      const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
-      const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
-      const std::string clr =
-          format_alt_clearance(target_ft, AltHint::Auto, ctx.qnh_hpa, ta);
-      *out_text = callsign + ", descend " + clr + ".";
-      if (out_requires_readback)
-        *out_requires_readback = true;
-      logging::info("IFR descent: descend-to-enter terminal area, TMA ceil %d -> "
-                    "%s (%.1f NM from dest)",
-                    tma_ceil, clr.c_str(), d_dest);
-      return true;
-    }
-  }
+  // Descend-to-enter the terminal TMA (now a shared helper -- also runs in
+  // poll_arrival so the aircraft is stepped INTO the TMA before the handoff).
+  if (poll_descend_to_enter_tma(ctx, out_text, out_requires_readback))
+    return true;
 
   // NOTE: the CIFP STAR crossing-altitude corrective that used to live here now
   // runs for EVERY airborne IFR phase in poll_profile_enforcement (dispatched
@@ -6862,6 +6862,14 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
 
   s_arrival_timer += dt;
 
+  // FIR step-down INTO the dest terminal TMA BEFORE the approach handoff (user
+  // 2026-07-22): the same descend-to-enter as DESCENT, run here so the aircraft
+  // reaches the highest FL below the TMA ceiling before the IAF, instead of being
+  // handed to Approach while still above the ceiling (LFLP->LFMD: FL120 over the
+  // FL115 NICE TMA). Respects block floors (defers when a fix min holds it high).
+  if (poll_descend_to_enter_tma(ctx, out_text, out_requires_readback))
+    return true;
+
   const std::string &cs = atc_state_machine::session_callsign();
   const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
 
@@ -6889,15 +6897,17 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
     s_enroute_app_check_sec = 1.0f;
     const bool have_airspace = openair_db::ready();
     if (have_airspace) {
-      // Query openair 1000 ft LOWER so a TMA the aircraft is about to drop into
-      // still matches (mirrors poll_descent). find_enclosing returns the
-      // INNERMOST enclosing volume, so near the IAF it resolves the terminal TMA
-      // (CHAMBERY) rather than the big outer one (GENEVA) -- which is exactly what
-      // makes Stage B below hand off to the correct terminal controller.
-      constexpr int kArrivalCeilingBufferFt = 1000;
-      enc_arrival = openair_db::find_enclosing(
-          ctx.latitude, ctx.longitude,
-          openair_alt(ctx) - kArrivalCeilingBufferFt);
+      // Query at the ACTUAL altitude (no early buffer): openair_alt is pressure
+      // alt above the transition, so this is FL-vs-FL. At FL120 against a FL115
+      // ceiling the aircraft is correctly ABOVE the TMA -> inside_tma=false, and it
+      // is NOT handed off until the FIR step-down (poll_descend_to_enter_tma) puts
+      // it inside. The old -1000 ft "about to drop in" buffer probed FL110 and
+      // matched a FL115-ceiling TMA while still 500 ft above it -> premature
+      // Nice-APP handoff at FL120 (LFLP->LFMD near NEKIP, user 2026-07-22).
+      // find_enclosing still returns the INNERMOST volume (terminal TMA, not the
+      // outer one) once actually inside.
+      enc_arrival = openair_db::find_enclosing(ctx.latitude, ctx.longitude,
+                                               openair_alt(ctx));
       inside_tma = (enc_arrival.ac_class == openair_db::AirspaceClass::TMA ||
                     enc_arrival.ac_class == openair_db::AirspaceClass::CTR);
       // Destination CTA check at the ACTUAL altitude (no -1000 buffer -- a CTA
@@ -6989,6 +6999,25 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
             ctx.latitude, ctx.longitude, ofp.navlog.back().lat,
             ofp.navlog.back().lon);
         enter_approach = dist_nm <= (have_airspace ? 12.0 : 50.0);
+      }
+    }
+
+    // Do NOT hand off to Approach while still ABOVE the destination terminal TMA:
+    // the FIR steps the aircraft down into it first (poll_descend_to_enter_tma),
+    // and the APP handoff fires on actual TMA ENTRY (user 2026-07-22, LFLP->LFMD:
+    // was handed to Nice at FL120, above the FL115 NICE TMA). Skips the dest's-OWN
+    // stacked-CTA path (enc_is_dest_cta), which deliberately hands off on CTA entry
+    // for a field whose own centre owns the CTA (LFMN). openair_alt is pressure alt
+    // above the transition, so this is a flight-level-vs-flight-level test.
+    if (enter_approach && !enc_is_dest_cta && openair_db::ready()) {
+      const int dest_tma_ceil =
+          openair_db::terminal_tma_ceiling(ctx.latitude, ctx.longitude);
+      if (dest_tma_ceil > 1000 &&
+          static_cast<int>(openair_alt(ctx)) > dest_tma_ceil + 100) {
+        enter_approach = false; // above the TMA -> wait for step-down + entry
+        logging::info("IFR arrival: APP handoff deferred -- above dest TMA "
+                      "(ceil %d, alt %d) pending step-down",
+                      dest_tma_ceil, static_cast<int>(openair_alt(ctx)));
       }
     }
 
