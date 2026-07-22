@@ -418,6 +418,12 @@ static float s_sid_tma_check_sec = 0.0f; // throttle openair_db TMA-exit poll to
 static float s_sid_pos_log_sec  = 0.0f; // throttle periodic position log to 1/60 s
 static float s_sid_climb_timer = 0.0f;
 static int s_sid_step1_alt_ft = 0; // computed once on first entry
+// Optional SECOND intermediate climb level (feet) before cruise, e.g. Annecy west
+// SIDs: FL110 (under the FL115 TMA) -> FL140 (under the FL145 CTA) -> cruise. 0 =
+// no second step (FL110 -> cruise directly). Issued once past the step-1 hold, and
+// only when genuinely below the cruise FL (user 2026-07-22).
+static int  s_sid_step2_alt_ft = 0;
+static bool s_sid_step2_issued = false;
 // While > 0, the step-1 level is HELD -- neither the cruise climb nor the radar
 // handoff fires until the aircraft is this many NM (great-circle) from the
 // departure airport. 0 = no hold (normal continuous climb). Set only for local
@@ -499,6 +505,8 @@ void reset() {
   s_sid_direct_issued = false;
   s_sid_step1_issued = false;
   s_sid_cruise_issued = false;
+  s_sid_step2_issued = false;
+  s_sid_step2_alt_ft = 0;
   s_sid_radar_handoff_issued = false;
   s_sid_was_in_tma = false;
   s_sid_tma_check_sec = 0.0f;
@@ -3269,6 +3277,8 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     s_sid_direct_issued = false;
     s_sid_step1_issued = false;
     s_sid_cruise_issued = false;
+    s_sid_step2_issued = false;
+    s_sid_step2_alt_ft = 0;
     s_sid_radar_handoff_issued = false;
     s_sid_intermediate_tracon_khz_seen.clear();
     s_sid_was_in_tma = false;
@@ -3342,6 +3352,11 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
       // airport+.json as a per-airport "departure_holds" section so it is not
       // engine-hardcoded -- the loader (airport_overrides) already exists.
       s_sid_hold_release_nm = 20.0f;
+      // Second intermediate step before cruise: FL140 (under the FL145 NICE/GENEVA
+      // CTA that stacks above the FL115 TMA). So the ladder is FL110 (held to
+      // 20 NM) -> FL140 -> cruise, not FL110 -> cruise (user 2026-07-22). Only
+      // used when cruise is above FL140 (Phase 2a guards on step2 < cruise).
+      s_sid_step2_alt_ft = 14000;
     } else {
       int floor_ft = ctx.ifr_sid_min_alt_ft > 0 ? ctx.ifr_sid_min_alt_ft : 5000;
       int cruise_ft =
@@ -3731,25 +3746,59 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
   }
 skip_tma_check:;
 
-  // ── Phase 2: climb to cruise FL when near step1 altitude ──────────────
-  if (s_sid_step1_issued && !s_sid_cruise_issued) {
-    int cruise_fl =
-        round_to_fl(ctx.ifr_cruise_alt_ft > 0 ? ctx.ifr_cruise_alt_ft
-                                              : s_sid_step1_alt_ft + 4000);
-    bool near_step1 = std::abs(static_cast<int>(ctx.altitude_ft_msl) -
-                               s_sid_step1_alt_ft) < 500;
-    bool timeout = s_sid_climb_timer > 900.0f; // 15-min safety net
-    if ((near_step1 || timeout) && !sid_step1_hold_active(ctx)) {
-      s_sid_cruise_issued = true;
-      s_enroute_cleared_alt_ft =
-          cruise_fl * 100; // record for en-route altitude monitoring
+  const int sid_cruise_fl =
+      round_to_fl(ctx.ifr_cruise_alt_ft > 0 ? ctx.ifr_cruise_alt_ft
+                                            : s_sid_step1_alt_ft + 4000);
+  // A configured second step is USABLE only when it sits strictly below cruise AND
+  // is not below the SID's published minimum crossing altitude (never clear below a
+  // SID fix min -- user 2026-07-22). Otherwise skip straight to cruise.
+  const bool step2_usable = s_sid_step2_alt_ft > 0 &&
+                            s_sid_step2_alt_ft < sid_cruise_fl * 100 &&
+                            s_sid_step2_alt_ft >= ctx.ifr_sid_min_alt_ft;
+
+  // ── Phase 2a: second intermediate step (Annecy FL110 -> FL140) ────────
+  // Released once past the step-1 hold (20 NM), when near step-1. Steps to the
+  // second level (below the stacked CTA) before cruise instead of jumping.
+  if (s_sid_step1_issued && step2_usable && !s_sid_step2_issued &&
+      !s_sid_cruise_issued) {
+    const bool near_step1 = std::abs(static_cast<int>(ctx.altitude_ft_msl) -
+                                     s_sid_step1_alt_ft) < 500;
+    if (near_step1 && !sid_step1_hold_active(ctx)) {
+      s_sid_step2_issued = true;
+      s_enroute_cleared_alt_ft = s_sid_step2_alt_ft;
+      const int fl2 = s_sid_step2_alt_ft / 100;
       if (out_text) {
         char buf[64];
         std::snprintf(buf, sizeof(buf), "%s, climb flight level %d.",
-                      callsign.c_str(), cruise_fl);
+                      callsign.c_str(), fl2);
         *out_text = buf;
       }
-      logging::info("IFR SID climb: FL%d (cruise clearance)", cruise_fl);
+      logging::info("IFR SID climb: FL%d (step2)", fl2);
+      return true;
+    }
+  }
+
+  // ── Phase 2b: climb to cruise FL when near the last intermediate step ──
+  if (s_sid_step1_issued && !s_sid_cruise_issued) {
+    // Defer while a usable second step is still pending (Phase 2a owns it).
+    const bool step2_pending = step2_usable && !s_sid_step2_issued;
+    const int near_target = (step2_usable && s_sid_step2_issued)
+                                ? s_sid_step2_alt_ft
+                                : s_sid_step1_alt_ft;
+    const bool near = std::abs(static_cast<int>(ctx.altitude_ft_msl) -
+                               near_target) < 500;
+    const bool timeout = s_sid_climb_timer > 900.0f; // 15-min safety net
+    if (!step2_pending && (near || timeout) && !sid_step1_hold_active(ctx)) {
+      s_sid_cruise_issued = true;
+      s_enroute_cleared_alt_ft =
+          sid_cruise_fl * 100; // record for en-route altitude monitoring
+      if (out_text) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%s, climb flight level %d.",
+                      callsign.c_str(), sid_cruise_fl);
+        *out_text = buf;
+      }
+      logging::info("IFR SID climb: FL%d (cruise clearance)", sid_cruise_fl);
       return true;
     }
   }
