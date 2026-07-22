@@ -6070,26 +6070,34 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     auto ofp = simbrief_ofp::get();
     if (ofp.valid && !ofp.navlog.empty()) {
       std::string fix = pick_direct_fix(ctx, ofp.navlog);
-      if (!fix.empty()) {
-        // Jump the route tracker to the direct-to fix so the routed distance-to-fly
-        // (TOD / ETA / handoff gates via routed_distance_to_fix_idx) SHORTENS to the
-        // direct leg + remaining legs, skipping the intermediate fixes the aircraft
-        // no longer overflies (user 2026-07-22). Without this the distance kept the
-        // full leg-by-leg path even after "direct FIX".
+      int fix_idx = -1;
+      if (!fix.empty())
         for (int i = std::max(0, s_route_fix_idx);
-             i < static_cast<int>(s_route_fixes.size()); ++i) {
-          if (s_route_fixes[i].ident == fix) {
-            s_route_fix_idx = i;
-            logging::info(
-                "IFR en-route: direct %s -> tracker idx=%d (route shortened)",
-                fix.c_str(), i);
-            break;
-          }
-        }
-        // A direct-to shortcut supersedes any outstanding clearance
-        // readback (e.g. descent clearance with runway field still pending).
-        // Cancel it so the pilot isn't stuck reading back "runway 07" for
-        // a "direct DJL, when able" transmission.
+             i < static_cast<int>(s_route_fixes.size()); ++i)
+          if (s_route_fixes[i].ident == fix) { fix_idx = i; break; }
+      // Only issue a direct that MATERIALLY shortens the route: it must save >= 5%
+      // of the remaining leg-by-leg distance, and then only 20% of the time (ATC
+      // variability -- most of the time the aircraft just flies the full route).
+      // savings = (leg-by-leg aircraft->...->fix) - (direct aircraft->fix); the
+      // legs after `fix` are unchanged so they cancel (user 2026-07-22).
+      bool worth_it = false;
+      if (fix_idx >= 0 && (s_route_fixes[fix_idx].lat != 0.0 ||
+                           s_route_fixes[fix_idx].lon != 0.0)) {
+        const double routed_to_fix = routed_distance_to_fix_idx(ctx, fix_idx);
+        const double direct_to_fix = traffic_geometry::distance_nm(
+            ctx.latitude, ctx.longitude, s_route_fixes[fix_idx].lat,
+            s_route_fixes[fix_idx].lon);
+        const double total = routed_distance_to_fix_idx(
+            ctx, static_cast<int>(s_route_fixes.size()) - 1);
+        worth_it = total > 1.0 && (routed_to_fix - direct_to_fix) >= 0.05 * total;
+      }
+      if (worth_it && (std::rand() % 5) == 0) {
+        // Jump the route tracker to the direct-to fix so routed_distance_to_fix_idx
+        // (TOD / ETA / handoff gates) shortens to the direct leg + remaining legs.
+        s_route_fix_idx = fix_idx;
+        // A direct-to supersedes any outstanding clearance readback (e.g. a descent
+        // clearance with the runway field still pending) -- cancel it so the pilot
+        // isn't stuck reading back "runway 07" for a "direct DJL, when able".
         atc_state_machine::cancel_readback();
         if (out_text) {
           char buf[128];
@@ -6097,11 +6105,12 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
                         callsign.c_str(), fix.c_str());
           *out_text = buf;
         }
-        logging::info("IFR en-route: direct %s shortcut", fix.c_str());
+        logging::info("IFR en-route: direct %s shortcut (>=5%% saved, 20%% roll)",
+                      fix.c_str());
         return true;
       }
     }
-    // No navlog or no fix — don't speak, but mark issued so we don't retry.
+    // No navlog / no fix / not worth it / 80% no-direct -- mark issued, don't retry.
   }
 
   // ── Sub-phase 2: pre-TOD prompt → pilot confirms → descent clearance ────
