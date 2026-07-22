@@ -3291,9 +3291,14 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     s_sid_direct_origin_lat = 0.0;
     s_sid_direct_origin_lon = 0.0;
     s_sid_direct_elapsed_sec = 0.0f;
-    s_departure_apt_id.clear();
-    s_departure_apt_lat = 0.0;
-    s_departure_apt_lon = 0.0;
+    // NOTE: s_departure_apt_id / lat / lon are intentionally NOT cleared here.
+    // They are the PERSISTENT departure field (current_flight_airport, the 20 NM
+    // hold, build_sid_route_table, the lflp_west gate all key on them). Clearing
+    // them on every RADAR_CONTACT exit let a state bounce (e.g. the 131.315
+    // wrong-freq mess: RADAR_CONTACT -> EN_ROUTE -> RADAR_CONTACT) re-capture the
+    // DRIFTED nearest airport (LFLY) on re-init -> lflp_west failed -> generic
+    // FL120 instead of FL110 (user 2026-07-22). They are cleared only by the full
+    // flight reset (new flight / IDLE).
     return false;
   }
 
@@ -3313,62 +3318,68 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
   // One-time initialisation on first entry to IFR_RADAR_CONTACT.
   if (!s_sid_initialized) {
     s_sid_initialized = true;
-    s_departure_apt_id  = ctx.nearest_airport_id; // still the departure field here
-    s_departure_apt_lat = ctx.airport_lat;
-    s_departure_apt_lon = ctx.airport_lon;
+    // Capture the departure field ONCE and keep it across state bounces, so a
+    // re-init (e.g. after a wrong-freq state bounce) never overwrites it with the
+    // drifted nearest airport (LFLY) -- which broke the lflp_west FL110 gate and
+    // build_sid_route_table (user 2026-07-22).
+    if (s_departure_apt_id.empty()) {
+      s_departure_apt_id  = ctx.nearest_airport_id; // still the departure field here
+      s_departure_apt_lat = ctx.airport_lat;
+      s_departure_apt_lon = ctx.airport_lon;
+    }
     // Build the DEPARTURE half of the unified route table (SID + enroute
     // navlog) so the compliance monitor / speed enforcement work during the
     // climb, exactly as the arrival table serves approach. The arrival re-init
     // (init_route_fixes) later rebuilds it for the STAR/approach.
     build_sid_route_table(ctx);
 
-    // Step1 altitude: LFLP RW04 westbound → FL110 (clear of Geneva TMA
-    // after SOCOF). All other cases: midpoint between SID minimum and
-    // cruise, rounded to the nearest FL.
-    bool lflp_west = false;
-    // The west-departure SIDs (ROMA2A/LSE2A/LTP2A ...) are RW22 SIDs but can also
-    // be joined off runway 04 under vis/ceiling limits (user 2026-07-21), so the
-    // FL110 (clear-of-Geneva) case must key on the WEST FIX, not the runway. The
-    // gate previously required "04", so a normal ROMA2A off 22 fell through to the
-    // generic FL120 step (LFLP->LFMD 2026-07-21).
-    if (ctx.nearest_airport_id == "LFLP") {
-      const std::string &fix = ctx.ifr_sid_last_fix.empty()
-                                   ? ctx.ifr_fpl_first_fix
-                                   : ctx.ifr_sid_last_fix;
-      static const char *kWestFixes[] = {"LSE", "LTP", "ROMAM", nullptr};
-      for (int i = 0; kWestFixes[i]; ++i)
-        if (fix == kWestFixes[i]) {
-          lflp_west = true;
-          break;
-        }
-    }
-    if (lflp_west) {
-      s_sid_step1_alt_ft = 11000; // FL110 — clear of Geneva TMA after SOCOF
-      // Hold FL110 until 20 NM (great-circle) from LFLP before releasing the
-      // cruise climb + radar handoff: Chambery keeps west departures low until
-      // past ~TOLNA to avoid a pointless short handoff to Geneva APP (user
-      // 2026-07-21). Great-circle from the field is a good-enough proxy for the
-      // fix here. FUTURE: move this whole west-SID case (hold_alt + release) into
-      // airport+.json as a per-airport "departure_holds" section so it is not
-      // engine-hardcoded -- the loader (airport_overrides) already exists.
+    // Step1/step2 climb shaping, GENERIC from the DEPARTURE airport's own airspace
+    // -- no hardcoded ICAO or flight levels (user 2026-07-22, "it is the departure
+    // airport"):
+    //   step1 = highest full-thousand FL strictly below the departure terminal TMA
+    //           ceiling, HELD 20 NM (great-circle) from departure before releasing
+    //           the cruise climb + radar handoff -- keeps the aircraft under the
+    //           terminal/adjacent TMA (LFLP: FL110 under the FL115 Chambery TMA,
+    //           avoiding a pointless Geneva-APP shuffle; applies to any airport);
+    //   step2 = highest FL below the next volume stacked directly above the TMA (a
+    //           CTA), if strictly below cruise (LFLP: FL140 under the ~FL145 CTA).
+    // Both stay >= the SID's published minimum crossing altitude (never clear below
+    // a fix min). Falls back to the SID-min<->cruise midpoint when no departure TMA
+    // resolves (no openair, or TMA above cruise).
+    const int sid_min_ft = ctx.ifr_sid_min_alt_ft > 0 ? ctx.ifr_sid_min_alt_ft : 5000;
+    const int cruise_ft =
+        ctx.ifr_cruise_alt_ft > 0 ? ctx.ifr_cruise_alt_ft : sid_min_ft + 8000;
+    auto fl_below = [](int ceil) { return ((ceil - 100) / 1000) * 1000; };
+    const int dep_tma_ceil =
+        (openair_db::ready() &&
+         (s_departure_apt_lat != 0.0 || s_departure_apt_lon != 0.0))
+            ? openair_db::terminal_tma_ceiling(s_departure_apt_lat,
+                                               s_departure_apt_lon)
+            : 0;
+    if (dep_tma_ceil > 1500 && fl_below(dep_tma_ceil) >= sid_min_ft &&
+        fl_below(dep_tma_ceil) < cruise_ft) {
+      s_sid_step1_alt_ft = fl_below(dep_tma_ceil);
       s_sid_hold_release_nm = 20.0f;
-      // Second intermediate step before cruise: FL140 (under the FL145 NICE/GENEVA
-      // CTA that stacks above the FL115 TMA). So the ladder is FL110 (held to
-      // 20 NM) -> FL140 -> cruise, not FL110 -> cruise (user 2026-07-22). Only
-      // used when cruise is above FL140 (Phase 2a guards on step2 < cruise).
-      s_sid_step2_alt_ft = 14000;
+      const openair_db::AirspaceEntry above = openair_db::find_enclosing(
+          s_departure_apt_lat, s_departure_apt_lon, dep_tma_ceil + 500);
+      if (above.ceiling_ft > dep_tma_ceil) {
+        const int s2 = fl_below(above.ceiling_ft);
+        if (s2 > s_sid_step1_alt_ft && s2 < cruise_ft && s2 >= sid_min_ft)
+          s_sid_step2_alt_ft = s2;
+      }
+      logging::info("IFR SID climb: dep-TMA shaping dep=%s ceil=%d -> step1 FL%d "
+                    "step2 FL%d hold 20 NM",
+                    s_departure_apt_id.c_str(), dep_tma_ceil,
+                    s_sid_step1_alt_ft / 100, s_sid_step2_alt_ft / 100);
     } else {
-      int floor_ft = ctx.ifr_sid_min_alt_ft > 0 ? ctx.ifr_sid_min_alt_ft : 5000;
-      int cruise_ft =
-          ctx.ifr_cruise_alt_ft > 0 ? ctx.ifr_cruise_alt_ft : floor_ft + 8000;
       // When the SID minimum exceeds the filed cruise FL the midpoint would be
-      // above cruise — meaningless. Issue the SID minimum directly so the
-      // message is at least correct ("climb FL150" vs a phantom "climb FL120").
-      int mid_ft = floor_ft >= cruise_ft ? floor_ft : (floor_ft + cruise_ft) / 2;
+      // above cruise -- meaningless. Issue the SID minimum directly.
+      const int mid_ft =
+          sid_min_ft >= cruise_ft ? sid_min_ft : (sid_min_ft + cruise_ft) / 2;
       s_sid_step1_alt_ft = round_to_fl(mid_ft) * 100;
       logging::info("IFR SID step1 calc: sid_min=%dft cruise=%dft -> FL%d%s",
-                    floor_ft, cruise_ft, round_to_fl(mid_ft),
-                    floor_ft >= cruise_ft
+                    sid_min_ft, cruise_ft, round_to_fl(mid_ft),
+                    sid_min_ft >= cruise_ft
                         ? " [SID min ABOVE cruise - FPL too low]" : "");
     }
   }
