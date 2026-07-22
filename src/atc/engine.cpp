@@ -6071,6 +6071,21 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     if (ofp.valid && !ofp.navlog.empty()) {
       std::string fix = pick_direct_fix(ctx, ofp.navlog);
       if (!fix.empty()) {
+        // Jump the route tracker to the direct-to fix so the routed distance-to-fly
+        // (TOD / ETA / handoff gates via routed_distance_to_fix_idx) SHORTENS to the
+        // direct leg + remaining legs, skipping the intermediate fixes the aircraft
+        // no longer overflies (user 2026-07-22). Without this the distance kept the
+        // full leg-by-leg path even after "direct FIX".
+        for (int i = std::max(0, s_route_fix_idx);
+             i < static_cast<int>(s_route_fixes.size()); ++i) {
+          if (s_route_fixes[i].ident == fix) {
+            s_route_fix_idx = i;
+            logging::info(
+                "IFR en-route: direct %s -> tracker idx=%d (route shortened)",
+                fix.c_str(), i);
+            break;
+          }
+        }
         // A direct-to shortcut supersedes any outstanding clearance
         // readback (e.g. descent clearance with runway field still pending).
         // Cancel it so the pilot isn't stuck reading back "runway 07" for
