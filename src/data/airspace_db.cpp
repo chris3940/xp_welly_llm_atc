@@ -432,13 +432,23 @@ const Controller *find_by_role_near(ControllerRole role, double lat, double lon,
 }
 
 const Controller *find_by_role_name_contains(ControllerRole role,
-                                             const std::string &fragment) {
+                                             const std::string &fragment,
+                                             std::uint32_t avoid_freq_khz) {
   if (!enabled_.load() || fragment.empty())
     return nullptr;
   // Case-insensitive search: compare lower-cased name against lower-cased fragment.
   std::string frag_lc = fragment;
   for (char &c : frag_lc)
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  // "Same as the freq to avoid" within ~10 kHz (robust to 25 vs 8.33 display).
+  auto is_avoided = [avoid_freq_khz](const Controller *c) {
+    if (avoid_freq_khz == 0 || c->freqs_khz.empty())
+      return false;
+    const int d = static_cast<int>(c->freqs_khz.front()) -
+                  static_cast<int>(avoid_freq_khz);
+    return d > -10 && d < 10;
+  };
+  const Controller *first = nullptr; // first name match regardless of freq
   for (auto &up : controllers_) {
     Controller *c = up.get();
     if (c->role != role)
@@ -446,10 +456,16 @@ const Controller *find_by_role_name_contains(ControllerRole role,
     std::string name_lc = c->name;
     for (char &ch : name_lc)
       ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    if (name_lc.find(frag_lc) != std::string::npos)
+    if (name_lc.find(frag_lc) == std::string::npos)
+      continue;
+    if (!first)
+      first = c;
+    // Prefer a match that is NOT the pilot's current frequency (or take the first
+    // when avoidance is disabled -- legacy behaviour).
+    if (!is_avoided(c))
       return c;
   }
-  return nullptr;
+  return first; // all name matches were the avoided freq -> fall back to the first
 }
 
 // Find a controller of a given role at a specific FACILITY (ICAO), regardless of

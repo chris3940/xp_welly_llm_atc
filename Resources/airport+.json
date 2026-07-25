@@ -10,6 +10,9 @@
       ],
       "controllers": [
         "additional airport info: controllers/freqs missing from atc.dat. {role, name, freq_mhz}. role = approach|tower|ground|delivery|atis|info."
+      ],
+      "departure_holds": [
+        "SID climb shaping (local procedure not in CIFP/airspace). ordered, first whose match_fixes contains the SID exit fix wins; empty/absent match_fixes = any SID from this field. {match_fixes?, hold_alt_ft, release_nm?, step2_alt_ft?}. OVERRIDES the generic data-driven step1 / 10-NM hold. omitted fields keep the generic default (e.g. step2 stays the generic FL140). still clamped: step1 never below a SID fix min; step2 skipped if >= cruise."
       ]
     }
   },
@@ -35,6 +38,9 @@
     ],
     "controllers": [
       { "role": "approach", "name": "Chambery Approach", "freq_mhz": 121.205, "alt_freqs_mhz": [123.700] }
+    ],
+    "departure_holds": [
+      { "hold_alt_ft": 11000, "release_nm": 30, "_comment": "Annecy: hold FL110 for 30 NM. Verified airspace.txt along the ROMA2A (BELUS->GIRED) track: the Geneva TMA S10 sliver ends ~27.5 NM GC out, so 30 NM lands the handoff ~2.5 NM inside LYON CTA -> hands to Lyon 120.230, not the Geneva sliver. FL140 second step stays generic." }
     ]
   }
 }

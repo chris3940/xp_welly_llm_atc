@@ -96,8 +96,15 @@ const Controller *find_by_role_near(ControllerRole role, double lat, double lon,
 // Controller of the given role whose name contains `fragment` (case-insensitive).
 // Returns the first match, nullptr if none.  Used to map an openair TMA name
 // (e.g. "CHAMBERY") to the corresponding atc.dat TRACON ("CHAMBERY").
+// When `avoid_freq_khz` != 0, PREFER a match whose first frequency differs from it
+// (within ~10 kHz) -- a handoff must never resolve to the frequency the pilot is
+// already on. Disambiguates two same-named controllers on different freqs (e.g.
+// "LYON" = LFLB 121.205 [current] vs LFLL 120.230 [the handoff target]); falls back
+// to the first match when none differ. avoid_freq_khz == 0 keeps the legacy "first
+// match" behaviour.
 const Controller *find_by_role_name_contains(ControllerRole role,
-                                             const std::string &fragment);
+                                             const std::string &fragment,
+                                             std::uint32_t avoid_freq_khz = 0);
 
 // Find a controller of a given role at a specific FACILITY (ICAO), independent of
 // its display name (a facility's approach can be labelled differently from its

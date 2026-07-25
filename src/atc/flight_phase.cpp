@@ -426,6 +426,8 @@ static void load_from_file() {
       // US falls back to 10000 via a lower struct default.
       ifr_defaults_.sid_handoff_min_alt_ft =
           id.value("sid_handoff_min_alt_ft", 12000);
+      ifr_defaults_.tower_report_alt_ft =
+          id.value("tower_report_alt_ft", 0);
     }
 
     loaded_ = true;

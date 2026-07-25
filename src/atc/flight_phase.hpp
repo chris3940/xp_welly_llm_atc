@@ -141,6 +141,16 @@ struct IfrDefaults {
   // Tower -> Approach handoff (via takeoff clearance + poll_departure_handoff)
   // is respected first.
   int sid_handoff_min_alt_ft = 10000;
+  // Tower "report passing X feet" departure procedure (EUROCONTROL variant, user
+  // 2026-07-24). > 0: the Tower KEEPS the aircraft on its frequency after takeoff --
+  // the takeoff clearance ends with "report passing <N> feet" (no embedded APP
+  // contact) -- and hands off to Approach/Departure only once the aircraft has
+  // climbed this many feet AGL, whereupon APP/DEP issues the first climb (FL110).
+  // 0: legacy immediate transfer (the APP contact is embedded in the takeoff
+  // clearance and the pilot switches straight away). Height is AGL so it works at any
+  // field elevation. Configurable per profile; a future airport+.json override can
+  // set it per field.
+  int tower_report_alt_ft = 0;
 };
 
 void init();

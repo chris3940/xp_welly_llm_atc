@@ -642,6 +642,18 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
       // ceilings (LSZH 3000, LFPO 4500, LFLP 3500, LIMF 3500).
       // Empty result when no Approach/Departure freq is available.
       {"ifr_departure_contact", [&]() -> std::string {
+        // Report-then-transfer mode (tower_report_alt_ft > 0, EUROCONTROL variant):
+        // the Tower KEEPS the aircraft after takeoff -- the clearance ends with
+        // "report passing N feet" and NO embedded APP contact. poll_departure_handoff
+        // fires the actual "contact Approach/Departure" once the aircraft passes that
+        // height AGL, then APP/DEP issues FL110. Do NOT cache a pending departure
+        // label here, so the handoff is not silently advanced at takeoff.
+        const int report_alt = flight_phase::get_ifr_defaults().tower_report_alt_ft;
+        if (report_alt > 0) {
+          char rbuf[48];
+          std::snprintf(rbuf, sizeof(rbuf), ", report passing %d feet", report_alt);
+          return rbuf;
+        }
         float freq = ctx.airport_freqs.first_mhz(FT::DEPARTURE);
         if (freq < 100.0f) freq = ctx.airport_freqs.first_mhz(FT::APPROACH);
         if (freq < 100.0f) return "";

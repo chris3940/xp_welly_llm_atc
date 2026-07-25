@@ -59,6 +59,18 @@ std::string arrival_runway(const std::string &icao, float wind_dir,
 std::string departure_runway(const std::string &icao, float wind_dir,
                              float wind_speed);
 
+// SID climb hold override for `icao` whose SID terminates at `sid_last_fix`.
+// Returns true and fills the (non-null) out-params from the first departure_holds
+// rule whose match_fixes contains sid_last_fix (empty match_fixes = any SID from
+// this field). A rule that omits release_nm / step2_alt_ft leaves those out-params
+// untouched. Returns false when no override matches -> the caller keeps its generic
+// data-driven / FL110 default. hold_alt_ft = step-1 hold level (feet); release_nm =
+// great-circle hold distance; step2_alt_ft = optional explicit second step (feet).
+// These are LOCAL procedures not derivable from CIFP/airspace (Annecy: FL110 held
+// 30 NM under the Chambery/Geneva TMAs); everything else stays generic.
+bool departure_hold(const std::string &icao, const std::string &sid_last_fix,
+                    int *hold_alt_ft, float *release_nm, int *step2_alt_ft);
+
 } // namespace airport_overrides
 
 #endif // DATA_AIRPORT_OVERRIDES_HPP

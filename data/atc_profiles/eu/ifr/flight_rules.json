@@ -12,7 +12,9 @@
     "ctr_departure_contact_alt_ft": 3000,
     "star_entry_alt_ft": 11000,
     "approach_entry_alt_ft": 8000,
-    "sid_handoff_min_alt_ft": 12000
+    "sid_handoff_min_alt_ft": 12000,
+    "_comment_tower_report": "EUROCONTROL: Tower keeps the aircraft after takeoff, the takeoff clearance ends with 'report passing 3000 feet', and hands to Approach/Departure only once passing that height AGL -- then APP/DEP gives FL110. Set 0 for legacy immediate transfer (APP contact embedded in the takeoff clearance).",
+    "tower_report_alt_ft": 3000
   },
 
   "intent_preconditions": {

@@ -171,8 +171,9 @@
         "next_state": "IFR/DEPARTURE_CLEARED",
         "requires_readback": false
       },
+      "_comment_INITIAL_CALL_APPROACH": "Bare 'radar contact' -- the climb is issued by poll_sid_climb (step1, data-driven, airport+.json-aware) a moment later, so it is NEVER stated here. Stating it in the template used a stale hardcoded LFLP FL90/FL110 rule that CONTRADICTED poll_sid_climb's FL110 (two climbs 6 s apart, LFLP 2026-07-25).",
       "INITIAL_CALL_APPROACH": {
-        "response": "{callsign}, radar contact, climb {ifr_departure_climb}.",
+        "response": "{callsign}, radar contact.",
         "next_state": "IFR/RADAR_CONTACT",
         "requires_readback": false
       },
@@ -191,7 +192,7 @@
         "requires_readback": false
       },
       "INITIAL_CALL_APPROACH": {
-        "response": "{callsign}, radar contact, climb {ifr_departure_climb}.",
+        "response": "{callsign}, radar contact.",
         "next_state": "IFR/RADAR_CONTACT",
         "requires_readback": false
       },
@@ -208,9 +209,9 @@
     },
 
     "IFR/EN_ROUTE": {
-      "_comment": "On Departure frequency, pilot not yet checked in. poll_departure_handoff() issued the handoff.",
+      "_comment": "On Departure frequency, pilot not yet checked in. poll_departure_handoff() issued the handoff. INITIAL_CALL_APPROACH is bare 'radar contact' -- poll_sid_climb issues the climb (step1, data-driven) so the departure APP check-in never states a stale/contradictory FL.",
       "INITIAL_CALL_APPROACH": {
-        "response": "{callsign}, radar contact, climb {ifr_departure_climb}.",
+        "response": "{callsign}, radar contact.",
         "next_state": "IFR/RADAR_CONTACT",
         "requires_readback": false
       },

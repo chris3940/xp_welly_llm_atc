@@ -38,8 +38,22 @@ struct RunwayRule {
   float wind_min_dir = -1.0f, wind_max_dir = -1.0f;
 };
 
+// Per-airport SID climb hold: a local procedure NOT derivable from CIFP/airspace
+// (the initial-climb alt comes from the CIFP; these are the FL/distance the field
+// keeps you low under an adjacent TMA). hold_alt_ft held until release_nm
+// (great-circle from departure), then the general climb rules take over
+// (hand off to the upper controller, who clears the next step, step2_alt_ft).
+// Matched by the SID's terminating fix (match_fixes; empty = any SID here).
+struct DepartureHold {
+  std::vector<std::string> match_fixes; // SID last-fix idents; empty = any
+  int   hold_alt_ft  = 0;
+  float release_nm   = 0.0f;
+  int   step2_alt_ft = 0; // 0 = no explicit second step
+};
+
 std::unordered_map<std::string, std::vector<ApproachRule>> s_approaches;
 std::unordered_map<std::string, std::vector<RunwayRule>> s_runways;
+std::unordered_map<std::string, std::vector<DepartureHold>> s_dep_holds;
 bool s_ready = false;
 
 // Tailwind component (kt, +ve = tailwind) on a runway given the wind. Runway heading
@@ -98,6 +112,7 @@ void read_num(const nlohmann::json &obj, const char *key, float &out) {
 void init(std::string path) {
   s_approaches.clear();
   s_runways.clear();
+  s_dep_holds.clear();
   s_ready = false;
   if (path.empty())
     return;
@@ -174,21 +189,82 @@ void init(std::string path) {
       if (!rules.empty())
         s_runways[icao] = std::move(rules);
     }
+
+    // departure_holds (SID climb: hold hold_alt_ft until release_nm, then general)
+    if (auto dh = it->find("departure_holds"); dh != it->end() && dh->is_array()) {
+      std::vector<DepartureHold> holds;
+      for (const auto &entry : *dh) {
+        if (!entry.is_object())
+          continue;
+        DepartureHold h;
+        float alt = 0.0f, rel = 0.0f, s2 = 0.0f;
+        read_num(entry, "hold_alt_ft", alt);
+        read_num(entry, "release_nm", rel);
+        read_num(entry, "step2_alt_ft", s2);
+        h.hold_alt_ft = static_cast<int>(alt);
+        h.release_nm = rel;
+        h.step2_alt_ft = static_cast<int>(s2);
+        if (auto mf = entry.find("match_fixes"); mf != entry.end() && mf->is_array())
+          for (const auto &f : *mf)
+            if (f.is_string())
+              h.match_fixes.push_back(upper(f.get<std::string>()));
+        if (h.hold_alt_ft > 0)
+          holds.push_back(std::move(h));
+      }
+      if (!holds.empty())
+        s_dep_holds[icao] = std::move(holds);
+    }
   }
 
-  logging::info(
-      "airport_overrides: %d approach + %d runway rules (%zu / %zu airports) from %s",
-      n_appr, n_rwy, s_approaches.size(), s_runways.size(), path.c_str());
+  logging::info("airport_overrides: %d approach + %d runway rules + %zu dep-hold "
+                "airports (%zu / %zu appr/rwy airports) from %s",
+                n_appr, n_rwy, s_dep_holds.size(), s_approaches.size(),
+                s_runways.size(), path.c_str());
   s_ready = true;
 }
 
 void stop() {
   s_approaches.clear();
   s_runways.clear();
+  s_dep_holds.clear();
   s_ready = false;
 }
 
 bool ready() { return s_ready; }
+
+bool departure_hold(const std::string &icao, const std::string &sid_last_fix,
+                    int *hold_alt_ft, float *release_nm, int *step2_alt_ft) {
+  if (!s_ready || icao.empty())
+    return false;
+  auto it = s_dep_holds.find(upper(icao));
+  if (it == s_dep_holds.end())
+    return false;
+  const std::string fix = upper(sid_last_fix);
+  for (const DepartureHold &h : it->second) {
+    if (!h.match_fixes.empty()) {
+      bool matched = false;
+      for (const auto &f : h.match_fixes)
+        if (f == fix) {
+          matched = true;
+          break;
+        }
+      if (!matched)
+        continue; // rule is fix-scoped and this SID's last fix is not listed
+    }
+    if (hold_alt_ft && h.hold_alt_ft > 0)
+      *hold_alt_ft = h.hold_alt_ft;
+    if (release_nm && h.release_nm > 0.0f)
+      *release_nm = h.release_nm;
+    if (step2_alt_ft && h.step2_alt_ft > 0)
+      *step2_alt_ft = h.step2_alt_ft;
+    logging::info("airport_overrides: %s SID last-fix '%s' -> dep-hold FL%d "
+                  "release %.0f NM step2 FL%d",
+                  upper(icao).c_str(), fix.c_str(), h.hold_alt_ft / 100,
+                  h.release_nm, h.step2_alt_ft / 100);
+    return true;
+  }
+  return false;
+}
 
 float rvr_for_runway(const std::string &metar, const std::string &runway) {
   if (metar.empty() || runway.empty())

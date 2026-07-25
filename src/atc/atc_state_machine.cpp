@@ -140,6 +140,16 @@ struct AtcMachineState {
   // assigned_runway_ — same lifecycle, same release points.
   std::string session_callsign_;
 
+  // Trusted callsign ANCHOR, set via set_session_callsign() -- which the engine
+  // calls at init with settings::pilot_callsign() (the KNOWN configured callsign,
+  // e.g. "November Seven Five Zero X-Ray Papa"). Unlike session_callsign_ this is
+  // NOT cleared on an IDLE return, so the lock below can REJECT a mid-session parse
+  // whose trailing NATO letters CONFLICT with the known callsign. A garbled readback
+  // (Voxtral hears X-Ray -> "Sierra") must never flip the locked callsign to a
+  // different letter, which would poison the STT bias for the rest of the flight
+  // (LFLP 2026-07-24). Empty when no anchor was provided (headless tests / REPL).
+  std::string reference_callsign_;
+
   // Most recent tower clearance text that demanded a readback. Set by
   // apply_post_transition_hooks() whenever resp.requires_readback is
   // true, cleared on init/stop/reset/airport-change and whenever the
@@ -512,6 +522,11 @@ void set_session_callsign(const std::string &cs) {
   assert_flight_loop_thread();
   bump_gen();
   g_state.session_callsign_ = cs;
+  // Record the trusted anchor too. Callers of the PUBLIC set_session_callsign are
+  // the engine's init/reset sites passing settings::pilot_callsign() -- the known
+  // callsign. Persists across IDLE clears so the lock can validate against it.
+  if (!cs.empty())
+    g_state.reference_callsign_ = cs;
 }
 void clear_session_callsign() {
   assert_flight_loop_thread();
@@ -953,15 +968,57 @@ apply_post_transition_hooks(const intent_parser::PilotMessage &msg,
     }
   }
 
-  // Lock pilot callsign on first transition out of IDLE. Captures
-  // whatever the parser extracted from the initial-call utterance,
-  // when the pilot still speaks deliberately. Held until the dialog
-  // returns to IDLE so a mid-session mishear cannot overwrite it.
+  // Lock pilot callsign on first transition out of IDLE. Captures whatever the
+  // parser extracted from the initial-call utterance, when the pilot still speaks
+  // deliberately. Held until the dialog returns to IDLE so a mid-session mishear
+  // cannot overwrite it. VALIDATION (LFLP 2026-07-24): reject a parse whose trailing
+  // NATO letters CONFLICT with the trusted anchor (settings callsign). A garbled
+  // readback (Voxtral hears X-Ray -> "Sierra") must never flip the locked callsign to
+  // a different letter -- that poisoned the STT bias + ATC addressing for a whole
+  // flight. Tolerant of tokenisation splits (X-Ray vs "X Ray") via substring check.
   if (g_state.session_callsign_.empty() && !msg.callsign.empty() &&
       resp.next_state != ATCState::IDLE) {
     bump_gen();
-    g_state.session_callsign_ = msg.callsign;
-    logging::info("Session callsign locked: %s", msg.callsign.c_str());
+    std::string locked = msg.callsign;
+    if (!g_state.reference_callsign_.empty()) {
+      auto norm = [](const std::string &s) {
+        std::vector<std::string> w;
+        std::string cur;
+        for (char c : s) {
+          if (c == ' ') {
+            if (!cur.empty())
+              w.push_back(cur);
+            cur.clear();
+          } else if (std::isalnum(static_cast<unsigned char>(c))) {
+            cur += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+          }
+        }
+        if (!cur.empty())
+          w.push_back(cur);
+        return w;
+      };
+      const std::vector<std::string> pw = norm(msg.callsign);
+      const std::vector<std::string> rw = norm(g_state.reference_callsign_);
+      // Conflict = same LAST letter-word but a DIFFERENT second-last one that is not
+      // just a tokenisation variant (substring either way). E.g. "Sierra Papa" vs
+      // "... X-Ray Papa": last "papa" matches, "sierra" vs "xray" is a real mishear.
+      bool conflict = false;
+      if (pw.size() >= 2 && rw.size() >= 2 && pw.back() == rw.back()) {
+        const std::string &ps = pw[pw.size() - 2];
+        const std::string &rs = rw[rw.size() - 2];
+        if (ps != rs && ps.find(rs) == std::string::npos &&
+            rs.find(ps) == std::string::npos)
+          conflict = true;
+      }
+      if (conflict) {
+        logging::info("Session callsign lock REJECTED garble '%s' (conflicts with "
+                      "configured '%s') -> keeping configured callsign",
+                      msg.callsign.c_str(), g_state.reference_callsign_.c_str());
+        locked = g_state.reference_callsign_;
+      }
+    }
+    g_state.session_callsign_ = locked;
+    logging::info("Session callsign locked: %s", locked.c_str());
   }
 
   // Apply state transition if we have a response OR if the template
