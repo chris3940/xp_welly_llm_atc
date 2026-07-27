@@ -138,6 +138,12 @@ bool mistral_api_key_saved();
 std::string mistral_stt_model();
 std::string mistral_lm_model();
 std::string mistral_tts_model();
+// Voxtral context_bias multi-word ENCODING (spaces are illegal in an item):
+// "auto" (default -- try quote->underscore->comma, cache the first accepted),
+// "underscore" ("flight level"->flight_level), "comma" (->flight,level -> separate
+// words), or "quote" (->"flight level"). A/B switch to compare encodings in-sim
+// without rebuilding (user 2026-07-26).
+std::string mistral_context_bias_encoding();
 
 // Mistral TTS voice per role. Free strings — Voxtral TTS preset voice
 // ids are not whitelisted client-side, so the user can paste any

@@ -146,7 +146,10 @@ bool WhisperStt::open(const std::string &model_path,
 }
 
 std::string WhisperStt::transcribe(const std::vector<float> &pcm_16k_mono,
-                                   const std::string &airport_context) {
+                                   const std::string &airport_context,
+                                   const std::string & /*context_bias*/) {
+  // context_bias is Mistral-only; whisper.cpp biases via the freeform
+  // airport_context (initial_prompt) below.
   if (!ctx_ || pcm_16k_mono.empty())
     return {};
 

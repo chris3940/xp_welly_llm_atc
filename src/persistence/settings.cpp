@@ -560,6 +560,9 @@ std::string mistral_tts_model() {
   std::string v = cfg.value("mistral_tts_model", std::string(""));
   return v.empty() ? std::string("voxtral-mini-tts-2603") : v;
 }
+std::string mistral_context_bias_encoding() {
+  return cfg.value("mistral_context_bias_encoding", std::string("auto"));
+}
 std::string mistral_tts_voice_atis() {
   // Empty-string fallback so users on the pre-dropdown defaults still
   // get a usable voice — the preset catalog only became known after

@@ -42,5 +42,11 @@
     "departure_holds": [
       { "hold_alt_ft": 11000, "release_nm": 30, "_comment": "Annecy: hold FL110 for 30 NM. Verified airspace.txt along the ROMA2A (BELUS->GIRED) track: the Geneva TMA S10 sliver ends ~27.5 NM GC out, so 30 NM lands the handoff ~2.5 NM inside LYON CTA -> hands to Lyon 120.230, not the Geneva sliver. FL140 second step stays generic." }
     ]
+  },
+
+  "LIMF": {
+    "controllers": [
+      { "role": "approach", "name": "Milan Radar", "freq_mhz": 129.275, "_comment": "Torino Caselle departures worked by Milan Radar (ACC). The controlling volume above TORINO CTR (ceiling 3500) is MILAN CTA ZONE 24 in airspace.txt. Freq 129.275 per Navigraph (Torino ACC = MILAN RADAR 125.275 / 129.275). The sim atc.dat has Milan but with STALE freqs (MILAN ctr 118.675, MILAN RADAR tracon 126.750) that do not match Navigraph -- Navigraph updates nav+airspace, not atc.dat -- so this override injects the correct freq. Alt sector freq 125.275: switch here if 129.275 is the wrong Torino dep sector. Verified Navigraph 2026-07-27." }
+    ]
   }
 }

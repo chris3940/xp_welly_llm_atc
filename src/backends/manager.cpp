@@ -276,7 +276,7 @@ namespace stt {
 
 void transcribe_async(std::vector<int16_t> pcm16, uint32_t sample_rate_hz,
                       std::function<void(TranscriptResult)> callback,
-                      std::string airport_context) {
+                      std::string airport_context, std::string context_bias) {
   if (!callback)
     return;
 
@@ -292,6 +292,7 @@ void transcribe_async(std::vector<int16_t> pcm16, uint32_t sample_rate_hz,
 
   spawn_worker([pcm16 = std::move(pcm16), sample_rate_hz,
                 airport_context = std::move(airport_context),
+                context_bias = std::move(context_bias),
                 cb = std::move(callback)]() mutable {
     // Convert outside the call mutex so concurrent callers get the
     // most parallelism we can offer without serialising on whisper.
@@ -308,7 +309,7 @@ void transcribe_async(std::vector<int16_t> pcm16, uint32_t sample_rate_hz,
       }
       if (stt_ptr) {
         auto t0 = std::chrono::steady_clock::now();
-        transcript = stt_ptr->transcribe(pcm32, airport_context);
+        transcript = stt_ptr->transcribe(pcm32, airport_context, context_bias);
         auto t1 = std::chrono::steady_clock::now();
         g_last_stt_ms = static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)

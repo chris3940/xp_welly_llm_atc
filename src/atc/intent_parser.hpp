@@ -89,6 +89,17 @@ const char *intent_name(PilotIntent intent);
 const char *intent_template_key(PilotIntent intent);
 PilotIntent intent_from_key(const std::string &key);
 
+// Collapse any SPOKEN frequency inside `text` to the compact digit form so the
+// digit-based rules recognise every read-back style: digits ("125.630"), spelled
+// digit-by-digit ("one two five decimal six three zero"), cardinal ("one hundred
+// twenty five decimal two hundred"), and the pilot-abbreviated forms that DROP the
+// leading "1" of the 1xx MHz band ("two five decimal ...", "twenty five decimal
+// ...") -- a whole part below 100 is lifted into the 118-136 band. Anchored on the
+// word "decimal", which appears only in a frequency, so spelled callsign digits
+// ("November Seven Five Zero ...") are never touched. Non-frequency text passes
+// through unchanged. Exposed for unit testing. (user 2026-07-26)
+std::string normalize_spoken_frequency(const std::string &text);
+
 } // namespace intent_parser
 
 #endif // INTENT_PARSER_HPP

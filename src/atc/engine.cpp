@@ -62,6 +62,14 @@ constexpr double kGoAroundTriggerDistanceNm = 1.0;
 // IFR_DEPARTURE_CLEARED + CLIMB. Reset whenever the state is not
 // IFR_DEPARTURE_CLEARED so a re-entry starts fresh.
 static float s_departure_handoff_timer = 0.0f;
+// Report-then-transfer coupling: the departure handoff must be the RESPONSE to the
+// pilot's "reaching N feet" report, not an unsolicited push. Set true when the pilot
+// transmits in IFR_DEPARTURE_CLEARED while airborne; the poll then fires the handoff.
+// s_departure_at_alt_sec is the grace timer -- if the pilot never reports, the poll
+// hands off anyway after it elapses (they level at the initial climb and would
+// otherwise sit on Tower forever). Both reset on leaving IFR_DEPARTURE_CLEARED.
+static bool s_departure_level_reported = false;
+static float s_departure_at_alt_sec = 0.0f;
 static std::string
     s_current_controller_label; // last handoff target (for transcript)
 // Departure label stored when the takeoff clearance is built (ground phase).
@@ -487,6 +495,8 @@ void reset() {
   advisory_history_ = traffic_advisor::AdvisoryHistory{};
   last_go_around_emit_secs_ = -1e9;
   s_departure_handoff_timer = 0.0f;
+  s_departure_level_reported = false;
+  s_departure_at_alt_sec = 0.0f;
   s_current_controller_label.clear();
   s_pending_departure_label.clear();
   s_pending_controller_label.clear();
@@ -1132,6 +1142,16 @@ void process_transcript(Input in, Done done) {
                     s_pending_handoff_freq_mhz);
     }
   }
+
+  // Report-then-transfer coupling: in the departure-clearance window the pilot's
+  // airborne transmission IS the "reaching N feet" level report the takeoff
+  // clearance asked for. Arm the departure handoff so poll_departure_handoff fires
+  // it as the RESPONSE to this call instead of spontaneously (user 2026-07-27:
+  // "an App Approach call coming from nowhere ... should be the pilot calling").
+  if (atc_state_machine::get_state() ==
+          atc_state_machine::ATCState::IFR_DEPARTURE_CLEARED &&
+      !ctx.on_ground)
+    s_departure_level_reported = true;
 
   // Frequency guard: only process pilot transmissions on the correct frequency
   // for the current ATC state. A call on the wrong radio is silently ignored —
@@ -3082,16 +3102,30 @@ static std::string controller_label_for(const airspace_db::Controller *ctrl) {
 }
 
 bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
-                            float /*dt*/, std::string *out_text) {
+                            float dt, std::string *out_text) {
   using AS = atc_state_machine::ATCState;
   using FP = flight_phase::FlightPhase;
   using FT = xplane_context::FrequencyType;
 
-  if (atc_state_machine::get_state() != AS::IFR_DEPARTURE_CLEARED)
+  if (atc_state_machine::get_state() != AS::IFR_DEPARTURE_CLEARED) {
+    // Not in the departure-clearance window -> keep the report-coupling flags
+    // clear so the next takeoff starts fresh (before takeoff, and after handoff).
+    s_departure_level_reported = false;
+    s_departure_at_alt_sec = 0.0f;
     return false;
+  }
 
+  // Must be AIRBORNE and climbing out -- but NOT strictly CLIMB/CRUISE. The
+  // geometric phase detector routinely mislabels a low, turning IFR departure
+  // as PATTERN or even FINAL_APPROACH (LIMF RW36 climb-out: TAKEOFF_ROLL ->
+  // PATTERN -> FINAL_APPROACH -> ... -> CRUISE, user 2026-07-26). The old strict
+  // guard then BLOCKED the handoff for ~1 min while the aircraft climbed through
+  // the report altitude, so the pilot's repeated "reaching 2000 feet" reports met
+  // silence and the handoff fired late. In IFR_DEPARTURE_CLEARED there is no real
+  // traffic pattern -- any airborne phase is the departure climb-out -- so accept
+  // all of them and let the altitude gate below be the real trigger. [C. P. Potter]
   auto phase = flight_phase::get();
-  if (phase != FP::CLIMB && phase != FP::CRUISE)
+  if (ctx.on_ground || phase == FP::TAKEOFF_ROLL || phase == FP::LANDING_ROLL)
     return false;
 
   // If the takeoff clearance already embedded the departure instruction via
@@ -3116,18 +3150,45 @@ bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
   //    find_enclosing; AGL fallback when OpenAir data is absent).
   // enc (openair volume + NAME) is resolved in BOTH modes -- it feeds the controller
   // name/freq resolution below.
-  const int report_alt = flight_phase::get_ifr_defaults().tower_report_alt_ft;
+  int report_alt = flight_phase::get_ifr_defaults().tower_report_alt_ft;
+  // Cap the report altitude at the SID INITIAL CLIMB altitude: the aircraft levels
+  // there on the initial clearance and never climbs past a HIGHER report altitude
+  // (LIMF RW36 KUKE1Z initial 2000 < the 3000 config report -- the clearance says
+  // "report REACHING 2000 feet", so hand off when it reaches 2000, not a 3000 it
+  // never sees, user 2026-07-26). Compared in MSL -- the report is an ALTITUDE, not
+  // a height AGL (this also makes "passing 3000 feet" fire at 3000 MSL, matching the
+  // spoken clearance, instead of the old 3000-AGL which fired far too high).
+  if (report_alt > 0) {
+    const auto init = cifp_reader::initial_altitude(
+        ctx.cifp_dir, ctx.nearest_airport_id, ctx.active_runway);
+    const int field_ft =
+        static_cast<int>(ctx.altitude_ft_msl - ctx.height_agl_ft);
+    // Use the initial climb level-off (always above the field) instead of the
+    // config MSL report altitude when the config is BELOW the initial (aircraft
+    // levels first) OR AT/BELOW the field (high-elevation airport where 3000 MSL
+    // is under the ground and the MSL gate would fire immediately). Must match the
+    // clearance text in ground_operations {ifr_departure_contact}.
+    if (init.feet > 0 && !init.is_fl &&
+        (init.feet < report_alt || report_alt <= field_ft + 300))
+      report_alt = init.feet;
+  }
   openair_db::AirspaceEntry enc =
       openair_db::find_enclosing(ctx.latitude, ctx.longitude, openair_alt(ctx));
-  logging::info(
-      "IFR departure handoff: openair enc='%s' class=%d floor=%dft ceil=%dft at "
-      "%.0fft MSL pos=%.4f,%.4f (report_alt=%d agl=%.0f)",
-      enc.name.c_str(), static_cast<int>(enc.ac_class), enc.floor_ft,
-      enc.ceiling_ft, ctx.altitude_ft_msl, ctx.latitude, ctx.longitude, report_alt,
-      ctx.height_agl_ft);
   if (report_alt > 0) {
-    if (ctx.height_agl_ft < static_cast<float>(report_alt))
+    if (static_cast<int>(ctx.altitude_ft_msl) < report_alt) {
+      s_departure_at_alt_sec = 0.0f;
       return false; // still climbing to the report altitude -> stay on Tower
+    }
+    // At/above the report altitude. The takeoff clearance said "report reaching
+    // N feet", so the transfer must be the RESPONSE to the pilot's level report,
+    // NOT an unsolicited push (user 2026-07-27: "an App Approach call coming from
+    // nowhere ... should be the pilot calling"). Wait for the report; the grace
+    // timer is the fallback -- the pilot levels at the initial climb altitude and
+    // would otherwise sit on Tower forever if they never report. [C. P. Potter]
+    s_departure_at_alt_sec += dt;
+    constexpr float kReportGraceSec = 25.0f;
+    if (!s_departure_level_reported && s_departure_at_alt_sec < kReportGraceSec)
+      return false;
   } else {
     if (enc.ac_class == openair_db::AirspaceClass::CTR)
       return false; // still inside CTR — wait
@@ -3145,8 +3206,40 @@ bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
     // TMA / CTA / FIR / UIR → aircraft has left the CTR, proceed.
   }
 
+  // Log once here (past all the altitude / report / grace gates) instead of every
+  // frame from rotation -- the poll runs continuously in IFR_DEPARTURE_CLEARED.
+  logging::info(
+      "IFR departure handoff: openair enc='%s' class=%d floor=%dft ceil=%dft at "
+      "%.0fft MSL pos=%.4f,%.4f (report_alt=%d MSL, reported=%d)",
+      enc.name.c_str(), static_cast<int>(enc.ac_class), enc.floor_ft,
+      enc.ceiling_ft, ctx.altitude_ft_msl, ctx.latitude, ctx.longitude, report_alt,
+      s_departure_level_reported ? 1 : 0);
+
   std::string controller_label;
   float freq = 0.0f;
+
+  // P0: explicit airport+.json controller override -- GENERIC (data-driven, no
+  // per-airport code): any field may declare a "departure"/"approach" controller
+  // whose frequency the sim's atc.dat/apt.dat get wrong. LIMF's Milan Radar freq in
+  // atc.dat is stale vs Navigraph (129.275), so airport+.json carries the correct
+  // value. The default remains the volume-change re-probe below (a CTR departure is
+  // just a volume change: resolve the controller of the volume STACKED above, like
+  // every other climb/descent transition); this override only supplies a correct
+  // frequency where the data files are wrong. "departure" role first, then
+  // "approach". (user 2026-07-27) [C. P. Potter]
+  {
+    std::string oname;
+    float ofreq = 0.0f;
+    if (airport_overrides::controller(ctx.nearest_airport_id, "departure", &oname,
+                                      &ofreq) ||
+        airport_overrides::controller(ctx.nearest_airport_id, "approach", &oname,
+                                      &ofreq)) {
+      controller_label = oname;
+      freq = ofreq;
+      logging::info("IFR departure handoff: [P0-airport+.json] %s %.3f",
+                    controller_label.c_str(), freq);
+    }
+  }
 
   // Primary: use the openair TMA name to identify the correct TRACON in
   // atc.dat by name.  This is geometrically exact: openair has altitude-aware
@@ -3156,23 +3249,35 @@ bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
   //
   // "CHAMBERY TMA SECTOR 1" → city fragment "CHAMBERY"
   // → find atc.dat TRACON with NAME containing "CHAMBERY" → Chambery APP.
-  // Unified resolver (step 1c, 2026-07-18): was an inline duplicate of
-  // resolve_tma_controller. resolve_sector_controller(terminal=true) resolves a
-  // TMA/CTA name -> atc.dat TRACON, label "<City> Approach" -- identical output, plus
-  // the shared TWR-facility fallback (so a few names that previously fell to P2 now
-  // resolve at P1). Non-TMA/CTA classes return false -> the P2/P3 fallbacks below.
-  {
+  // resolve_sector_controller(terminal=true) resolves a TMA/CTA name -> atc.dat
+  // TRACON, label "<City> Approach". Non-TMA/CTA classes return false -> P2/P3.
+  //
+  // CTR re-probe: when the aircraft is still in the departure CTR at the report
+  // altitude (it levels at the low SID initial climb, e.g. LIMF 2000 ft under the
+  // 3500 ft TORINO CTR), find_enclosing returns only the CTR, whose name atc.dat
+  // cannot map. Re-probe airspace.txt just above the CTR ceiling for the volume
+  // STACKED over it (MILAN CTA ZONE 24, floor 3500) and resolve from that --
+  // airspace.txt stays authoritative for the volume. (user 2026-07-27)
+  if (freq < 100.0f) {
+    openair_db::AirspaceEntry ctrl_vol = enc;
+    if (enc.ac_class == openair_db::AirspaceClass::CTR && enc.ceiling_ft > 0) {
+      const openair_db::AirspaceEntry above = openair_db::find_enclosing(
+          ctx.latitude, ctx.longitude, enc.ceiling_ft + 200);
+      if (!above.name.empty() &&
+          above.ac_class != openair_db::AirspaceClass::CTR)
+        ctrl_vol = above;
+    }
     std::string lbl;
     float mhz = 0.0f;
-    if (resolve_sector_controller(enc, /*terminal=*/true, &lbl, &mhz)) {
+    if (resolve_sector_controller(ctrl_vol, /*terminal=*/true, &lbl, &mhz)) {
       controller_label = lbl;
       freq = mhz;
       logging::info("IFR departure handoff: [P1-openair] '%s' -> %s %.3f",
-                    enc.name.c_str(), controller_label.c_str(), freq);
+                    ctrl_vol.name.c_str(), controller_label.c_str(), freq);
     } else {
       logging::info(
           "IFR departure handoff: [P1-openair] '%s' -> no match, falling back",
-          enc.name.c_str());
+          ctrl_vol.name.c_str());
     }
   }
 
@@ -3301,6 +3406,18 @@ procedure_deviation_nm(const xplane_context::XPlaneContext &ctx,
                        bool sid_star_only, const std::string &direct_fix,
                        double direct_from_lat, double direct_from_lon);
 
+// A SID's published binding minimum counts as a real early departure floor ONLY
+// when it is at an INTERMEDIATE fix. When it sits at the SID's EXIT fix it is the
+// altitude to reach when LEAVING the SID -- it tracks the enroute climb / cruise
+// (e.g. KUKEV at FL200 on LIMF KUKE1Z with a FL220 cruise), NOT a departure floor
+// -- so it must not drive the progressive first climb step nor defeat the step-1
+// hold (which would collapse the ladder into an immediate "climb FL200" straight
+// out of the 2000 ft initial level-off). (user 2026-07-27) [C. P. Potter]
+static bool sid_min_at_exit_fix(const xplane_context::XPlaneContext &ctx) {
+  return !ctx.ifr_sid_min_waypoint.empty() &&
+         ctx.ifr_sid_min_waypoint == ctx.ifr_sid_last_fix;
+}
+
 // True while the step-1 hold is active -- a hold distance is set (default 10 NM,
 // generic for every departure) and the aircraft is still within it (great-circle
 // from the departure airport) AND the SID does not itself demand a climb above
@@ -3309,7 +3426,7 @@ procedure_deviation_nm(const xplane_context::XPlaneContext &ctx,
 static bool sid_step1_hold_active(const xplane_context::XPlaneContext &ctx) {
   if (s_sid_hold_release_nm <= 0.0f)
     return false;
-  if (ctx.ifr_sid_min_alt_ft > s_sid_step1_alt_ft)
+  if (ctx.ifr_sid_min_alt_ft > s_sid_step1_alt_ft && !sid_min_at_exit_fix(ctx))
     return false; // SID's own minimum demands a higher climb -> do not hold
   if (s_departure_apt_lat == 0.0 && s_departure_apt_lon == 0.0)
     return false; // departure fix not captured -> cannot measure -> do not hold
@@ -3475,8 +3592,13 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     const bool has_override = airport_overrides::departure_hold(
         s_departure_apt_id, ctx.ifr_sid_last_fix, &step1, &hold_nm, &step2);
 
-    // Never clear below the SID's published minimum crossing altitude.
-    if (sid_min_ft > step1)
+    // Never clear below the SID's published minimum crossing altitude -- UNLESS
+    // that minimum sits at the SID's EXIT fix (an enroute-climb altitude, not an
+    // early departure floor; see sid_min_at_exit_fix). Otherwise a SID whose only
+    // binding is at a high exit fix (LIMF KUKE1Z: KUKEV FL200) would force step1
+    // straight to FL200 out of the 2000 ft level-off instead of the progressive
+    // FL110 -> FL140 -> cruise ladder. (user 2026-07-27) [C. P. Potter]
+    if (sid_min_ft > step1 && !sid_min_at_exit_fix(ctx))
       step1 = sid_min_ft;
 
     if (step1 >= cruise_ft) {
@@ -4841,8 +4963,30 @@ static bool resolve_tma_controller(const std::string &tma_name,
     return false;
   if (out_freq_mhz)
     *out_freq_mhz = static_cast<float>(ctrl->freqs_khz.front()) / 1000.0f;
-  if (out_label)
-    *out_label = controller_label_for(label_ctrl) + " Approach";
+  if (out_label) {
+    // Satellite-facility guard: an atc.dat TRACON can be NAMED after a big area
+    // but tied to a SMALL satellite field ("MILAN RADAR" -> facility LILN =
+    // "Venegono"), so controller_label_for() gives the WRONG spoken name. When the
+    // facility name does NOT match the openair AREA name, prefer the openair name
+    // ("MILAN CTA..." -> "Milan"). Chambery matches (facility LFLB -> "Chambery"
+    // ~ area "CHAMBERY") so it is UNAFFECTED (user 2026-07-26).
+    const std::string facility_label = controller_label_for(label_ctrl);
+    const std::string area_label = openair_sector_label(tma_name);
+    auto lc = [](std::string s) {
+      for (char &c : s)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      return s;
+    };
+    std::string base = facility_label;
+    if (facility_label.empty()) {
+      base = area_label;
+    } else if (!area_label.empty()) {
+      const std::string fl = lc(facility_label), al = lc(area_label);
+      if (fl.find(al) == std::string::npos && al.find(fl) == std::string::npos)
+        base = area_label; // mismatch -> openair area name (Milan, not Venegono)
+    }
+    *out_label = base + " Approach";
+  }
   return true;
 }
 
@@ -6170,22 +6314,31 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
 
         ++s_route_step_idx;
         s_enroute_cleared_alt_ft = step_target_ft;
+        // VERB from the aircraft's CURRENT altitude, NOT the previously-cleared FL:
+        // a filed step DOWN (e.g. FL220->FL210) issued while the aircraft is still
+        // CLIMBING and BELOW the step target must not say "descend" (physically
+        // impossible). Below target -> climb/maintain; above -> descend (user
+        // 2026-07-26: cleared FL220, climbing through FL180, step FL210 said
+        // "descend FL210"). "maintain" when the aircraft is already at the level
+        // (the step just caps a higher previous clearance = "stop climb").
+        const int cur_ft = static_cast<int>(ctx.pressure_alt_ft);
+        const int verb_diff = step_target_ft - cur_ft;
+        const char *verb =
+            (verb_diff > 200) ? "climb" : (verb_diff < -200) ? "descend"
+                                                             : "maintain";
         if (out_text) {
           char buf[128];
           const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
           const int tl = compute_tl_ft(ta, ctx.qnh_hpa);
           const bool below_tl = s_enroute_cleared_alt_ft < tl;
           if (below_tl) {
-            std::snprintf(buf, sizeof(buf),
-                          step_diff > 0 ? "%s, climb to %d feet, QNH %d."
-                                        : "%s, descend to %d feet, QNH %d.",
-                          callsign.c_str(), s_enroute_cleared_alt_ft, ctx.qnh_hpa);
+            std::snprintf(buf, sizeof(buf), "%s, %s %d feet, QNH %d.",
+                          callsign.c_str(), verb, s_enroute_cleared_alt_ft,
+                          ctx.qnh_hpa);
             s_qnh_stated = true;
           } else {
-            std::snprintf(buf, sizeof(buf),
-                          step_diff > 0 ? "%s, climb flight level %d."
-                                        : "%s, descend flight level %d.",
-                          callsign.c_str(), step.cruise_fl);
+            std::snprintf(buf, sizeof(buf), "%s, %s flight level %d.",
+                          callsign.c_str(), verb, step.cruise_fl);
           }
           *out_text = buf;
         }
@@ -6193,9 +6346,9 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
           const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
           const int tl = compute_tl_ft(ta, ctx.qnh_hpa);
           logging::info(
-              "IFR en-route: filed step %s FL%d (fix %s, dist %.0f NM, TL=%d)",
-              step_diff > 0 ? "climb" : "descent", step.cruise_fl,
-              step.ident.c_str(), dist_nm, tl / 100);
+              "IFR en-route: filed step %s FL%d (fix %s, dist %.0f NM, cur FL%d, TL=%d)",
+              verb, step.cruise_fl, step.ident.c_str(), dist_nm, cur_ft / 100,
+              tl / 100);
         }
         s_enroute_alt_warn_cooldown = 180.0f;
         s_enroute_verify_query_sent = false;
@@ -7408,6 +7561,12 @@ const std::string &pending_departure_label() {
 }
 
 const std::string &assigned_star_name() { return s_assigned_star_name; }
+
+// Approach FAF / IAF idents for the STT context bias: the pilot reports
+// "established" at the FAF and is cleared to the approach at the IAF, so these
+// two fix names are worth anchoring in the approach phase. Empty until assigned.
+const std::string &approach_faf_ident() { return s_approach_faf.ident; }
+const std::string &approach_iaf_ident() { return s_no_star_direct_iaf; }
 
 // Spoken (plain-language) form of the assigned STAR for the STT context bias, so
 // the pilot's readback of what ATC actually SAID ("SALEV THREE PAPA") is

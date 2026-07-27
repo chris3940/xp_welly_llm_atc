@@ -36,7 +36,8 @@ public:
             int gpu_min_free_vram_gb = 8);
 
   std::string transcribe(const std::vector<float> &pcm_16k_mono,
-                         const std::string &airport_context) override;
+                         const std::string &airport_context,
+                         const std::string &context_bias) override;
 
 private:
   whisper_context *ctx_ = nullptr;

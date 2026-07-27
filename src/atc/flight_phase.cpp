@@ -109,6 +109,17 @@ static float angle_diff(float a, float b) {
   return std::fabs(d);
 }
 
+// Initial great-circle bearing (degrees true) from point 1 toward point 2.
+static float bearing_deg(double lat1, double lon1, double lat2, double lon2) {
+  double phi1 = lat1 * kDeg2Rad, phi2 = lat2 * kDeg2Rad;
+  double dlon = (lon2 - lon1) * kDeg2Rad;
+  double y = std::sin(dlon) * std::cos(phi2);
+  double x = std::cos(phi1) * std::sin(phi2) -
+             std::sin(phi1) * std::cos(phi2) * std::cos(dlon);
+  double brg = std::atan2(y, x) / kDeg2Rad;
+  return static_cast<float>(std::fmod(brg + 360.0, 360.0));
+}
+
 // ── Phase name mapping ───────────────────────────────────────────
 
 static const char *kPhaseNames[] = {
@@ -466,12 +477,22 @@ static FlightPhase detect_raw(const xplane_context::XPlaneContext &ctx) {
   bool low_agl = (ctx.height_agl_ft < thresholds_.pattern_max_agl_ft);
 
   if (near_airport && low_agl) {
-    // Check final approach: descending + runway-aligned
+    // Check final approach: descending + runway-aligned + FIELD AHEAD.
+    // The field-ahead test (heading within 90 deg of the bearing to the airport)
+    // is what separates a real final from a DEPARTURE: on final the field is ahead
+    // (you are flying toward it), on climb-out it is behind you. Without it a
+    // runway-aligned departure that momentarily dips its VS at the initial-climb
+    // level-off (LIMF RW36: leveled at 2000 ft, still < 5 NM / < 3000 ft AGL,
+    // heading ~360 aligned) was flagged FINAL_APPROACH -- absurd on a departure.
+    // (user 2026-07-27) [C. P. Potter]
     float rwy_hdg = active_runway_heading(ctx);
+    float brg_to_airport = bearing_deg(ctx.latitude, ctx.longitude,
+                                       ctx.airport_lat, ctx.airport_lon);
     if (rwy_hdg >= 0.0f &&
         ctx.vertical_speed_fpm < thresholds_.final_descent_rate_fpm &&
         angle_diff(ctx.heading_true, rwy_hdg) <
-            thresholds_.runway_aligned_deg) {
+            thresholds_.runway_aligned_deg &&
+        angle_diff(ctx.heading_true, brg_to_airport) < 90.0f) {
       return FlightPhase::FINAL_APPROACH;
     }
     return FlightPhase::PATTERN;

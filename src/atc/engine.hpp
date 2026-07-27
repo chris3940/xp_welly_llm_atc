@@ -261,6 +261,11 @@ const std::string &assigned_star_name();
 // Empty when no STAR is assigned.
 std::string assigned_star_spoken();
 
+// Approach IAF / FAF idents for the STT context bias (the pilot is cleared to the
+// IAF and reports "established" at the FAF). Empty until an approach is assigned.
+const std::string &approach_faf_ident();
+const std::string &approach_iaf_ident();
+
 // Spoken approach identity ("RNAV Zulu approach runway 04") for the STT context
 // bias -- matches what ATC speaks (NATO variant word + runway). Empty when no
 // approach is assigned.

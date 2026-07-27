@@ -30,7 +30,8 @@ public:
             std::string base_url = openai_common::kDefaultBaseUrl);
 
   std::string transcribe(const std::vector<float> &pcm_16k_mono,
-                         const std::string &airport_context) override;
+                         const std::string &airport_context,
+                         const std::string &context_bias) override;
 
   std::string last_error_message() const override { return last_error_; }
 

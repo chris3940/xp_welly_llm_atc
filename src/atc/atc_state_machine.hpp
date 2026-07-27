@@ -191,6 +191,11 @@ void set_assigned_runway(const std::string &rwy);
 // can hijack the tower's salutation mid-session.
 const std::string &session_callsign();
 
+// The IFR squawk assigned during the pre-departure clearance (empty until
+// then). Read by the STT context_bias builder so the pilot's clearance
+// read-back of the transponder code is anchored (a 4-digit garble hotspot).
+const std::string &session_squawk();
+
 // Explicitly lock the session callsign. Used by the training-jump entry
 // points (engine::training_jump_*) which bypass the normal initial-call
 // flow that would otherwise lock it — without this the callsign stays

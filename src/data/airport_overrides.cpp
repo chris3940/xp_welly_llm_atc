@@ -51,9 +51,18 @@ struct DepartureHold {
   int   step2_alt_ft = 0; // 0 = no explicit second step
 };
 
+// Delegated / override controller: a facility that atc.dat / apt.dat cannot
+// resolve correctly (absent, or wrong frequency). role is normalised UPPER.
+struct ControllerOverride {
+  std::string role; // "APPROACH","DEPARTURE","TOWER","GROUND","DELIVERY","ATIS","INFO"
+  std::string name; // spoken label, e.g. "Milan Radar"
+  float freq_mhz = 0.0f;
+};
+
 std::unordered_map<std::string, std::vector<ApproachRule>> s_approaches;
 std::unordered_map<std::string, std::vector<RunwayRule>> s_runways;
 std::unordered_map<std::string, std::vector<DepartureHold>> s_dep_holds;
+std::unordered_map<std::string, std::vector<ControllerOverride>> s_controllers;
 bool s_ready = false;
 
 // Tailwind component (kt, +ve = tailwind) on a runway given the wind. Runway heading
@@ -113,6 +122,7 @@ void init(std::string path) {
   s_approaches.clear();
   s_runways.clear();
   s_dep_holds.clear();
+  s_controllers.clear();
   s_ready = false;
   if (path.empty())
     return;
@@ -214,6 +224,27 @@ void init(std::string path) {
       if (!holds.empty())
         s_dep_holds[icao] = std::move(holds);
     }
+
+    // controllers (delegated/override facility name + freq, e.g. LIMF -> Milan Radar)
+    if (auto cs = it->find("controllers"); cs != it->end() && cs->is_array()) {
+      std::vector<ControllerOverride> ctrls;
+      for (const auto &entry : *cs) {
+        if (!entry.is_object())
+          continue;
+        ControllerOverride c;
+        if (auto r = entry.find("role"); r != entry.end() && r->is_string())
+          c.role = upper(r->get<std::string>());
+        if (auto nm = entry.find("name"); nm != entry.end() && nm->is_string())
+          c.name = nm->get<std::string>();
+        float f = 0.0f;
+        read_num(entry, "freq_mhz", f);
+        c.freq_mhz = f;
+        if (!c.role.empty() && !c.name.empty())
+          ctrls.push_back(std::move(c));
+      }
+      if (!ctrls.empty())
+        s_controllers[icao] = std::move(ctrls);
+    }
   }
 
   logging::info("airport_overrides: %d approach + %d runway rules + %zu dep-hold "
@@ -227,7 +258,28 @@ void stop() {
   s_approaches.clear();
   s_runways.clear();
   s_dep_holds.clear();
+  s_controllers.clear();
   s_ready = false;
+}
+
+bool controller(const std::string &icao, const std::string &role,
+                std::string *out_name, float *out_freq_mhz) {
+  if (!s_ready || icao.empty() || role.empty())
+    return false;
+  auto it = s_controllers.find(upper(icao));
+  if (it == s_controllers.end())
+    return false;
+  const std::string want = upper(role);
+  for (const ControllerOverride &c : it->second) {
+    if (c.role != want)
+      continue;
+    if (out_name)
+      *out_name = c.name;
+    if (out_freq_mhz)
+      *out_freq_mhz = c.freq_mhz;
+    return true;
+  }
+  return false;
 }
 
 bool ready() { return s_ready; }

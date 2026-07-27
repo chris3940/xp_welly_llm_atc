@@ -563,27 +563,30 @@ static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
     }
   }
 
-  // Hysteresis: only switch away from the current runway when the candidate
-  // has at least 5 kt more headwind. Prevents flapping near the threshold.
-  // Exception: always switch when the current runway exceeds the 5 kt
-  // tailwind limit, regardless of the headwind advantage on the new end.
+  // Keep the runway-in-use unless its TAILWIND exceeds the limit. The only
+  // criterion is the along-axis wind component on the CURRENT runway: 7 kt is the
+  // max tailwind (from behind) tolerated on the runway in service. A light /
+  // variable wind never flips the active runway (user 2026-07-26, LFLP wind
+  // 003/05: RWY 22 tailwind is only 4 kt, so 22 stays). The old rule keyed on the
+  // head-vs-tail DIFFERENCE (~2x the component), which crossed the threshold for a
+  // near-axis light wind and flipped 22 <-> 04.
   if (!current_runway.empty() && best_end != current_runway) {
-    float cur_headwind = -9999.0f;
+    constexpr float kMaxTailwindKt = 7.0f;
     for (const auto &rwy : runways) {
       if (any_paved && !is_paved(rwy.surface_code))
         continue;
       for (const auto *end : {&rwy.end1, &rwy.end2}) {
         if (end->number != current_runway)
           continue;
-        float diff =
+        // Along-axis component: +headwind from the front, -tailwind from behind.
+        const float axis =
             std::fmod(wind_dir - end->heading_deg + 540.0f, 360.0f) - 180.0f;
-        cur_headwind =
-            wind_speed * std::cos(diff * static_cast<float>(kDeg2Rad));
+        const float tailwind =
+            -wind_speed * std::cos(axis * static_cast<float>(kDeg2Rad));
+        if (tailwind <= kMaxTailwindKt)
+          return current_runway; // within limit -> stay in service
       }
     }
-    bool cur_excessive_tailwind = cur_headwind < -7.0f;
-    if (!cur_excessive_tailwind && best_headwind - cur_headwind < 7.0f)
-      return current_runway;
   }
   return best_end;
 }

@@ -18,8 +18,9 @@
 // <plugin>/Resources/airport+.json. Supplements Navigraph/apt.dat/atc.dat with
 // data those sources cannot express: a weather-gated PREFERRED APPROACH (e.g.
 // LFMN 04L -> R04LA when visibility is good, else R04LZ), the runway-in-use
-// config, and delegated controllers. Only the preferred-approach lookup is wired
-// so far (v4.4.0); runway_config + controllers are parsed-but-unused for now.
+// config, and delegated controllers. Wired so far (v4.4.0): preferred_approach,
+// departure_hold, arrival_runway, and controller() (departure handoff). The
+// departure_runway() half of runway_config is still parsed-but-unused.
 namespace airport_overrides {
 
 // Load and parse airport+.json. Empty path or missing file -> disabled (every
@@ -70,6 +71,17 @@ std::string departure_runway(const std::string &icao, float wind_dir,
 // 30 NM under the Chambery/Geneva TMAs); everything else stays generic.
 bool departure_hold(const std::string &icao, const std::string &sid_last_fix,
                     int *hold_alt_ft, float *release_nm, int *step2_alt_ft);
+
+// Delegated / override controller for icao + role ("approach", "departure",
+// "tower", "ground", "delivery", "atis", "info"), from the controllers list.
+// For facilities that atc.dat / apt.dat cannot resolve correctly -- absent
+// entirely, or listed under a wrong frequency (e.g. Torino Caselle departures
+// are worked by "Milan Radar" on 129.275, which apt.dat records wrongly as
+// 121.100). Returns true and fills the spoken NAME + frequency (MHz) from the
+// first entry matching `role` (case-insensitive). false when no override -> the
+// caller keeps its openair / atc.dat / apt.dat resolution. (C. P. Potter)
+bool controller(const std::string &icao, const std::string &role,
+                std::string *out_name, float *out_freq_mhz);
 
 } // namespace airport_overrides
 

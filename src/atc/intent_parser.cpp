@@ -224,6 +224,11 @@ static const std::vector<std::string> kPhoneticAlphabet = {
 // ("direct Rome") still parses correctly after the replacement.
 // Word-level STT alias corrections (one misheard word → one canonical word).
 static const std::unordered_map<std::string, std::string> kWordAliases = {
+    // Frequency separator: Voxtral sometimes emits the US "period" for the ICAO
+    // "decimal" ("one two five period six three zero") -> normalize so frequency
+    // read-backs match (user 2026-07-26). NOT "point" -- that would corrupt
+    // "holding point" / "reporting point".
+    {"period", "decimal"},
     // Romeo (R) — Voxtral mishearings:
     {"rainbow", "romeo"},
     {"railway", "romeo"},
@@ -721,6 +726,147 @@ PilotIntent intent_from_key(const std::string &key) {
   return it != kMap.end() ? it->second : PilotIntent::UNKNOWN;
 }
 
+// ── Spoken-frequency normalization (see header) ────────────────────────────
+namespace {
+const std::unordered_map<std::string, int> kFqUnit = {
+    {"zero", 0}, {"one", 1}, {"two", 2},   {"three", 3}, {"four", 4},
+    {"five", 5}, {"six", 6}, {"seven", 7}, {"eight", 8}, {"nine", 9},
+    {"niner", 9}};
+const std::unordered_map<std::string, int> kFqTeen = {
+    {"ten", 10},      {"eleven", 11},  {"twelve", 12},  {"thirteen", 13},
+    {"fourteen", 14}, {"fifteen", 15}, {"sixteen", 16}, {"seventeen", 17},
+    {"eighteen", 18}, {"nineteen", 19}};
+const std::unordered_map<std::string, int> kFqTens = {
+    {"twenty", 20}, {"thirty", 30},  {"forty", 40},  {"fifty", 50},
+    {"sixty", 60},  {"seventy", 70}, {"eighty", 80}, {"ninety", 90}};
+
+std::string fq_lc_alpha(const std::string &w) {
+  std::string o;
+  for (char c : w)
+    if (std::isalpha(static_cast<unsigned char>(c)))
+      o += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return o;
+}
+bool fq_is_num_word(const std::string &lw) {
+  return kFqUnit.count(lw) || kFqTeen.count(lw) || kFqTens.count(lw) ||
+         lw == "hundred";
+}
+// The frequency separator the pilot may say: ICAO "decimal", or the US "point" /
+// "period". Safe to accept all three here because the collapse ALSO requires
+// number-words on BOTH sides -- "holding point Charlie" never matches.
+bool fq_is_separator(const std::string &lw) {
+  return lw == "decimal" || lw == "point" || lw == "period";
+}
+// Parse a run of number-words (lc form): cardinal when it carries hundred/teen/
+// tens, else digit-by-digit concatenation. `digits` preserves leading zeros for
+// the fractional side.
+void fq_parse_run(const std::vector<std::string> &w, int &value,
+                  std::string &digits) {
+  bool cardinal = false;
+  for (const auto &x : w)
+    if (kFqTeen.count(x) || kFqTens.count(x) || x == "hundred")
+      cardinal = true;
+  if (cardinal) {
+    int cur = 0;
+    for (const auto &x : w) {
+      if (x == "hundred")
+        cur = (cur == 0 ? 100 : cur * 100);
+      else if (kFqTeen.count(x))
+        cur += kFqTeen.at(x);
+      else if (kFqTens.count(x))
+        cur += kFqTens.at(x);
+      else if (kFqUnit.count(x))
+        cur += kFqUnit.at(x);
+    }
+    value = cur;
+    digits = std::to_string(cur);
+  } else {
+    std::string d;
+    for (const auto &x : w)
+      d += static_cast<char>('0' + kFqUnit.at(x));
+    digits = d;
+    value = d.empty() ? 0 : std::stoi(d);
+  }
+}
+} // namespace
+
+std::string normalize_spoken_frequency(const std::string &text) {
+  std::vector<std::string> tok;
+  {
+    std::string cur;
+    for (char c : text) {
+      if (std::isspace(static_cast<unsigned char>(c))) {
+        if (!cur.empty()) {
+          tok.push_back(cur);
+          cur.clear();
+        }
+      } else {
+        cur += c;
+      }
+    }
+    if (!cur.empty())
+      tok.push_back(cur);
+  }
+  std::vector<std::string> lc(tok.size());
+  for (size_t i = 0; i < tok.size(); ++i)
+    lc[i] = fq_lc_alpha(tok[i]);
+
+  std::vector<std::string> out;
+  for (size_t i = 0; i < tok.size();) {
+    if (!fq_is_separator(lc[i])) {
+      out.push_back(tok[i]);
+      ++i;
+      continue;
+    }
+    // Whole run = trailing number-words already pushed onto `out`.
+    std::vector<std::string> whole_orig;
+    while (!out.empty() && fq_is_num_word(fq_lc_alpha(out.back()))) {
+      whole_orig.insert(whole_orig.begin(), out.back());
+      out.pop_back();
+    }
+    // Fractional run = number-words right after "decimal".
+    size_t f = i + 1;
+    std::vector<std::string> frac_lc;
+    while (f < tok.size() && fq_is_num_word(lc[f])) {
+      frac_lc.push_back(lc[f]);
+      ++f;
+    }
+    if (whole_orig.empty() || frac_lc.empty()) {
+      for (const auto &x : whole_orig)
+        out.push_back(x); // not a frequency -> restore untouched
+      out.push_back(tok[i]);
+      ++i;
+      continue;
+    }
+    std::vector<std::string> whole_lc;
+    for (const auto &x : whole_orig)
+      whole_lc.push_back(fq_lc_alpha(x));
+    int wval = 0, fval = 0;
+    std::string wdig, fdig;
+    fq_parse_run(whole_lc, wval, wdig);
+    fq_parse_run(frac_lc, fval, fdig);
+    if (wval < 100)
+      wval += 100; // pilots drop the leading "1" of the 1xx band
+    if (wval < 108 || wval > 137) {
+      // Not a plausible VHF frequency -> leave the words untouched.
+      for (const auto &x : whole_orig)
+        out.push_back(x);
+      out.push_back(tok[i]);
+      ++i;
+      continue;
+    }
+    out.push_back(std::to_string(wval) + "." + fdig);
+    i = f; // skip the consumed fractional words
+  }
+  std::string res;
+  for (size_t i = 0; i < out.size(); ++i) {
+    if (i)
+      res += ' ';
+    res += out[i];
+  }
+  return res;
+}
+
 PilotMessage parse(const std::string &transcript,
                    const xplane_context::XPlaneContext &ctx) {
   // Lazy load — keeps tests + atc_repl simple (no need for explicit init()
@@ -743,6 +889,10 @@ PilotMessage parse(const std::string &transcript,
   //    individual rules already have explicit "take of"/"clear for" patterns,
   //    so normalization stays a no-op until we want a global rewrite layer)
   text = intent_rules::preprocess(text);
+  // Collapse any SPOKEN frequency (spelled / cardinal / dropped-"1") to the compact
+  // "125.630" form so the digit-based READBACK / handoff rules match every style
+  // (user 2026-07-26). No-op on non-frequency text.
+  text = normalize_spoken_frequency(text);
 
   // 3. Feature extraction (callsign / runway / VRP / position marker)
   msg.callsign = extract_callsign(text);

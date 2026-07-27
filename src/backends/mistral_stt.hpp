@@ -23,9 +23,11 @@ namespace backends {
 // the Voxtral `language` parameter immediately, without reloading the
 // backend.
 //
-// Airport context is forwarded as Voxtral's `context_bias[]` multipart
-// array — one form field per comma-separated token. This is the
-// idiomatic biasing path (vs. OpenAI's freeform `prompt` string).
+// `airport_context` is the freeform prompt (sent as Voxtral's `prompt`).
+// `context_bias` is a COMMA-separated curated list (whole word OR multi-word
+// phrases) forwarded as Voxtral's `context_bias[]` array -- split on COMMAS
+// only (never whitespace, so phrases stay intact) and capped at 100 entries
+// per the API contract. This is the idiomatic biasing path.
 class MistralStt final : public ISpeechToText {
 public:
   static constexpr const char *kDefaultBaseUrl = "https://api.mistral.ai";
@@ -34,7 +36,8 @@ public:
              std::string base_url = kDefaultBaseUrl);
 
   std::string transcribe(const std::vector<float> &pcm_16k_mono,
-                         const std::string &airport_context) override;
+                         const std::string &airport_context,
+                         const std::string &context_bias) override;
 
   std::string last_error_message() const override { return last_error_; }
 

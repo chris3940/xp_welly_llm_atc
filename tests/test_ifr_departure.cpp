@@ -78,7 +78,7 @@ TEST_CASE("ifr departure: LFLP CTR upper altitude is below 2500 ft AGL fallback"
 
 // ── Departure handoff altitude guard ─────────────────────────────────────
 
-TEST_CASE("ifr departure: handoff does not fire below CTR upper altitude",
+TEST_CASE("ifr departure: handoff does not fire below the report altitude",
           "[ifr_departure]")
 {
     engine::reset();
@@ -88,9 +88,15 @@ TEST_CASE("ifr departure: handoff does not fire below CTR upper altitude",
 
     atc_state_machine::set_state(ATCState::IFR_DEPARTURE_CLEARED);
 
-    // 100 ft below the fallback (2500 AGL) — handoff must NOT fire.
-    // (OpenAir is disabled so the fallback 2500 ft is used.)
-    XPlaneContext ctx = make_ifr_ctx(2400.0f);
+    // Report-then-transfer mode (EU IFR tower_report_alt_ft = 3000 ft MSL): the
+    // Tower keeps the aircraft until it passes the report altitude, THEN hands
+    // off. Below it -> handoff must NOT fire. LFLP elevation 1519 ft, so 1400 ft
+    // AGL = 2919 ft MSL, just under the 3000 ft report altitude. (This gate is
+    // altitude-only; the phase guard was dropped 2026-07-26 because the geometric
+    // detector mislabels a low, turning IFR climb-out as PATTERN/FINAL_APPROACH
+    // and used to block the handoff for ~1 min at LIMF -- the pilot's repeated
+    // "reaching 2000 feet" reports met silence.)
+    XPlaneContext ctx = make_ifr_ctx(1400.0f);
     std::string text;
     bool fired = engine::poll_departure_handoff(ctx, 0.0f, &text);
     REQUIRE_FALSE(fired);

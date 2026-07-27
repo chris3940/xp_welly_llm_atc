@@ -108,3 +108,35 @@ TEST_CASE("parse: control zone clearance readback classifies as READBACK", "[int
     auto m3 = parse("Joining instructions, runway 32, QNH 1013, Delta Charlie Hotel", ctx);
     REQUIRE(m3.intent == PilotIntent::READBACK);
 }
+
+TEST_CASE("normalize_spoken_frequency: all read-back styles collapse to 125.630",
+          "[intent][frequency]") {
+  using intent_parser::normalize_spoken_frequency;
+  auto only = [](const std::string &t) {
+    // return the collapsed frequency token embedded in the phrase
+    return normalize_spoken_frequency(t);
+  };
+  // Digits pass through untouched (no "decimal" word).
+  REQUIRE(only("contact milan on 125.630") == "contact milan on 125.630");
+  // Spelled digit-by-digit.
+  REQUIRE(only("contact milan on one two five decimal six three zero") ==
+          "contact milan on 125.630");
+  // Cardinal.
+  REQUIRE(only("contact milan on one hundred twenty five decimal six three zero") ==
+          "contact milan on 125.630");
+  REQUIRE(only("one hundred twenty decimal two hundred") == "120.200");
+  // Dropped leading "1" (1xx band) -- digit-by-digit and cardinal.
+  REQUIRE(only("two five decimal six three zero") == "125.630");
+  REQUIRE(only("twenty five decimal six three zero") == "125.630");
+  // Frac leading zero preserved (digit-by-digit).
+  REQUIRE(only("one one eight decimal zero five zero") == "118.050");
+  // A spelled callsign is NEVER touched (no "decimal").
+  REQUIRE(only("november seven five zero x-ray papa") ==
+          "november seven five zero x-ray papa");
+  // A non-frequency number + decimal outside the VHF band is left alone.
+  REQUIRE(only("flight level two three zero") == "flight level two three zero");
+  // US "point" / "period" separators also collapse; "holding point" is NOT a freq.
+  REQUIRE(only("one two five point six three zero") == "125.630");
+  REQUIRE(only("one two five period six three zero") == "125.630");
+  REQUIRE(only("taxi to holding point charlie") == "taxi to holding point charlie");
+}

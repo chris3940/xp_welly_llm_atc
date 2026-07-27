@@ -83,7 +83,8 @@ struct TranscriptResult {
 // to 16 kHz float internally if needed.
 void transcribe_async(std::vector<int16_t> pcm16, uint32_t sample_rate_hz,
                       std::function<void(TranscriptResult)> callback,
-                      std::string airport_context = {});
+                      std::string airport_context = {},
+                      std::string context_bias = {});
 
 } // namespace stt
 

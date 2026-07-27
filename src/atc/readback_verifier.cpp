@@ -198,14 +198,44 @@ static std::string extract_freq(const std::string &norm) {
   return {};
 }
 
-// Returns squawk code as 4-char string or "" if absent.
+// Returns squawk code as 4-char string or "" if absent. Handles BOTH the compact
+// digit form ("squawk 2565") AND the spelled form ("squawk two five six five" ->
+// "2565"): real pilots read the code digit-by-digit, and Voxtral -- once the bias
+// carries the spelled squawk -- outputs the words, which the compact regex missed,
+// causing a false "readback incorrect" loop (user 2026-07-26).
 static std::string extract_squawk(const std::string &norm) {
   static const std::regex kRe(R"(\bsquawk\s*(\d{4})\b)",
                                std::regex_constants::icase);
   std::smatch m;
   if (std::regex_search(norm, m, kRe))
     return m[1].str();
-  return {};
+  // Spelled: "squawk" followed by exactly 4 digit-words (separated by space/comma/hyphen).
+  static const std::regex kSp(
+      R"(\bsquawk\s+((?:zero|one|two|three|four|five|six|seven|eight|nine|niner)(?:[\s,-]+(?:zero|one|two|three|four|five|six|seven|eight|nine|niner)){3}))",
+      std::regex_constants::icase);
+  if (!std::regex_search(norm, m, kSp))
+    return {};
+  static const std::regex kW(
+      R"((zero|one|two|three|four|five|six|seven|eight|nine|niner))",
+      std::regex_constants::icase);
+  const std::string words = m[1].str();
+  std::string out;
+  for (auto it = std::sregex_iterator(words.begin(), words.end(), kW);
+       it != std::sregex_iterator(); ++it) {
+    std::string w = (*it)[1].str();
+    for (char &c : w)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    static const std::pair<const char *, char> kN[] = {
+        {"zero", '0'}, {"one", '1'},  {"two", '2'},   {"three", '3'},
+        {"four", '4'}, {"five", '5'}, {"six", '6'},   {"seven", '7'},
+        {"eight", '8'},{"nine", '9'}, {"niner", '9'}};
+    for (const auto &p : kN)
+      if (w == p.first) {
+        out += p.second;
+        break;
+      }
+  }
+  return out.size() == 4 ? out : std::string{};
 }
 
 // ── Formatting helpers ────────────────────────────────────────────────────

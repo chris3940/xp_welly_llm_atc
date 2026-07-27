@@ -650,8 +650,25 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
         // label here, so the handoff is not silently advanced at takeoff.
         const int report_alt = flight_phase::get_ifr_defaults().tower_report_alt_ft;
         if (report_alt > 0) {
+          // Report point (MSL). "report passing N feet" only works when the config
+          // altitude is ABOVE the field and BELOW the initial climb (the aircraft
+          // climbs THROUGH it). Otherwise report AT the initial climb level-off
+          // ("report reaching N feet"): (a) initial <= config -> the aircraft levels
+          // below config (LIMF RW36 KUKE1Z init 2000 < 3000); (b) config <= field ->
+          // a HIGH-ELEVATION airport where 3000 MSL is below the ground (user
+          // 2026-07-26). Only for a plain-feet initial (not an FL).
+          const auto init = cifp_reader::initial_altitude(
+              ctx.cifp_dir, ctx.nearest_airport_id, ctx.active_runway);
+          const int field_ft =
+              static_cast<int>(ctx.altitude_ft_msl - ctx.height_agl_ft);
           char rbuf[48];
-          std::snprintf(rbuf, sizeof(rbuf), ", report passing %d feet", report_alt);
+          if (init.feet > 0 && !init.is_fl &&
+              (init.feet <= report_alt || report_alt <= field_ft + 300))
+            std::snprintf(rbuf, sizeof(rbuf), ", report reaching %d feet",
+                          init.feet);
+          else
+            std::snprintf(rbuf, sizeof(rbuf), ", report passing %d feet",
+                          report_alt);
           return rbuf;
         }
         float freq = ctx.airport_freqs.first_mhz(FT::DEPARTURE);
@@ -1033,7 +1050,8 @@ bool check_handoff_reissue(const PilotMessage &msg, const XPlaneContext &ctx,
       auto vars = build_vars(msg, ctx);
       char tmpl[128];
       std::snprintf(tmpl, sizeof(tmpl),
-                    "{callsign}, I say again, contact Tower on %.3f.", tower_freq);
+                    "{callsign}, you are still on Ground, contact Tower on %.3f.",
+                    tower_freq);
       resp.text = atc_templates::fill(tmpl, vars);
       resp.next_state = AS::TOWER_CONTACT;
       logging::info("Handoff re-issue (TOWER_CONTACT): pilot on Ground -> Tower %.3f",
@@ -1066,6 +1084,17 @@ bool check_handoff_reissue(const PilotMessage &msg, const XPlaneContext &ctx,
     // without intending to switch.
     if (msg.intent == PI::READBACK || msg.intent == PI::LEAVING_FREQUENCY)
       return false;
+    // The pilot echoing "contact <X> on <freq>" IS a handoff read-back even when the
+    // intent parser misses READBACK (e.g. the freq came out SPELLED, "one two five
+    // decimal six three zero", so the rule parser did not tag it). Accept silently
+    // -- do NOT loop the reminder while he is mid-switch (user 2026-07-26).
+    {
+      std::string lc = msg.raw_transcript;
+      for (char &c : lc)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      if (lc.find("contact") != std::string::npos)
+        return false;
+    }
 
     float pending_freq = engine::pending_handoff_freq();
     float pilot_freq = (ctx.active_com == 1) ? ctx.com1_freq_mhz
@@ -1100,7 +1129,8 @@ bool check_handoff_reissue(const PilotMessage &msg, const XPlaneContext &ctx,
       auto vars = build_vars(msg, ctx);
       char tmpl[256];
       std::snprintf(tmpl, sizeof(tmpl),
-                    "{callsign}, I say again, contact %s on %.3f.",
+                    "{callsign}, you are still on the previous frequency, "
+                    "contact %s on %.3f.",
                     ctrl.c_str(), pending_freq);
       resp.text = atc_templates::fill(tmpl, vars);
       resp.next_state = cur;
@@ -1321,6 +1351,35 @@ bool check_squawk_at_holding_point(const PilotMessage &msg,
   const bool initial = (msg.intent == PI::REPORT_HOLDING_SHORT);
   if (!initial && !s_squawk_check_pending_)
     return false;
+
+  // ARRIVAL taxi-in: the squawk verify (Mode C >= 3) is a DEPARTURE check. After
+  // landing (was_airborne) the pilot is taxiing IN and often still on the TOWER
+  // freq -- running the departure squawk verify LOOPS ("squawk N mode Charlie,
+  // confirm", the transponder is now Mode A). Instead, if the pilot is still on
+  // Tower, REDIRECT him to Ground ("you are still on Tower, contact Ground on X");
+  // otherwise let the normal taxi-in proceed. Departure keeps the verify (user
+  // 2026-07-26).
+  if (atc_state_machine::was_airborne() && ctx.on_ground) {
+    s_squawk_check_pending_ = false;
+    const float gnd_mhz =
+        ctx.airport_freqs.first_mhz(xplane_context::FrequencyType::GROUND);
+    if (ctx.frequency_type == xplane_context::FrequencyType::TOWER &&
+        gnd_mhz >= 100.0f) {
+      auto vars = build_vars(msg, ctx);
+      char freqbuf[16];
+      std::snprintf(freqbuf, sizeof(freqbuf), "%.3f", gnd_mhz);
+      vars["ground_freq"] = freqbuf;
+      resp.text = atc_templates::fill(
+          "{callsign}, you are still on Tower, contact Ground on {ground_freq}.",
+          vars);
+      resp.next_state = internal::get_state_ref();
+      logging::info("Arrival taxi-in: pilot on Tower freq addressing Ground -> "
+                    "redirect to Ground %.3f",
+                    gnd_mhz);
+      return true;
+    }
+    return false; // arrival, not on Tower -> normal taxi-in, no departure verify
+  }
 
   const std::string &assigned = internal::ifr_squawk_ref();
   if (assigned.empty()) {

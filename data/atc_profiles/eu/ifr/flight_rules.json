@@ -25,6 +25,10 @@
     "REQUEST_STARTUP": {
       "allowed_phases": ["PARKED", "TAXI"],
       "rejection_airborne": "{callsign}, unable, startup not applicable airborne."
+    },
+    "_note_INITIAL_CALL_CENTER": "The base (VFR) rule allows only CLIMB/CRUISE; merge_into APPENDS these phases -> CLIMB,CRUISE,PATTERN,FINAL_APPROACH. A sector/Center check-in is valid in ANY airborne phase -- the 'you appear to be on the ground' rejection must fire only on the ground. The geometric phase detector mislabels a low IFR climb-out as PATTERN/FINAL, which used to block the check-in with Milan (LIMF 2026-07-27).",
+    "INITIAL_CALL_CENTER": {
+      "allowed_phases": ["PATTERN", "FINAL_APPROACH"]
     }
   },
 

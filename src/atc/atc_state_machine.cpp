@@ -817,6 +817,8 @@ void set_assigned_runway(const std::string &rwy) {
 
 const std::string &session_callsign() { return g_state.session_callsign_; }
 
+const std::string &session_squawk() { return g_state.ifr_squawk_; }
+
 std::string effective_runway(const xplane_context::XPlaneContext &ctx) {
   return g_state.assigned_runway_.empty() ? ctx.active_runway
                                           : g_state.assigned_runway_;

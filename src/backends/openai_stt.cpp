@@ -36,7 +36,10 @@ OpenAiStt::OpenAiStt(std::string api_key, std::string model,
       base_url_(std::move(base_url)) {}
 
 std::string OpenAiStt::transcribe(const std::vector<float> &pcm_16k_mono,
-                                  const std::string &airport_context) {
+                                  const std::string &airport_context,
+                                  const std::string & /*context_bias*/) {
+  // context_bias is Mistral-only; OpenAI Whisper biases via the freeform
+  // `prompt` field (airport_context).
   last_error_.clear();
   if (api_key_.empty()) {
     logging::error("[%s] No API key configured", kBackendTag);

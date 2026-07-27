@@ -30,6 +30,7 @@
 #include "core/logging.hpp"
 #include "core/xplane_context.hpp"
 #include "data/airspace_db.hpp"
+#include "data/cifp_reader.hpp"
 #include "data/simbrief_ofp.hpp"
 #include "persistence/model_manifest.hpp"
 #include "persistence/model_paths.hpp"
@@ -344,6 +345,62 @@ static std::string spell_digits(const std::string &num) {
     out += kDigit[c - '0'];
   }
   return out;
+}
+
+// Spell a speed in CARDINAL words the way ATC says it: 210 -> "two hundred
+// ten", 250 -> "two hundred fifty", 200 -> "two hundred". Speed is NOT spoken
+// digit-by-digit (unlike squawk/QNH/altitude); the controller and pilot both
+// use the grouped form, so the STT bias needs the cardinal words to match the
+// read-back (user 2026-07-25). See coding_atc_number_spelling.
+static std::string spell_cardinal_speed(int kt) {
+  static const char *kOnes[] = {"zero", "one",  "two", "three", "four",
+                                "five", "six",  "seven", "eight", "nine"};
+  static const char *kTeens[] = {"ten",      "eleven",  "twelve",   "thirteen",
+                                 "fourteen", "fifteen", "sixteen",  "seventeen",
+                                 "eighteen", "nineteen"};
+  static const char *kTens[] = {"",      "",      "twenty",  "thirty",
+                                "forty", "fifty", "sixty",   "seventy",
+                                "eighty", "ninety"};
+  if (kt <= 0)
+    return {};
+  const int h = kt / 100, r = kt % 100;
+  std::string s;
+  if (h > 0)
+    s = std::string(kOnes[h]) + " hundred";
+  if (r > 0) {
+    std::string rem;
+    if (r < 10)
+      rem = kOnes[r];
+    else if (r < 20)
+      rem = kTeens[r - 10];
+    else {
+      rem = kTens[r / 10];
+      if (r % 10)
+        rem += std::string(" ") + kOnes[r % 10];
+    }
+    s = s.empty() ? rem : s + " " + rem;
+  }
+  return s;
+}
+
+// Spell a frequency digit-by-digit the way ATC says it, with "decimal" for the
+// dot (ICAO/EU): "120.230" -> "one two zero decimal two three zero",
+// "121.205" -> "one two one decimal two zero five". The pilot reads the handoff
+// frequency back this way, so the STT bias needs the spelled form alongside the
+// compact "120.230" (user 2026-07-25). See coding_atc_number_spelling.
+static std::string spell_freq(const std::string &mhz) {
+  const auto dot = mhz.find('.');
+  if (dot == std::string::npos)
+    return spell_digits(mhz);
+  const std::string whole = spell_digits(mhz.substr(0, dot));
+  const std::string frac = spell_digits(mhz.substr(dot + 1));
+  if (whole.empty() && frac.empty())
+    return {};
+  std::string s = whole;
+  s += (s.empty() ? "" : " ") + std::string("decimal");
+  if (!frac.empty())
+    s += " " + frac;
+  return s;
 }
 
 static std::string expand_flight_levels(std::string s) {
@@ -831,6 +888,16 @@ static void submit_recording_to_stt() {
     airport_ctx += ctx_for_whisper.nearest_airport_id;
     if (!ctx_for_whisper.nearest_airport_name.empty())
       airport_ctx += " " + ctx_for_whisper.nearest_airport_name;
+    // Facilities the PILOT ADDRESSES on the ground/departure ("Torino Ground",
+    // "Torino Tower") -- the airport NAME ("Torino Caselle") is never spoken, so
+    // the city + facility forms must be in the prompt too, not just the BIAS
+    // (user 2026-07-26, "Torino Ground/Tower not in CTX at the stand").
+    std::string city = ctx_for_whisper.nearest_airport_name;
+    const auto sep = city.find_first_of(" /-");
+    if (sep != std::string::npos)
+      city = city.substr(0, sep);
+    if (!city.empty())
+      airport_ctx += " " + city + " Ground " + city + " Tower";
   }
   // Aircraft registration (e.g. "N111RC", "F-HABC") from X-Plane's acf_tailnum
   // DataRef — anchors the short-form tail number the pilot uses in radio calls.
@@ -1301,6 +1368,265 @@ static void submit_recording_to_stt() {
     }
   }
 
+  // ── Voxtral context_bias: curated, READBACK-FIRST list of <=100 phrases ──
+  // Rebuilt every PTT (like airport_ctx). Unlike the freeform prompt above,
+  // Mistral Voxtral's context_bias is an ARRAY of <=100 whole-word OR multi-word
+  // strings -- it must NOT be whitespace-split. Order = what the pilot is most
+  // likely to READ BACK from the LAST ATC call (assigned level, freq, runway,
+  // controller) first, then the callsign, then route proper nouns, then core
+  // vocab phrases. split_context() (mistral_stt) dedupes + caps 100, so overflow
+  // drops the least-critical generic vocab, never the readback anchors.
+  std::string context_bias;
+  {
+    std::vector<std::string> bias;
+    auto add = [&bias](const std::string &p) {
+      if (p.empty())
+        return;
+      for (const auto &e : bias)
+        if (e == p)
+          return;
+      if (bias.size() < 100)
+        bias.push_back(p);
+    };
+    // 1) Readback anchors from the last ATC transmission.
+    if (cleared_alt_ft > 0) {
+      const int ta = ctx_for_whisper.transition_alt_ft > 0
+                         ? ctx_for_whisper.transition_alt_ft
+                         : 5000;
+      if (cleared_alt_ft >= ta) {
+        const std::string fl = std::to_string(cleared_alt_ft / 100);
+        add("flight level " + fl);
+        add("FL " + fl);
+      } else {
+        add(std::to_string(cleared_alt_ft) + " feet");
+      }
+    }
+    if (cur_spd_kt > 0) {
+      add("reduce speed " + std::to_string(cur_spd_kt) + " knots"); // compact
+      const std::string card = spell_cardinal_speed(cur_spd_kt);
+      if (!card.empty())
+        add("reduce speed " + card + " knots"); // cardinal (as ATC speaks it)
+    }
+    // Pending-handoff frequency -- the pilot reads it back digit-by-digit ("one
+    // two zero decimal two three zero"), so bias the SPELLED form plus compact.
+    // ONLY when it is a NEW freq to switch TO (differs from the current COM): once
+    // the pilot has checked in, pending_handoff_freq() still returns that freq, and
+    // keeping it in the bias made Voxtral SUBSTITUTE it for an unrelated number --
+    // "climb flight level 140" read back as "flight level 125.630" (the freq!)
+    // because 125.630 was a strong competing number anchor (user 2026-07-26).
+    {
+      const float ph = engine::pending_handoff_freq();
+      const float acom =
+          (ctx_for_whisper.active_com == 2) ? ctx_for_whisper.com2_freq_mhz
+                                            : ctx_for_whisper.com1_freq_mhz;
+      if (ph > 100.0f && std::fabs(ph - acom) >= 0.010f) {
+        char fb[16];
+        std::snprintf(fb, sizeof(fb), "%.3f", ph);
+        add(spell_freq(fb));
+        add(fb);
+      }
+    }
+    // Squawk (IFR clearance read-back anchor -- a 4-digit garble hotspot). ATC
+    // SPELLS the code digit-by-digit ("squawk six zero seven one") and the pilot
+    // reads it back the same way, so bias the SPELLED form -- plus the compact
+    // digit form (Voxtral may emit either), mirroring the runway digit+word pattern.
+    {
+      const std::string &sq = atc_state_machine::session_squawk();
+      if (!sq.empty()) {
+        add("squawk " + spell_digits(sq));
+        add("squawk " + sq);
+      }
+    }
+    // QNH value -- also spelled digit-by-digit ("QNH one zero one zero"); the bare
+    // digits garble to "QLH". Bias spelled + compact forms.
+    if (ctx_for_whisper.qnh_hpa > 0) {
+      const std::string q = std::to_string(ctx_for_whisper.qnh_hpa);
+      add("QNH " + spell_digits(q));
+      add("QNH " + q);
+    }
+    // Departure "report passing N feet": in report-then-transfer mode the pilot
+    // reports this after takeoff; "passing 3000 feet" garbled to "3, 2015" because
+    // it was unanchored (user 2026-07-26). Only in the departure phase.
+    {
+      using SD = atc_state_machine::ATCState;
+      const int rep = flight_phase::get_ifr_defaults().tower_report_alt_ft;
+      const bool departing = ctx_state == SD::IFR_DEPARTURE_CLEARED ||
+                             ctx_state == SD::IFR_FREQ_HANDOFF ||
+                             ctx_state == SD::IFR_EN_ROUTE;
+      if (rep > 0 && departing) {
+        const std::string r = std::to_string(rep);
+        add("passing " + r + " feet");
+        add(r + " feet");
+      }
+    }
+    add(engine::current_controller_label());
+    // NEXT station the pilot is handed to ("contact Lyon Approach on ...") -- the
+    // pilot reads back that station name, so it MUST be anchored or it garbles
+    // ("Lyon" -> "Laren", user 2026-07-26). current_controller_label alone only had
+    // the station he was LEAVING.
+    add(engine::pending_controller_label());
+    add(engine::pending_departure_label());
+    if (!locked_rwy.empty()) {
+      add("runway " + locked_rwy);
+      const std::string sp = spell_runway(locked_rwy);
+      if (!sp.empty())
+        add("runway " + sp);
+    }
+    // 2) Callsign forms (the single biggest garble source).
+    add(phonetic);
+    add(raw_cs);
+    if (!phonetic.empty()) {
+      std::vector<std::string> w;
+      std::string cur;
+      for (char c : phonetic) {
+        if (c == ' ') {
+          if (!cur.empty())
+            w.push_back(cur);
+          cur.clear();
+        } else {
+          cur += c;
+        }
+      }
+      if (!cur.empty())
+        w.push_back(cur);
+      if (w.size() >= 2)
+        add(w[w.size() - 2] + " " + w[w.size() - 1]); // short callsign
+    }
+    // 3) Route / airport proper nouns (skip enroute content on arrival ground).
+    {
+      const auto &ofp = simbrief_ofp::get();
+      add(ofp.destination_icao);
+      add(ctx_for_whisper.ifr_destination);
+      // DESTINATION facilities the pilot addresses on arrival ("Annecy Tower",
+      // "Annecy Ground") -- ONLY in the approach/arrival phases (he doesn't call
+      // the dest tower before then; keeps the term count down, user 2026-07-26).
+      // Airborne the ground-facility block above is skipped (airborne_ifr_drift_risk),
+      // so without this the dest tower name was unanchored -> "Annecy Tower" garbled.
+      {
+        using S = atc_state_machine::ATCState;
+        const bool near_dest = ctx_state == S::IFR_ARRIVAL ||
+                               ctx_state == S::IFR_APPROACH_CONTACT ||
+                               ctx_state == S::IFR_APPROACH_DESCENT ||
+                               ctx_state == S::IFR_APPROACH_TOWER ||
+                               ctx_state == S::IFR_LANDING_CLEARED;
+        if (near_dest) {
+          std::string dcity = ctx_for_whisper.ifr_destination;
+          const auto dsp = dcity.find_first_of(" /-");
+          if (dsp != std::string::npos)
+            dcity = dcity.substr(0, dsp);
+          if (!dcity.empty()) {
+            add(dcity);            // "Annecy"
+            add(dcity + " Tower"); // the facility the pilot calls on final
+            add(dcity + " Ground"); // for the taxi-in call after landing
+          }
+          // Approach IAF / FAF idents -- the pilot is cleared to the IAF and
+          // reports "established" at the FAF, so anchor those two fix names.
+          add(engine::approach_iaf_ident());
+          add(engine::approach_faf_ident());
+        }
+      }
+      if (!arrival_ground) {
+        // SID: the pilot reads back the SID designator + its terminating fix at
+        // clearance ("via ROMAM 2 Alpha"). SimBrief sid_name is often "none", so
+        // prefer the CIFP-derived SID (ctx.ifr_sid) and always bias the last-fix
+        // NAME (ROMAM -- the garble-prone token) -- the clearance/departure phase.
+        add(ctx_for_whisper.ifr_sid);          // e.g. "ROMA2A" (CIFP)
+        add(ctx_for_whisper.ifr_sid_last_fix); // e.g. "ROMAM" (spoken fix)
+        add(ofp.sid_name);                     // SimBrief SID if filed
+        // SID intermediate fixes (SOCOF, TOLNA, BELUS, GIRED for ROMA2A). On the
+        // ground the BIAS carried only the ENROUTE fixes, never the SID's own
+        // waypoints (user 2026-07-26). Read from CIFP; ground-only (file read).
+        if (ctx_for_whisper.on_ground && !ctx_for_whisper.ifr_sid.empty()) {
+          const auto sidwp = cifp_reader::sid_waypoints(
+              ctx_for_whisper.cifp_dir, ctx_for_whisper.nearest_airport_id,
+              ctx_for_whisper.ifr_sid, ctx_for_whisper.active_runway,
+              /*constrained_only=*/false);
+          int nsid = 0;
+          for (const auto &w : sidwp) {
+            if (w.ident.empty())
+              continue;
+            add(w.ident);
+            if (++nsid >= 8)
+              break;
+          }
+        }
+        const std::string star = engine::assigned_star_name();
+        add(star);
+        const std::string star_sp = engine::assigned_star_spoken();
+        if (star_sp != star)
+          add(star_sp);
+        // Route fixes -- MIRROR the CTX prompt logic (align BIAS with CTX, user
+        // 2026-07-26): in the arrival/approach phase the enroute FPL fixes are
+        // behind the aircraft (noise), so PRUNE them and rely on the tracker-
+        // FORWARD fixes (STAR + approach procedure, incl. IAF/FAF). Cruise/descent
+        // keeps the enroute navlog (upcoming enroute fixes still matter there).
+        using S3 = atc_state_machine::ATCState;
+        const auto upcoming = engine::upcoming_route_fix_idents();
+        const bool prune_navlog =
+            !upcoming.empty() &&
+            (ctx_state == S3::IFR_ARRIVAL ||
+             ctx_state == S3::IFR_APPROACH_CONTACT ||
+             ctx_state == S3::IFR_APPROACH_DESCENT ||
+             ctx_state == S3::IFR_APPROACH_TOWER ||
+             ctx_state == S3::IFR_LANDING_CLEARED);
+        for (const auto &id : upcoming) // STAR + approach forward fixes (IAF/FAF)
+          add(id);
+        if (!prune_navlog) {
+          int nfix = 0;
+          for (const auto &f : ofp.navlog) {
+            if (f.ident.empty())
+              continue;
+            add(f.ident);
+            if (++nfix >= 8)
+              break;
+          }
+        }
+      }
+    }
+    if (!airborne_ifr_drift_risk) {
+      add(ctx_for_whisper.nearest_airport_id);
+      add(ctx_for_whisper.nearest_airport_name);
+      // Facilities the PILOT ADDRESSES ("Annecy Ground", then "Annecy Tower") --
+      // the airport NAME ("Annecy Meythet") is never spoken, so "Annecy" in the
+      // spoken form was unanchored and garbled to "9C" (user 2026-07-26). Anchor
+      // the city alone + the facility forms the pilot actually says.
+      std::string city = ctx_for_whisper.nearest_airport_name;
+      const auto sep = city.find_first_of(" /-");
+      if (sep != std::string::npos)
+        city = city.substr(0, sep);
+      if (!city.empty()) {
+        add(city);
+        add(city + " Ground");
+        add(city + " Tower");
+        add(city + " Approach");
+      }
+    }
+    // 4) Core ATC readback vocab -- MULTI-WORD phrases only (single words like
+    //    "climb"/"QNH"/"squawk" are already well recognised and would waste the
+    //    <=100 budget). Fills the remainder after the flight-specific anchors.
+    static const char *kCoreVocab[] = {
+        "flight level", "cleared for takeoff", "cleared to land",
+        "report established", "holding point", "report passing", "radar contact",
+        "climb flight level", "descend flight level", "maintain flight level",
+        "contact approach", "contact tower", "contact ground", "runway vacated",
+        "line up and wait", "go around", "squawk ident", "reduce speed",
+        "request taxi", "ready for departure",
+        // "as filed" garbled to "Asphalt" in the clearance read-back (user
+        // 2026-07-26); anchor both the phrase and the fuller form.
+        "as filed", "cleared as filed",
+        // Delivery-phase opening call: "request IFR clearance" garbled to "request
+        // high factorance" (user 2026-07-26) -- anchor the request + the phrase.
+        "IFR clearance", "request IFR clearance", "startup approved", nullptr};
+    for (int i = 0; kCoreVocab[i]; ++i)
+      add(kCoreVocab[i]);
+    // Join comma-separated for the mistral context_bias[] path.
+    for (size_t i = 0; i < bias.size(); ++i) {
+      if (i)
+        context_bias += ", ";
+      context_bias += bias[i];
+    }
+  }
+
   if (g_transcript_log_) {
     static std::string s_last_logged_ctx;
     if (airport_ctx != s_last_logged_ctx) {
@@ -1309,6 +1635,12 @@ static void submit_recording_to_stt() {
     } else {
       std::fprintf(g_transcript_log_, "-- CTX: (unchanged) --\n");
     }
+    // Tag the configured encoding mode so A/B runs are traceable in transcript.log
+    // (underscore|comma|quote|off|auto). For "auto" the ACTUAL discovered method is
+    // in Log.txt "[STT-MISTRAL] context_bias method '...'".
+    std::fprintf(g_transcript_log_, "-- BIAS [%s]: %s --\n",
+                 settings::mistral_context_bias_encoding().c_str(),
+                 context_bias.c_str());
     std::fflush(g_transcript_log_);
   }
 
@@ -1338,7 +1670,7 @@ static void submit_recording_to_stt() {
         ++total_transcriptions_;
         dispatch_pilot_transcript(wr.text, wr.quality);
       },
-      airport_ctx);
+      airport_ctx, context_bias);
 }
 
 void on_ptt_released() {
