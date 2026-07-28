@@ -20,6 +20,7 @@
 #include "atc/atc_session.hpp"
 #include "atc/atc_state_machine.hpp"
 #include "atc/atis_generator.hpp"
+#include "atc/phonetic.hpp"
 #include "atc/engine.hpp"
 #include "atc/flight_phase.hpp"
 #include "atc/atc_templates.hpp"
@@ -461,6 +462,52 @@ static std::string expand_flight_levels(std::string s) {
   return out;
 }
 
+// Spell the transponder code after "squawk" digit-by-digit for TTS ("squawk 2370"
+// -> "squawk two three seven zero", "verify squawk 3412 mode Charlie" -> "... three
+// four one two ..."), the ICAO way. The FL pass already spells flight levels, but a
+// squawk is bare digits with no keyword it recognises, so it went to the TTS engine
+// as a raw number ("twenty-three seventy"). Case-insensitive on the keyword; only a
+// run of digits immediately after it is spelled. (user 2026-07-27) [C. P. Potter]
+static std::string expand_squawk(std::string s) {
+  auto lc = [](char c) {
+    return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  };
+  static const std::string kKey = "squawk";
+  std::string out;
+  out.reserve(s.size() + 16);
+  size_t i = 0;
+  while (i < s.size()) {
+    bool matched = false;
+    bool left_ok =
+        (i == 0) || !std::isalnum(static_cast<unsigned char>(s[i - 1]));
+    if (left_ok && i + kKey.size() <= s.size()) {
+      bool eq = true;
+      for (size_t k = 0; k < kKey.size(); ++k)
+        if (lc(s[i + k]) != kKey[k]) { eq = false; break; }
+      if (eq) {
+        size_t sp = i + kKey.size();
+        while (sp < s.size() && s[sp] == ' ')
+          ++sp;
+        size_t e = sp;
+        while (e < s.size() && std::isdigit(static_cast<unsigned char>(s[e])))
+          ++e;
+        if (e > sp) {
+          out += s.substr(i, kKey.size()); // keep "squawk" as spoken
+          out += ' ';
+          out += spell_digits(s.substr(sp, e - sp));
+          i = e;
+          matched = true;
+        }
+      }
+    }
+    if (!matched) {
+      out += s[i];
+      ++i;
+    }
+  }
+  return out;
+}
+
 // Speak ATC response via local TTS, then transition to PLAYING → IDLE.
 // `length_scale` > 1.0 makes Piper speak slower (used for ATIS).
 // `on_playback_starting` (optional) fires on the main thread the moment
@@ -496,7 +543,7 @@ speak_response(const std::string &text, model_manifest::VoiceRole role,
   tts_pending_ = true;
   ++total_inferences_; // TTS inference
 
-  std::string final_text = expand_navfix_names(expand_runways(expand_flight_levels(text)));
+  std::string final_text = expand_navfix_names(expand_runways(expand_flight_levels(expand_squawk(text))));
 
   backends::tts::synthesize_async(
       final_text, role, length_scale,
@@ -555,7 +602,7 @@ static void speak_response_guarded(const std::string &text,
   tts_pending_ = true;
   ++total_inferences_;
 
-  std::string final_text = expand_navfix_names(expand_runways(expand_flight_levels(text)));
+  std::string final_text = expand_navfix_names(expand_runways(expand_flight_levels(expand_squawk(text))));
 
   backends::tts::synthesize_async(
       final_text, role, length_scale,
@@ -1444,17 +1491,27 @@ static void submit_recording_to_stt() {
       add("QNH " + spell_digits(q));
       add("QNH " + q);
     }
-    // Departure "report passing N feet": in report-then-transfer mode the pilot
-    // reports this after takeoff; "passing 3000 feet" garbled to "3, 2015" because
-    // it was unanchored (user 2026-07-26). Only in the departure phase.
+    // Departure "report reaching/passing N feet": in report-then-transfer mode the
+    // pilot reports this after takeoff; "passing 3000 feet" garbled to "3, 2015"
+    // because it was unanchored (user 2026-07-26). Use the CAPPED report altitude +
+    // VERB from engine::departure_report_alt_ft -- the raw config gave "passing 3000"
+    // while LIMF's clearance said "reaching 2000", so the bias never matched the
+    // readback and it garbled to "passing 2000" (user 2026-07-27). Only when
+    // departing.
     {
       using SD = atc_state_machine::ATCState;
-      const int rep = flight_phase::get_ifr_defaults().tower_report_alt_ft;
       const bool departing = ctx_state == SD::IFR_DEPARTURE_CLEARED ||
                              ctx_state == SD::IFR_FREQ_HANDOFF ||
                              ctx_state == SD::IFR_EN_ROUTE;
+      bool reaching = false;
+      const int rep = engine::departure_report_alt_ft(ctx_for_whisper, &reaching);
       if (rep > 0 && departing) {
         const std::string r = std::to_string(rep);
+        // Bias BOTH verbs and the bare number -- the pilot may read back "reaching
+        // 2000 feet", "passing 2000 feet", or just "2000 feet" (user 2026-07-27).
+        // The KEY was the ALTITUDE: the raw config biased 3000 while the clearance
+        // said 2000, so nothing matched and it garbled.
+        add("reaching " + r + " feet");
         add("passing " + r + " feet");
         add(r + " feet");
       }
@@ -1471,6 +1528,21 @@ static void submit_recording_to_stt() {
       const std::string sp = spell_runway(locked_rwy);
       if (!sp.empty())
         add("runway " + sp);
+    }
+    // Holding point: the pilot reads back "holding point Delta" -- we KNOW it (the taxi
+    // clearance assigned it from ctx.runway_holding_points, apt.dat-derived). Bias the
+    // SPECIFIC spoken phrase, exactly like "runway 22" -- the generic "holding point" in
+    // kCoreVocab is a weak anchor and garbled to "appeared in point" (user 2026-07-28,
+    // LFLP: "holding point Delta"). On the ground only (irrelevant airborne). [C. P.
+    // Potter]
+    if (ctx_for_whisper.on_ground && !ctx_for_whisper.active_runway.empty()) {
+      auto hp_it =
+          ctx_for_whisper.runway_holding_points.find(ctx_for_whisper.active_runway);
+      if (hp_it != ctx_for_whisper.runway_holding_points.end() &&
+          !hp_it->second.empty()) {
+        // "D" -> "Delta", "C1" -> "Charlie One" -- match the spoken clearance.
+        add("holding point " + atc_phonetic::spell_holding_point(hp_it->second));
+      }
     }
     // 2) Callsign forms (the single biggest garble source).
     add(phonetic);
@@ -1569,14 +1641,21 @@ static void submit_recording_to_stt() {
              ctx_state == S3::IFR_APPROACH_DESCENT ||
              ctx_state == S3::IFR_APPROACH_TOWER ||
              ctx_state == S3::IFR_LANDING_CLEARED);
-        for (const auto &id : upcoming) // STAR + approach forward fixes (IAF/FAF)
+        // "direct <fix>" prefix too: ATC issues "confirm direct <fix>" course
+        // corrections and the pilot reads back "direct <fix>"; unanchored, "direct"
+        // garbled to "Diet KUKEV" (user 2026-07-27). Forward fixes are the direct-to
+        // targets.
+        for (const auto &id : upcoming) { // STAR + approach forward fixes (IAF/FAF)
           add(id);
+          add("direct " + id);
+        }
         if (!prune_navlog) {
           int nfix = 0;
           for (const auto &f : ofp.navlog) {
             if (f.ident.empty())
               continue;
             add(f.ident);
+            add("direct " + f.ident);
             if (++nfix >= 8)
               break;
           }

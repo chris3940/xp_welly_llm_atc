@@ -9,6 +9,7 @@
  */
 
 #include "core/xplane_context.hpp"
+#include "data/airport_overrides.hpp"
 #include "data/airspace_db.hpp"
 #include "data/cifp_reader.hpp"
 #include "data/simbrief_ofp.hpp"
@@ -480,6 +481,20 @@ static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
                                         const std::string &current_runway) {
   if (runways.empty())
     return "";
+
+  // Per-airport DEPARTURE runway from airport+.json runway_config wins FIRST, wind-
+  // permitting (respects each row's wind range + max_tailwind). This is the departure
+  // counterpart of pick_arrival_runway (arrival_runway) -- both are the two sides of the
+  // same runway_config, but only the arrival side was wired; the "departure: 04R" for
+  // LFMN was parsed-but-never-consumed dead data (user 2026-07-28). Empty for any airport
+  // WITHOUT a runway_config -> falls through to the existing wind/CIFP/longest logic (no
+  // regression). [C. P. Potter]
+  if (!icao.empty()) {
+    const std::string dep =
+        airport_overrides::departure_runway(icao, wind_dir, wind_speed);
+    if (!dep.empty())
+      return dep;
+  }
 
   // Calm wind (< 3 kt): pick longest paved runway.
   // CIFP tiebreak: prefer the end that has SID procedures — at airports like

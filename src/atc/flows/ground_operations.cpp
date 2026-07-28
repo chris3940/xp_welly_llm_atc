@@ -20,6 +20,7 @@
 #include "atc/flows/ground_operations.hpp"
 
 #include "atc/atc_templates.hpp"
+#include "atc/phonetic.hpp"
 #include "atc/atis_generator.hpp"
 #include "atc/engine.hpp"
 #include "atc/flight_phase.hpp"
@@ -771,12 +772,6 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
       // holding point rather than active_runway_holding_point (which tracks the
       // position-based runway, not the cleared runway).
       {"holding_point", [&]() -> std::string {
-        static const char *kPhonetic[] = {
-            "Alpha",   "Bravo",   "Charlie", "Delta",  "Echo",    "Foxtrot",
-            "Golf",    "Hotel",   "India",   "Juliet", "Kilo",    "Lima",
-            "Mike",    "November","Oscar",   "Papa",   "Quebec",  "Romeo",
-            "Sierra",  "Tango",   "Uniform", "Victor", "Whiskey", "X-ray",
-            "Yankee",  "Zulu"};
         const std::string& rwy = get_runway(msg, ctx);
         // Look up holding point for the *assigned* runway, not the position-derived one.
         std::string hp;
@@ -785,16 +780,9 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
           hp = it->second;
         if (hp.empty())
           return "holding point runway " + rwy;
-        // Convert single A-Z to phonetic; leave multi-char names as-is.
-        std::string name;
-        if (hp.size() == 1 && hp[0] >= 'A' && hp[0] <= 'Z') {
-          name = kPhonetic[hp[0] - 'A'];
-        } else if (hp.size() == 1 && hp[0] >= 'a' && hp[0] <= 'z') {
-          name = kPhonetic[hp[0] - 'a'];
-        } else {
-          name = hp;
-        }
-        return "holding point " + name + ", runway " + rwy;
+        // Spoken ICAO form: "D" -> "Delta", "C1" -> "Charlie One" (big airports).
+        return "holding point " + atc_phonetic::spell_holding_point(hp) +
+               ", runway " + rwy;
       }()},
   };
 }

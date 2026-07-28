@@ -81,6 +81,16 @@ float jump_switch_freq_mhz();
 // assigned_runway(), which is cleared post-landing.
 const std::string &assigned_landing_runway();
 
+// Departure level-report altitude (MSL), CAPPED at the SID initial-climb level-off
+// the aircraft actually reaches (LIMF RW36 KUKE1Z: 2000, not the 3000 config it
+// never sees). Optionally reports the phraseology VERB via is_reaching (true =
+// "reaching" a level-off, false = "passing" a climb-through). Used by the departure
+// handoff gate, the off-altitude report challenge, AND the STT context bias so the
+// biased "reaching/passing N feet" phrase matches the clearance the pilot heard.
+// Returns 0 when report-then-transfer is off.
+int departure_report_alt_ft(const xplane_context::XPlaneContext &ctx,
+                            bool *is_reaching = nullptr);
+
 // Number of LLM inferences kicked off by the engine since last reset()
 // (intent classification, sub-variant disambiguation). Callers that
 // maintain an aggregate inference counter (STT + TTS + LM) add this in.

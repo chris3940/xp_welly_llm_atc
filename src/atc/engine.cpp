@@ -14,6 +14,7 @@
 #include "atc/atc_state_machine.hpp"
 #include "atc/atc_templates.hpp"
 #include "atc/flight_phase.hpp"
+#include "atc/phonetic.hpp"
 #include "atc/intent_rules.hpp"
 #include "atc/landing_sequence.hpp"
 #include "atc/sector_picker.hpp"
@@ -1100,6 +1101,46 @@ static bool is_reachable_frequency(const xplane_context::XPlaneContext &ctx,
   return false;
 }
 
+// The departure level-report altitude, in MSL. The config default
+// (tower_report_alt_ft) is CAPPED at the SID initial-climb level-off the aircraft
+// actually reaches (LIMF RW36 KUKE1Z: 2000, not the 3000 config it never sees).
+// Shared by poll_departure_handoff (the transfer gate) and process_transcript (the
+// off-altitude report challenge) so both agree on the figure. Optionally reports the
+// phraseology VERB via is_reaching (true = "reaching" at a level-off, false =
+// "passing" a config altitude climbed THROUGH) -- MUST mirror ground_operations
+// {ifr_departure_contact} so the challenge matches the clearance the pilot heard
+// (Annecy "passing 3000" vs LIMF "reaching 2000"). Returns 0 when report-then-
+// transfer is off. [C. P. Potter] (declared in engine.hpp -- also drives the STT bias)
+int departure_report_alt_ft(const xplane_context::XPlaneContext &ctx,
+                            bool *is_reaching) {
+  if (is_reaching)
+    *is_reaching = false;
+  int report_alt = flight_phase::get_ifr_defaults().tower_report_alt_ft;
+  if (report_alt > 0) {
+    const auto init = cifp_reader::initial_altitude(
+        ctx.cifp_dir, ctx.nearest_airport_id, ctx.active_runway);
+    const int field_ft =
+        static_cast<int>(ctx.altitude_ft_msl - ctx.height_agl_ft);
+    if (init.feet > 0 && !init.is_fl &&
+        (init.feet <= report_alt || report_alt <= field_ft + 300)) {
+      report_alt = init.feet;
+      if (is_reaching)
+        *is_reaching = true;
+    }
+  }
+  return report_alt;
+}
+
+// Tolerance below the report altitude within which the pilot's level report is
+// accepted rather than challenged. LARGER for a "passing" report -- a continuous
+// climb-THROUGH where the pilot anticipates the crossing and STT/pipeline latency
+// shifts the sampled altitude -- than for a "reaching" report where the aircraft has
+// SETTLED at the level-off (a few tens of feet of altimeter wobble). Shared by the
+// poll gate and the process_transcript challenge. [C. P. Potter]
+static int report_alt_tolerance_ft(bool is_reaching) {
+  return is_reaching ? 200 : 400;
+}
+
 void process_transcript(Input in, Done done) {
   if (settings::debug_logging())
     logging::debug("STT response (quality=%.2f): \"%s\"", in.quality,
@@ -1150,8 +1191,33 @@ void process_transcript(Input in, Done done) {
   // "an App Approach call coming from nowhere ... should be the pilot calling").
   if (atc_state_machine::get_state() ==
           atc_state_machine::ATCState::IFR_DEPARTURE_CLEARED &&
-      !ctx.on_ground)
+      !ctx.on_ground) {
+    bool reaching = false;
+    const int report_alt = departure_report_alt_ft(ctx, &reaching);
+    // Off-altitude report: the pilot called the level but is well BELOW it (beyond
+    // the tolerance -- STT garble or an early call). CHALLENGE it ("confirm
+    // reaching/passing N feet?") instead of arming the handoff on a bogus report, and
+    // never leave the pilot with silence (user 2026-07-27). Verb mirrors the
+    // clearance (Annecy "passing 3000" vs LIMF "reaching 2000"). Do NOT set
+    // s_departure_level_reported -- the real report at the level arms the transfer.
+    if (report_alt > 0 &&
+        static_cast<int>(ctx.altitude_ft_msl) <
+            report_alt - report_alt_tolerance_ft(reaching)) {
+      Output out;
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), "%s, confirm %s %d feet?",
+                    in.pilot_callsign.c_str(), reaching ? "reaching" : "passing",
+                    report_alt);
+      out.response_text = buf;
+      out.is_warning = true; // query only -- no state change
+      logging::info("IFR departure: off-altitude level report at %.0fft (report_alt="
+                    "%d) -> challenge",
+                    ctx.altitude_ft_msl, report_alt);
+      done(std::move(out));
+      return;
+    }
     s_departure_level_reported = true;
+  }
 
   // Frequency guard: only process pilot transmissions on the correct frequency
   // for the current ATC state. A call on the wrong radio is silently ignored —
@@ -1434,6 +1500,12 @@ void process_transcript(Input in, Done done) {
         const std::string &cs_ref_ck = atc_state_machine::session_callsign();
         const std::string &cs_ck =
             cs_ref_ck.empty() ? in.pilot_callsign : cs_ref_ck;
+        // First departure handoff check-in (Torino Tower -> Departure/Radar): the
+        // readback on the old freq was accepted silently; advance FREQ_HANDOFF ->
+        // RADAR_CONTACT now, on the pilot's real call on the NEW freq -- this used to
+        // happen on the old-freq readback via INITIAL_CALL_CENTER (user 2026-07-27).
+        if (ck_state == AS::IFR_FREQ_HANDOFF)
+          atc_state_machine::set_state(AS::IFR_RADAR_CONTACT);
         // Verify the pilot's stated level against the ASSIGNED cleared level and
         // re-state it on the handoff check-in if they differ -- the assigned FL/alt
         // carries across controllers, so a check-in with the wrong level
@@ -1523,6 +1595,33 @@ void process_transcript(Input in, Done done) {
   if (in.pre_classified_intent != intent_parser::PilotIntent::UNKNOWN) {
     parsed.intent     = in.pre_classified_intent;
     parsed.confidence = in.pre_classified_conf;
+  }
+
+  // IFR "leaving frequency" guard (user 2026-07-28): an IFR flight NEVER self-leaves a
+  // controller's frequency in the air -- it is HANDED OFF (contact X on F), CANCELS IFR
+  // explicitly, or CLOSES the flight plan at the destination (IFR_LANDING_CLEARED). So a
+  // bare LEAVING_FREQUENCY in any other IFR state is spurious -- almost always a Voxtral
+  // garble on a readback ("climb flight level 110 ... bye-bye", LFLP ROMA2A Log 1957).
+  // Left alone it JUMPS the state (e.g. RADAR_CONTACT -> EN_ROUTE), skipping the
+  // intermediate handoff/climb states and stranding the poll_* logic bound to the state
+  // it left (the FL110 -> [30 NM hold] -> Lyon -> FL140 ladder went silent). Treat it as
+  // the readback it is. IFR_LANDING_CLEARED is EXCLUDED -- there LEAVING_FREQUENCY
+  // legitimately closes the flight plan. [C. P. Potter]
+  if (parsed.intent == intent_parser::PilotIntent::LEAVING_FREQUENCY) {
+    using AS2 = atc_state_machine::ATCState;
+    const auto st_lv = atc_state_machine::get_state();
+    const bool ifr_airborne_no_close =
+        st_lv == AS2::IFR_FREQ_HANDOFF || st_lv == AS2::IFR_EN_ROUTE ||
+        st_lv == AS2::IFR_RADAR_CONTACT || st_lv == AS2::IFR_ENROUTE_CRUISE ||
+        st_lv == AS2::IFR_DESCENT || st_lv == AS2::IFR_ARRIVAL ||
+        st_lv == AS2::IFR_APPROACH_CONTACT || st_lv == AS2::IFR_APPROACH_DESCENT ||
+        st_lv == AS2::IFR_APPROACH_TOWER;
+    if (ifr_airborne_no_close) {
+      logging::info("Suppressed spurious LEAVING_FREQUENCY in IFR state %s -> READBACK "
+                    "(IFR leaves only via handoff / cancel / landing closure)",
+                    atc_state_machine::state_name(st_lv));
+      parsed.intent = intent_parser::PilotIntent::READBACK;
+    }
   }
 
   // Frequency-based ATC type promotion: the ATC type is determined by the
@@ -3150,45 +3249,47 @@ bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
   //    find_enclosing; AGL fallback when OpenAir data is absent).
   // enc (openair volume + NAME) is resolved in BOTH modes -- it feeds the controller
   // name/freq resolution below.
-  int report_alt = flight_phase::get_ifr_defaults().tower_report_alt_ft;
-  // Cap the report altitude at the SID INITIAL CLIMB altitude: the aircraft levels
-  // there on the initial clearance and never climbs past a HIGHER report altitude
-  // (LIMF RW36 KUKE1Z initial 2000 < the 3000 config report -- the clearance says
-  // "report REACHING 2000 feet", so hand off when it reaches 2000, not a 3000 it
-  // never sees, user 2026-07-26). Compared in MSL -- the report is an ALTITUDE, not
-  // a height AGL (this also makes "passing 3000 feet" fire at 3000 MSL, matching the
-  // spoken clearance, instead of the old 3000-AGL which fired far too high).
-  if (report_alt > 0) {
-    const auto init = cifp_reader::initial_altitude(
-        ctx.cifp_dir, ctx.nearest_airport_id, ctx.active_runway);
-    const int field_ft =
-        static_cast<int>(ctx.altitude_ft_msl - ctx.height_agl_ft);
-    // Use the initial climb level-off (always above the field) instead of the
-    // config MSL report altitude when the config is BELOW the initial (aircraft
-    // levels first) OR AT/BELOW the field (high-elevation airport where 3000 MSL
-    // is under the ground and the MSL gate would fire immediately). Must match the
-    // clearance text in ground_operations {ifr_departure_contact}.
-    if (init.feet > 0 && !init.is_fl &&
-        (init.feet < report_alt || report_alt <= field_ft + 300))
-      report_alt = init.feet;
-  }
+  // Report altitude (MSL), capped at the SID initial-climb level-off. See
+  // departure_report_alt_ft -- shared with the process_transcript report challenge.
+  bool report_is_reaching = false;
+  int report_alt = departure_report_alt_ft(ctx, &report_is_reaching);
+  const int report_tol_ft = report_alt_tolerance_ft(report_is_reaching);
   openair_db::AirspaceEntry enc =
       openair_db::find_enclosing(ctx.latitude, ctx.longitude, openair_alt(ctx));
   if (report_alt > 0) {
-    if (static_cast<int>(ctx.altitude_ft_msl) < report_alt) {
+    // Tolerance band: the pilot calls "reaching N feet" as the altimeter settles a
+    // few tens of feet either side of the level-off (observed 1990/1995/1996 for a
+    // 2000 ft initial climb). Without it the strict MSL gate ignored three
+    // consecutive level reports and the aircraft sat on Tower in silence until it
+    // physically crossed the exact figure -- the report path never fired because
+    // its own trigger altitude was unreachable by rounding (user 2026-07-27:
+    // "no ATC reply ... to 2000 feet"). The report/grace gate below still controls
+    // WHEN the handoff fires; this only opens the altitude window. [C. P. Potter]
+    if (static_cast<int>(ctx.altitude_ft_msl) < report_alt - report_tol_ft) {
       s_departure_at_alt_sec = 0.0f;
       return false; // still climbing to the report altitude -> stay on Tower
     }
     // At/above the report altitude. The takeoff clearance said "report reaching
-    // N feet", so the transfer must be the RESPONSE to the pilot's level report,
+    // N feet", so the transfer is normally the RESPONSE to the pilot's level report,
     // NOT an unsolicited push (user 2026-07-27: "an App Approach call coming from
-    // nowhere ... should be the pilot calling"). Wait for the report; the grace
-    // timer is the fallback -- the pilot levels at the initial climb altitude and
-    // would otherwise sit on Tower forever if they never report. [C. P. Potter]
+    // nowhere ... should be the pilot calling"). Wait for the report -- EXCEPT:
+    //  - the aircraft CLIMBS THROUGH the UPPER band (report_alt + tol) without ever
+    //    reporting (a "passing" climb-out that blew past the point): the controller
+    //    then AUTHORITATIVELY hands off (APP / Departure / Radar per airport, resolved
+    //    below) rather than let it keep climbing on Tower (user 2026-07-27); OR
+    //  - the grace timer expires (a "reaching" aircraft levelled off that never
+    //    reports would otherwise sit on Tower forever).
     s_departure_at_alt_sec += dt;
     constexpr float kReportGraceSec = 25.0f;
-    if (!s_departure_level_reported && s_departure_at_alt_sec < kReportGraceSec)
+    const bool crossed_upper_band =
+        static_cast<int>(ctx.altitude_ft_msl) >= report_alt + report_tol_ft;
+    if (!s_departure_level_reported && !crossed_upper_band &&
+        s_departure_at_alt_sec < kReportGraceSec)
       return false;
+    if (!s_departure_level_reported && crossed_upper_band)
+      logging::info("IFR departure handoff: AUTHORITATIVE (climbed through %dft "
+                    "without a level report)",
+                    report_alt + report_tol_ft);
   } else {
     if (enc.ac_class == openair_db::AirspaceClass::CTR)
       return false; // still inside CTR — wait
@@ -3352,6 +3453,16 @@ bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
                  freq, controller_label.c_str());
   atc_state_machine::set_state(AS::IFR_FREQ_HANDOFF);
   s_departure_handoff_timer = 0.0f;
+  // Arm the sector check-in so the pilot's handoff READBACK on the OLD (Tower) freq is
+  // accepted SILENTLY -- the new controller must say "radar contact" only when the
+  // pilot actually CALLS on the new freq, exactly like the mid-flight sector handoffs
+  // (Milan Approach 125.630 in the LIMF->LFLP test). Without this the readback was
+  // processed as an immediate INITIAL_CALL_CENTER check-in and the new controller
+  // spoke "radar contact, climb ..." on the OLD freq before the pilot ever switched;
+  // it also kept answering when the pilot mistuned instead of nudging them to the
+  // handoff freq (user 2026-07-27). [C. P. Potter]
+  if (freq >= 100.0f)
+    s_sector_checkin_pending = true;
 
   if (controller_label.empty())
     return false; // uncontrolled airspace — silent transition, nothing to speak
@@ -3416,6 +3527,16 @@ procedure_deviation_nm(const xplane_context::XPlaneContext &ctx,
 static bool sid_min_at_exit_fix(const xplane_context::XPlaneContext &ctx) {
   return !ctx.ifr_sid_min_waypoint.empty() &&
          ctx.ifr_sid_min_waypoint == ctx.ifr_sid_last_fix;
+}
+
+// The SID minimum that acts as an EARLY-CLIMB FLOOR for the intermediate steps
+// (step1 / step2). An exit-fix binding (LIMF KUKE1Z: KUKEV FL200, cruise FL220)
+// is an enroute-climb target, NOT a floor -- treating it as one clamps step1 up
+// AND zeroes step2 (FL140 < FL200 fails the ">= sid_min" usable test), collapsing
+// the FL110 -> FL140 -> cruise ladder into a single "climb FL220". Returns 0 in
+// that case so the intermediate steps survive. (user 2026-07-27) [C. P. Potter]
+static int sid_climb_floor_ft(const xplane_context::XPlaneContext &ctx) {
+  return sid_min_at_exit_fix(ctx) ? 0 : ctx.ifr_sid_min_alt_ft;
 }
 
 // True while the step-1 hold is active -- a hold distance is set (default 10 NM,
@@ -3609,9 +3730,13 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     } else {
       s_sid_step1_alt_ft = step1;
       s_sid_hold_release_nm = hold_nm;
-      // step2 usable only strictly between step1 and cruise, and >= the SID min.
-      s_sid_step2_alt_ft =
-          (step2 > step1 && step2 < cruise_ft && step2 >= sid_min_ft) ? step2 : 0;
+      // step2 usable only strictly between step1 and cruise, and >= the SID min
+      // FLOOR (0 when the only binding is at the SID exit fix -- see
+      // sid_climb_floor_ft; otherwise FL140 collapses under a FL200 exit binding).
+      s_sid_step2_alt_ft = (step2 > step1 && step2 < cruise_ft &&
+                            step2 >= sid_climb_floor_ft(ctx))
+                               ? step2
+                               : 0;
     }
     logging::info("IFR SID climb: probe10nm tma_ceil=%d cta_ceil=%d (step1 %s / "
                   "step2 %s%s) dep=%s -> step1 FL%d step2 FL%d hold %.0f NM "
@@ -3638,7 +3763,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
                                             : s_sid_step1_alt_ft + 4000);
   const bool step2_usable_ph28 =
       s_sid_step2_alt_ft > 0 && s_sid_step2_alt_ft < sid2_cruise_fl_ph28 * 100 &&
-      s_sid_step2_alt_ft >= ctx.ifr_sid_min_alt_ft;
+      s_sid_step2_alt_ft >= sid_climb_floor_ft(ctx);
   if (!s_sid_radar_handoff_issued && s_sid_initialized && s_sid_step1_issued &&
       !s_sid_step2_issued && step2_usable_ph28 && s_sid_pending_climb_ft == 0 &&
       !sid_step1_hold_active(ctx) && openair_db::ready() &&
@@ -4029,7 +4154,7 @@ skip_tma_check:;
   // SID fix min -- user 2026-07-22). Otherwise skip straight to cruise.
   const bool step2_usable = s_sid_step2_alt_ft > 0 &&
                             s_sid_step2_alt_ft < sid_cruise_fl * 100 &&
-                            s_sid_step2_alt_ft >= ctx.ifr_sid_min_alt_ft;
+                            s_sid_step2_alt_ft >= sid_climb_floor_ft(ctx);
 
   // ── Phase 2a: second intermediate step (Annecy FL110 -> FL140) ────────
   // FALLBACK only: Phase 2.8 normally hands the aircraft to the upper controller and
@@ -9437,25 +9562,12 @@ bool poll_ground_runway_change(const xplane_context::XPlaneContext &ctx,
   if (!out_text)
     return true;
 
-  static const char *kPhonetic[] = {
-      "Alpha",   "Bravo",  "Charlie", "Delta",   "Echo",    "Foxtrot",
-      "Golf",    "Hotel",  "India",   "Juliet",  "Kilo",    "Lima",
-      "Mike",    "November", "Oscar", "Papa",    "Quebec",  "Romeo",
-      "Sierra",  "Tango",  "Uniform", "Victor",  "Whiskey", "X-ray",
-      "Yankee",  "Zulu"};
-
   std::string hp_phrase = "runway " + ctx.active_runway;
   auto hp_it = ctx.runway_holding_points.find(ctx.active_runway);
   if (hp_it != ctx.runway_holding_points.end() && !hp_it->second.empty()) {
-    const std::string &hp = hp_it->second;
-    std::string name;
-    if (hp.size() == 1 && hp[0] >= 'A' && hp[0] <= 'Z')
-      name = kPhonetic[hp[0] - 'A'];
-    else if (hp.size() == 1 && hp[0] >= 'a' && hp[0] <= 'z')
-      name = kPhonetic[hp[0] - 'a'];
-    else
-      name = hp;
-    hp_phrase = "holding point " + name + ", runway " + ctx.active_runway;
+    hp_phrase = "holding point " +
+                atc_phonetic::spell_holding_point(hp_it->second) + ", runway " +
+                ctx.active_runway;
   }
 
   const std::string &cs = atc_state_machine::session_callsign();
