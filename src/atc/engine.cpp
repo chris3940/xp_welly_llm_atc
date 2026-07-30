@@ -1193,6 +1193,36 @@ crossing_runway_at_position(const xplane_context::XPlaneContext &ctx,
   return {};
 }
 
+// True when the pilot's ACTIVE COM frequency actually has a controller/station in
+// this area: it matches the nearest airport's frequency DB, the current handoff /
+// assigned-approach frequency (incl. airport+.json overrides), or an atc.dat
+// controller whose polygon encloses the aircraft on that frequency. Used to gate
+// the radio-check reply -- on a frequency with no station there is only silence,
+// as in real ops (user 2026-07-30). [C. P. Potter]
+static bool active_freq_has_controller(const xplane_context::XPlaneContext &ctx) {
+  const float acom = (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
+  if (acom < 100.0f)
+    return false;
+  if (ctx.frequency_type != xplane_context::FrequencyType::UNKNOWN)
+    return true; // ATIS/Ground/Tower/Approach of the nearest airport (apt.dat)
+  if (s_pending_handoff_freq_mhz >= 100.0f &&
+      std::fabs(acom - s_pending_handoff_freq_mhz) < 0.02f)
+    return true; // freq we just handed the pilot to (incl. airport+.json overrides)
+  if (s_enroute_approach_freq_mhz >= 100.0f &&
+      std::fabs(acom - s_enroute_approach_freq_mhz) < 0.02f)
+    return true;
+  if (airspace_db::enabled()) {
+    const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+    const float alt = (ctx.altitude_ft_msl > static_cast<float>(ta))
+                          ? ctx.pressure_alt_ft
+                          : ctx.altitude_ft_msl;
+    const auto khz = static_cast<std::uint32_t>(std::lround(acom * 1000.0));
+    if (airspace_db::lookup_by_freq(khz, ctx.latitude, ctx.longitude, alt))
+      return true; // atc.dat controller enclosing the position on this freq
+  }
+  return false;
+}
+
 void process_transcript(Input in, Done done) {
   if (settings::debug_logging())
     logging::debug("STT response (quality=%.2f): \"%s\"", in.quality,
@@ -1788,6 +1818,37 @@ void process_transcript(Input in, Done done) {
         done(Output{});
         return;
       }
+    }
+  }
+
+  // Radio check (IFR): reply with an ICAO readability report -- but ONLY when the
+  // active frequency actually has a controller/station in this area. On a frequency
+  // with no station a radio check draws SILENCE, as in real ops (user 2026-07-30).
+  // ICAO Annex 10 Vol II: reply is a readability 1-5 ("readability five"), NOT the
+  // US-military "five by five". IFR only; VFR keeps its own template. [C. P. Potter]
+  {
+    using PIR = intent_parser::PilotIntent;
+    const auto rc_state = atc_state_machine::get_state();
+    const bool ifr_state =
+        std::string(atc_state_machine::state_name(rc_state)).rfind("IFR", 0) == 0;
+    if (parsed.intent == PIR::RADIO_CHECK && ifr_state) {
+      const std::string &cs_ref = atc_state_machine::session_callsign();
+      const std::string &cs = cs_ref.empty() ? in.pilot_callsign : cs_ref;
+      if (active_freq_has_controller(ctx)) {
+        Output out;
+        out.response_text =
+            s_current_controller_label.empty()
+                ? (cs + ", readability five.")
+                : (cs + ", " + s_current_controller_label + ", readability five.");
+        logging::info("IFR radio check -> readability five (controller '%s')",
+                      s_current_controller_label.c_str());
+        done(std::move(out));
+        return;
+      }
+      // No controller on this frequency -> silence.
+      logging::info("IFR radio check on a frequency with no station -- silent");
+      done(Output{});
+      return;
     }
   }
 
@@ -5481,6 +5542,28 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
   std::string app_label;
   float app_freq = 0.0f;
 
+  // P0: explicit airport+.json controller override for the destination approach.
+  // Data-driven freq correction where atc.dat has no TRACON for the field and the
+  // TMA therefore resolves to the Tower instead (LOWI: Innsbruck TMA -> only an
+  // atc.dat Tower 120.10; the real Approach 119.275 lives in apt.dat/airport+.json).
+  // The VOLUME is still the openair Innsbruck TMA that triggered this handoff --
+  // this only supplies the correct frequency. Mirrors the departure handoff P0.
+  // [C. P. Potter]
+  {
+    const std::string dest = !s_assigned_dest_icao.empty()
+                                 ? s_assigned_dest_icao
+                                 : ctx.nearest_airport_id;
+    std::string oname;
+    float ofreq = 0.0f;
+    if (airport_overrides::controller(dest, "approach", &oname, &ofreq) &&
+        ofreq >= 100.0f) {
+      app_label = oname;
+      app_freq = ofreq;
+      logging::info("IFR arrival handoff: [P0-airport+.json] %s %.3f",
+                    app_label.c_str(), app_freq);
+    }
+  }
+
   logging::info(
       "IFR arrival handoff: openair enc='%s' class=%d floor=%dft ceil=%dft"
       " at %.0fft MSL pos=%.4f,%.4f",
@@ -5491,8 +5574,10 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
   // Primary: use the openair TMA name to find the correct TRACON by name
   // (same logic as departure handoff — altitude-correct, not centroid-distance).
   // "CHAMBERY TMA SECTOR 1" → "CHAMBERY" → Chambery TRACON.
-  if (enc.ac_class == openair_db::AirspaceClass::TMA ||
-      enc.ac_class == openair_db::AirspaceClass::CTA) {
+  // Skipped when P0 (airport+.json) already supplied the frequency.
+  if (app_freq < 100.0f &&
+      (enc.ac_class == openair_db::AirspaceClass::TMA ||
+       enc.ac_class == openair_db::AirspaceClass::CTA)) {
     std::string lbl;
     float f = 0.0f;
     // Unified resolver (step 1c): terminal=true so a CTA resolves to the TRACON
@@ -7154,6 +7239,16 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
   if (!s_assigned_dest_icao.empty() && openair_db::ready() &&
       on_destination_terminal(ctx))
     return false;
+  // Latch: once the destination APPROACH handoff has fired, the aircraft is
+  // committed to the approach controller -- never hand it back to an ACC/enroute
+  // sector, even if an RNP approach momentarily takes it OUT of the narrow
+  // destination TMA corridor into an overlying ACC sector. At LOWI the RTT->ELMEM
+  // leg re-crosses Vienna's CTA C, which without this latch flickers "Innsbruck
+  // Approach <-> Vienna". Enroute/descent sector changes (Milan->Ljubljana->Vienna)
+  // are unaffected: the flag is false until the terminal handoff. (user 2026-07-30)
+  // [C. P. Potter]
+  if (s_enroute_approach_handoff_issued)
+    return false;
 
   std::string new_label;
   float new_mhz = 0.0f;
@@ -8241,6 +8336,19 @@ static void init_route_fixes(const xplane_context::XPlaneContext &ctx) {
     // back to the already-loaded constrained set.
     if (arr.empty())
       arr = s_approach_waypoints;
+
+    // Drop missed-approach fixes (everything AFTER the MAP) from the FORWARD route
+    // table: they are the go-around procedure (climb-out + hold), not the arrival,
+    // and otherwise leak into the tracker and the STT bias (LOWI R08-Z: WI103 /
+    // WI002 / RTT after the RW08 MAP). The MAP itself (runway threshold) is kept as
+    // the last route fix. The FULL missed-approach sequence stays in
+    // s_approach_waypoints (with s_map_ap_idx) for GO_AROUND handling.
+    for (size_t i = 0; i < arr.size(); ++i) {
+      if (arr[i].is_map) {
+        arr.resize(i + 1); // keep up to and including the MAP
+        break;
+      }
+    }
 
     std::vector<std::string> idents;
     for (const auto &wp : arr)

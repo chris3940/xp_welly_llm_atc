@@ -2638,7 +2638,40 @@ static void draw_ifr_tab() {
                   ctx.latitude, ctx.longitude,
                   static_cast<int>(ctx.altitude_ft_msl), alt);
       if (s_encl.empty()) {
-        ImGui::TextDisabled("outside all indexed airspaces");
+        // openair has no volume here -- typical in upper airspace / FIR, since
+        // airspace.txt carries no FIR polygons (e.g. over Slovenia at FL450).
+        // Show the atc.dat fallback: the polygons that ACTUALLY drive the enroute
+        // sector handoff (LJUBLJANA 0-FL660). Skip oceanic / global-junk polygons
+        // (same filter as sector_picker::pick_next).
+        bool any_atc = false;
+        for (size_t ci2 = 0; ci2 < ctx.enclosing_airspaces.size(); ++ci2) {
+          const auto *c = ctx.enclosing_airspaces[ci2];
+          if (!c || c->freqs_khz.empty())
+            continue;
+          if ((c->bbox_max_lat - c->bbox_min_lat) > 40.0 ||
+              (c->bbox_max_lon - c->bbox_min_lon) > 40.0 ||
+              c->name.find("OCEANIC") != std::string::npos)
+            continue;
+          ImGui::Text("  %-3s %s  [%d-%d ft]  (atc.dat)",
+                      airspace_db::role_name(c->role), c->name.c_str(),
+                      c->floor_ft, c->ceiling_ft);
+          // Clickable frequency -> COM standby (same as the En-Route tab).
+          const uint32_t freq = c->freqs_khz.front();
+          const float freq_mhz = static_cast<float>(freq) / 1000.0f;
+          char btn[64];
+          std::snprintf(btn, sizeof(btn), "%.3f##atcdatfreq%zu", freq_mhz, ci2);
+          ImGui::SameLine();
+          if (ImGui::SmallButton(btn))
+            xplane_context::set_standby_freq(freq);
+          if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(ui_strings::tr("tooltip.set_standby_format"),
+                              ctx.active_com, freq_mhz);
+          any_atc = true;
+        }
+        if (any_atc)
+          ImGui::TextDisabled("> openair empty here -- atc.dat fallback (drives handoff)");
+        else
+          ImGui::TextDisabled("outside all indexed airspaces");
       } else {
         for (const auto &e : s_encl) {
           const bool is_inner =

@@ -1,5 +1,5 @@
 {
-  "_comment": "xp_wellys_atc - per-airport overrides (generic). Supplements Navigraph/apt.dat/atc.dat with hand-maintained per-ICAO data. Covers: (1) runway-in-use config (arrival/departure runways, wind-gated), (2) preferred approach by weather, (3) additional airport info (delegated controllers + freqs, AFIS/Tower names). Loaded from <plugin>/Resources/airport+.json. LOADER NOT BUILT YET (v4.4.0). Schema is PROVISIONAL - confirm before wiring.",
+  "_comment": "xp_wellys_atc - per-airport overrides (generic). Supplements Navigraph/apt.dat/atc.dat with hand-maintained per-ICAO data. Covers: (1) runway-in-use config (arrival/departure runways, wind-gated), (2) preferred approach by weather, (3) additional airport info (delegated controllers + freqs, AFIS/Tower names). Loaded from <plugin>/Resources/airport+.json via airport_overrides::init (main.cpp). LOADER IS WIRED: runway_config, approaches, controllers, departure_holds are all parsed and consulted (controllers = departure + arrival approach handoff P0).",
   "_schema": {
     "<ICAO>": {
       "runway_config": [
@@ -47,6 +47,12 @@
   "LIMF": {
     "controllers": [
       { "role": "approach", "name": "Milan Radar", "freq_mhz": 129.275, "_comment": "Torino Caselle departures worked by Milan Radar (ACC). The controlling volume above TORINO CTR (ceiling 3500) is MILAN CTA ZONE 24 in airspace.txt. Freq 129.275 per Navigraph (Torino ACC = MILAN RADAR 125.275 / 129.275). The sim atc.dat has Milan but with STALE freqs (MILAN ctr 118.675, MILAN RADAR tracon 126.750) that do not match Navigraph -- Navigraph updates nav+airspace, not atc.dat -- so this override injects the correct freq. Alt sector freq 125.275: switch here if 129.275 is the wrong Torino dep sector. Verified Navigraph 2026-07-27." }
+    ]
+  },
+
+  "LOWI": {
+    "controllers": [
+      { "role": "approach", "name": "Innsbruck Radar", "freq_mhz": 128.975, "alt_freqs_mhz": [119.275], "_comment": "Innsbruck approach is worked within the INNSBRUCK TMA 1 (openair D 7000-FL195), but atc.dat has NO tracon for LOWI -- only INNSBRUCK twr 120.10 (polygon 0-7000 = the CTR), so resolve_sector_controller falls back to the Tower freq for the approach handoff. The real Innsbruck Radar/Approach = 128.975 (Navigraph) and 119.275 (apt.dat APP / OurAirports); VACC Austria also lists Arrival 130.475. This override injects 128.975 for the TMA-triggered approach handoff (the VOLUME stays the openair Innsbruck TMA); the Tower handoff at the FAF keeps 120.10. Switch to 119.275 if 128.975 is the wrong arrival radar sector. Verified web 2026-07-30." }
     ]
   }
 }
