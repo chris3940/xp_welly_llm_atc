@@ -415,6 +415,39 @@ std::string sid_last_fix(const std::string &cifp_dir, const std::string &icao,
   return best_wpt;
 }
 
+// True when a SID/STAR runway-transition field (ARINC 424 f[3], e.g. "RW04B",
+// "RW22R", "RW04") applies to the given active runway ("04R"). Honours the "B" = BOTH
+// parallels suffix and a bare "RWxx" (no L/R/C) = all parallels of that number, so both
+// "RW04B" and "RW04" match "04R" (user 2026-07-28: RW04B / RW22R exact-compare misses).
+static bool rwy_transition_matches(const std::string &field3,
+                                   const std::string &active_runway) {
+  if (active_runway.empty() || field3.size() < 3 ||
+      field3.compare(0, 2, "RW") != 0)
+    return false;
+  const std::string tr = field3.substr(2); // "04B", "22R", "04"
+  if (tr == active_runway)
+    return true;
+  auto split_num_suffix = [](const std::string &s, std::string &num, char &suf) {
+    num = s;
+    suf = 0;
+    if (!num.empty()) {
+      const char c = num.back();
+      if (c == 'L' || c == 'R' || c == 'C' || c == 'B') {
+        suf = c;
+        num.pop_back();
+      }
+    }
+  };
+  std::string tn, an;
+  char ts = 0, as = 0;
+  split_num_suffix(tr, tn, ts);
+  split_num_suffix(active_runway, an, as);
+  if (tn != an)
+    return false; // different runway number
+  // Transition serves BOTH / all parallels, or exactly this side.
+  return ts == 'B' || ts == 0 || ts == as;
+}
+
 // ── sid_name_for_last_fix ──────────────────────────────────────────────
 
 std::string sid_name_for_last_fix(const std::string &cifp_dir,
@@ -439,14 +472,19 @@ std::string sid_name_for_last_fix(const std::string &cifp_dir,
     return {};
   }
 
-  std::string rwy_match = active_runway.empty() ? "" : "RW" + active_runway;
-
-  // Pass 1: for each SID on this runway, record the highest-sequence waypoint.
-  // When rwy_match is empty all runways are included (any-runway search).
-  // Map: sid_name → {max_seq, waypoint}
+  // Pass 1: scan ALL SID rows (do NOT pre-filter by runway). A SID's TERMINATING fix
+  // lives in its COMMON-route rows (empty f[3]) or a "RWxxB" both-parallels row, NOT the
+  // per-runway RWxx transition rows. Pre-filtering by "RW"+runway dropped the exit fix:
+  // BASI8X's BASIP sits in a common row, so a 22R lookup saw only MN221/MN223 and
+  // returned (none), then a runway-independent fallback picked the 04 SID BASI8A (user
+  // 2026-07-28). Per SID track: max-sequence terminating waypoint across ALL rows, plus
+  // whether it has ANY runway transition and one MATCHING the active runway (via
+  // rwy_transition_matches -> honours "B"=both and bare RWxx).
   struct SidInfo {
     int max_seq = -1;
     std::string wpt;
+    bool has_any_rwy_transition = false;
+    bool serves_runway = false;
   };
   std::unordered_map<std::string, SidInfo> sid_map;
 
@@ -456,8 +494,6 @@ std::string sid_name_for_last_fix(const std::string &cifp_dir,
       continue;
     auto f = split_csv(line);
     if (f.size() < 5)
-      continue;
-    if (!rwy_match.empty() && trim(f[3]) != rwy_match)
       continue;
     std::string sid = trim(f[2]);
     if (sid.empty())
@@ -473,18 +509,31 @@ std::string sid_name_for_last_fix(const std::string &cifp_dir,
       continue;
     }
 
-    std::string wpt = trim(f[4]);
     auto &info = sid_map[sid];
+    const std::string tr = trim(f[3]);
+    if (tr.size() >= 2 && tr.compare(0, 2, "RW") == 0) {
+      info.has_any_rwy_transition = true;
+      if (rwy_transition_matches(tr, active_runway))
+        info.serves_runway = true;
+    }
+    const std::string wpt = trim(f[4]);
     if (seq > info.max_seq) {
       info.max_seq = seq;
       info.wpt = wpt;
     }
   }
 
-  // Pass 2: find the SID whose last waypoint matches fpl_first_fix.
+  // Pass 2: the SID whose terminating waypoint == fpl_first_fix AND that SERVES the
+  // active runway -- it has a matching RW transition, OR has NO runway transitions at
+  // all (a runway-independent SID). Empty active_runway = any-runway search.
   std::string result;
   for (auto &kv : sid_map) {
-    if (kv.second.wpt == fpl_first_fix) {
+    const SidInfo &s = kv.second;
+    if (s.wpt != fpl_first_fix)
+      continue;
+    const bool serves =
+        active_runway.empty() || s.serves_runway || !s.has_any_rwy_transition;
+    if (serves) {
       result = kv.first;
       break;
     }
@@ -1481,6 +1530,63 @@ std::string star_last_fix(const std::string &cifp_dir,
   std::lock_guard<std::mutex> lk(g_alt_cache_mutex);
   g_last_fix_cache[cache_key] = best_wpt;
   return best_wpt;
+}
+
+// ── connector_star ─────────────────────────────────────────────────────────
+
+std::string connector_star(const std::string &cifp_dir,
+                           const std::string &icao,
+                           const std::string &from_fix,
+                           const std::vector<std::string> &to_fixes) {
+  if (cifp_dir.empty() || icao.empty() || from_fix.empty() || to_fixes.empty())
+    return {};
+
+  std::ifstream in(make_cifp_path(cifp_dir, icao));
+  if (!in.good())
+    return {};
+
+  // Per STAR: entry fix (lowest seq) + terminating fix (highest seq).
+  struct Ends {
+    int min_seq = INT_MAX; std::string first;
+    int max_seq = -1;      std::string last;
+  };
+  std::unordered_map<std::string, Ends> star_map;
+
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.size() < 5 || line.compare(0, 5, "STAR:") != 0)
+      continue;
+    auto f = split_csv(line);
+    if (f.size() < 5) continue;
+    std::string star = trim(f[2]);
+    if (star.empty()) continue;
+    std::string seq_str = trim(f[0]);
+    if (seq_str.size() <= 5) continue;
+    int seq = 0;
+    try { seq = std::stoi(seq_str.substr(5)); } catch (...) { continue; }
+    std::string wpt = trim(f[4]);
+    if (wpt.empty()) continue;
+    auto &e = star_map[star];
+    if (seq < e.min_seq) { e.min_seq = seq; e.first = wpt; }
+    if (seq > e.max_seq) { e.max_seq = seq; e.last  = wpt; }
+  }
+
+  // A connector enters at from_fix and terminates at one of the approach IAFs.
+  std::vector<std::string> matches;
+  for (const auto &kv : star_map) {
+    if (kv.second.first != from_fix)
+      continue;
+    for (const auto &t : to_fixes) {
+      if (kv.second.last == t) { matches.push_back(kv.first); break; }
+    }
+  }
+  std::sort(matches.begin(), matches.end());
+  std::string result = matches.empty() ? std::string{} : matches.front();
+
+  logging::info("[cifp] %s connector STAR from %s to approach IAF -> %s",
+                icao.c_str(), from_fix.c_str(),
+                result.empty() ? "(none)" : result.c_str());
+  return result;
 }
 
 // ── approach_procedure_waypoints ─────────────────────────────────────────

@@ -81,6 +81,14 @@ int ctr_ceiling_ft(double lat, double lon);
 // low-ceilinged terminal TMA can never enter it otherwise.
 int terminal_tma_ceiling(double lat, double lon);
 
+// Highest TMA ceiling over the point: the MAX ceiling across every TMA block
+// (stacked sub-volumes) whose polygon contains (lat, lon). Unlike
+// terminal_tma_ceiling (which returns the lowest-floor block's ceiling, for
+// descend-to-ENTER), this returns the true TOP of the TMA stack -- used so an
+// enroute descent stays ABOVE a tall overflown TMA (LOWI/DOLSKO tops FL245 ->
+// stay at/above FL250) instead of diving into a mid-level sub-block. 0 = none.
+int highest_tma_ceiling(double lat, double lon);
+
 // "Descend to enter" test. Returns the destination's base terminal-TMA ceiling
 // (terminal_tma_ceiling at the destination) IF the aircraft at (acft_lat,
 // acft_lon) is laterally inside a TMA whose ceiling matches that reference --

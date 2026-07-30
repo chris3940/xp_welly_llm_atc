@@ -351,6 +351,26 @@ int terminal_tma_ceiling(double lat, double lon) {
   return ceil_at_best;
 }
 
+int highest_tma_ceiling(double lat, double lon) {
+  if (!s_ready)
+    return 0;
+  int max_ceil = 0;
+  for (const auto &e : s_entries) {
+    if (e.ac_class != AirspaceClass::TMA)
+      continue;
+    if (lat < e.bbox_min_lat || lat > e.bbox_max_lat)
+      continue;
+    if (lon < e.bbox_min_lon || lon > e.bbox_max_lon)
+      continue;
+    if (e.ceiling_ft <= max_ceil) // can't raise the max -- skip the poly test
+      continue;
+    if (!point_in_polygon(lat, lon, e.polygon))
+      continue;
+    max_ceil = e.ceiling_ft;
+  }
+  return max_ceil;
+}
+
 int descend_to_enter_ceiling(double acft_lat, double acft_lon, double dest_lat,
                              double dest_lon) {
   if (!s_ready)

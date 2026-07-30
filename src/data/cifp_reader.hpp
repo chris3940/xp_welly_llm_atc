@@ -238,6 +238,18 @@ std::string star_last_fix(const std::string &cifp_dir,
                            const std::string &icao,
                            const std::string &star_name);
 
+// Finds a "connector" (linking) STAR that bridges a STAR terminus to an
+// approach IAF: a STAR whose ENTRY fix (lowest seq) == from_fix AND whose
+// LAST fix (highest seq) is one of to_fixes. Used at airports where the filed
+// STAR ends at one runway's IAF but the selected approach begins at another,
+// and a short linking STAR joins them (LOWI: NANI2A ends at RTT, the R08-Z
+// approach begins at ELMEM, and RTT1B: RTT->ELMEM is the published bridge).
+// Deterministic (alphabetically first match). Returns empty when none exists.
+std::string connector_star(const std::string &cifp_dir,
+                           const std::string &icao,
+                           const std::string &from_fix,
+                           const std::vector<std::string> &to_fixes);
+
 // Returns constrained waypoints from the approach procedure transition
 // for approach_designator (e.g. "R04LZ"), matching the given
 // transition_ident (e.g. "MUS" — the last STAR fix / IAF).

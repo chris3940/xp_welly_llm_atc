@@ -1833,7 +1833,18 @@ void update() {
         // clearance for the wrong end when the pilot has taxied to the opposite
         // threshold. Never override to a grass/unpaved end when a paved runway
         // exists.
-        if (ctx.on_ground && ctx.groundspeed_kts < 8.0f) {
+        // SKIP the position override when this airport has a runway_config DEPARTURE
+        // runway (airport+.json): the config is authoritative for the departure end and
+        // must not be clobbered by nearest-threshold geometry. At LFMN the parking sits
+        // within 400 m of the 22R ARRIVAL threshold, which replaced the configured 22L
+        // departure -> the filed BASIP SID had no runway (SID incompatible with 22R,
+        // user 2026-07-28). Config-less airports keep the wrong-end protection.
+        const bool has_departure_config =
+            !airport_overrides::departure_runway(ctx.nearest_airport_id,
+                                                 ctx.wind_direction_deg,
+                                                 ctx.wind_speed_kt)
+                 .empty();
+        if (ctx.on_ground && ctx.groundspeed_kts < 8.0f && !has_departure_config) {
           static constexpr double kThresholdRadiusM = 400.0;
           bool any_paved_rwy = false;
           for (const auto &rwy : ctx.runways)

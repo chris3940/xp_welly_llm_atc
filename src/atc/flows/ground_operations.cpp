@@ -95,13 +95,21 @@ static std::string get_callsign(const PilotMessage &msg) {
 
 static std::string get_runway(const PilotMessage &msg,
                               const XPlaneContext &ctx) {
-  if (!msg.runway.empty())
-    return msg.runway;
+  // The RUNWAY IN SERVICE is authoritative for ATC output: the ATC-ASSIGNED runway
+  // (locked at taxi) first, then the active runway. The pilot's SPOKEN runway
+  // (msg.runway) is a LAST resort, only when nothing is known (e.g. an uncontrolled
+  // self-announce with no assignment). ATC must NEVER echo/verify the pilot's runway
+  // over the runway in service -- Voxtral garbles it ("runway zero FOR right" -> "0")
+  // and the ATC then repeated a corrupted runway and rejected the CORRECT readback
+  // (LFMN 04R -> "runway 0" / "negative runway 00", user 2026-07-28). Repeating the
+  // pilot's runway instead of the runway in use is nonsensical for a controlled field.
   const std::string &assigned = internal::assigned_runway_ref();
   if (!assigned.empty())
     return assigned;
   if (!ctx.active_runway.empty())
     return ctx.active_runway;
+  if (!msg.runway.empty())
+    return msg.runway;
   return "28";
 }
 
