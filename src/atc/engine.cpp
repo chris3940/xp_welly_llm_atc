@@ -2571,12 +2571,14 @@ void process_transcript(Input in, Done done) {
       const std::string &cs_ifr_ref = atc_state_machine::session_callsign();
       const std::string cs_ifr =
           cs_ifr_ref.empty() ? in.pilot_callsign : cs_ifr_ref;
-      // Destination classification: no Ground freq → AFIS/Information.
+      // Destination classification: AFIS = neither a Ground NOR an Approach freq
+      // (a real Tower with no separate Ground still has Approach -- LOWI).
       const std::string dest =
           !s_assigned_dest_icao.empty() ? s_assigned_dest_icao
                                         : ctx.nearest_airport_id;
       const bool is_afis =
-          !xplane_context::has_ground_freq_for(dest);
+          !xplane_context::has_ground_freq_for(dest) &&
+          !xplane_context::has_approach_freq_for(dest);
       char buf_cl[256];
       if (is_afis) {
         // Prefer airport name over ICAO in the spoken phrase.
@@ -8692,8 +8694,12 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
   // Timer only counts while in APPROACH_DESCENT (or no-STAR APPROACH_CONTACT)
   // so 60-s guards are relative to actual entry, not the waiting period.
   // Use dest ICAO for the towered check — nearest airport may be a phantom.
-  const bool dest_is_afis =
-      !xplane_context::has_ground_freq_for(current_flight_airport(ctx));
+  // AFIS = no ATC position at all: neither a Ground NOR an Approach frequency.
+  // A towered field with no separate Ground still has one of them (LOWI: TWR +
+  // APP, no Ground) and must NOT be treated as AFIS/Information.
+  const std::string dest_ap = current_flight_airport(ctx);
+  const bool dest_is_afis = !xplane_context::has_ground_freq_for(dest_ap) &&
+                            !xplane_context::has_approach_freq_for(dest_ap);
   if (state == AS::IFR_APPROACH_CONTACT &&
       !(s_assigned_star_name.empty() && s_approach_final_issued && dest_is_afis))
     return false;
@@ -8952,8 +8958,10 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           if (tower_mhz > 100.0f)
             is_info_svc = true;
         } else if (!xplane_context::has_ground_freq_for(
+                       current_flight_airport(ctx)) &&
+                   !xplane_context::has_approach_freq_for(
                        current_flight_airport(ctx))) {
-          is_info_svc = true;
+          is_info_svc = true; // has a Tower freq but no Ground AND no Approach = AFIS
         }
         s_approach_tower_handed_off = true;
         // Hold the alignment "confirm established" nag for a bit after the Tower
@@ -9300,10 +9308,13 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         if (tower_mhz > 100.0f)
           is_info_svc = true;
       } else if (!xplane_context::has_ground_freq_for(
+                     current_flight_airport(ctx)) &&
+                 !xplane_context::has_approach_freq_for(
                      current_flight_airport(ctx))) {
-        // No Ground freq for the destination → AFIS/Information service, not a
-        // real Tower controller. current_flight_airport() returns the bound
-        // destination here so a phantom airport near it can't corrupt the check.
+        // No Ground AND no Approach freq → AFIS/Information service, not a real
+        // Tower controller. A towered field with no separate Ground still has
+        // Approach (LOWI: TWR + APP). current_flight_airport() returns the bound
+        // destination so a phantom airport near it can't corrupt the check.
         is_info_svc = true;
       }
       if (out_text) {

@@ -274,6 +274,13 @@ float tower_mhz_for(const std::string &icao);
 // have a Tower-type freq but no Ground freq, e.g. LFQA 134.925 AFIS).
 bool has_ground_freq_for(const std::string &icao);
 
+// Returns true if the airport has an Approach (TRACON) frequency. Combined with
+// has_ground_freq_for to separate a real controlled field from an AFIS service:
+// AFIS fields (LFQA) have neither Ground nor Approach, while a towered field with
+// no separate Ground still has one of them (LOWI: TWR 120.100 + APP 119.275, no
+// Ground -> controlled, not AFIS).
+bool has_approach_freq_for(const std::string &icao);
+
 // Returns a ready-to-use phrase for the nearest taxiway to the given position:
 // "via Alpha", "via Bravo", ... or "to the apron" when no taxiway is found.
 // Used in the RUNWAY_VACATED_TOWER_ONLY template as {nearest_taxiway}.

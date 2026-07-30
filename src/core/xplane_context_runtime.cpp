@@ -2212,6 +2212,15 @@ bool has_ground_freq_for(const std::string &icao) {
   return it->second.has_ground();
 }
 
+bool has_approach_freq_for(const std::string &icao) {
+  if (!towered_cache_ready_ || icao.empty())
+    return false;
+  auto it = freq_cache_.find(icao);
+  if (it == freq_cache_.end())
+    return false;
+  return it->second.has(FrequencyType::APPROACH);
+}
+
 void set_standby_freq(uint32_t freq_khz) {
   XPLMDataRef dr = (ctx.active_com == 1) ? dr_com1_standby : dr_com2_standby;
   if (dr) {
