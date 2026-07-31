@@ -48,6 +48,7 @@ static XPLMDataRef dr_groundspeed = nullptr;
 static XPLMDataRef dr_indicated_airspeed = nullptr;
 static XPLMDataRef dr_vertical_speed = nullptr;
 static XPLMDataRef dr_heading_true = nullptr;
+static XPLMDataRef dr_heading_mag = nullptr;
 static XPLMDataRef dr_y_agl = nullptr;
 static XPLMDataRef dr_onground_any = nullptr;
 static XPLMDataRef dr_com1_freq = nullptr;
@@ -1216,6 +1217,7 @@ void init() {
       XPLMFindDataRef("sim/flightmodel/position/indicated_airspeed");
   dr_vertical_speed = XPLMFindDataRef("sim/flightmodel/position/vh_ind_fpm");
   dr_heading_true = XPLMFindDataRef("sim/flightmodel/position/psi");
+  dr_heading_mag = XPLMFindDataRef("sim/flightmodel/position/mag_psi");
   dr_y_agl = XPLMFindDataRef("sim/flightmodel/position/y_agl");
   dr_onground_any = XPLMFindDataRef("sim/flightmodel/failures/onground_any");
   dr_com1_freq =
@@ -1302,6 +1304,8 @@ void update() {
     ctx.vertical_speed_fpm = XPLMGetDataf(dr_vertical_speed);
   if (dr_heading_true)
     ctx.heading_true = XPLMGetDataf(dr_heading_true);
+  if (dr_heading_mag)
+    ctx.heading_mag = XPLMGetDataf(dr_heading_mag);
 
   if (dr_y_agl) {
     float y_agl = XPLMGetDataf(dr_y_agl);

@@ -122,6 +122,7 @@ struct XPlaneContext {
   float indicated_airspeed_kts = 0.0f;
   float vertical_speed_fpm = 0.0f;
   float heading_true = 0.0f;
+  float heading_mag = 0.0f;  // magnetic heading (mag_psi); magvar = heading_true - heading_mag
   float height_agl_ft = 0.0f;
   bool on_ground = true;
   float com1_freq_mhz = 0.0f;

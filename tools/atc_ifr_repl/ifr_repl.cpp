@@ -202,6 +202,7 @@ void cmd_set(std::string &callsign, const std::string &rest) {
       ctx.pressure_alt_ft = std::stof(value);
     } else if (field == "heading") {
       ctx.heading_true = std::stof(value);
+      ctx.heading_mag = ctx.heading_true; // harness: magvar=0 so spoken vectors == true
     } else if (field == "gs") {
       ctx.groundspeed_kts = std::stof(value);
     } else if (field == "vs") {

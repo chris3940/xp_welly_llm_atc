@@ -239,6 +239,10 @@ static std::string resolve_approach_iaf(const xplane_context::XPlaneContext &ctx
                                         const std::string &approach_designator,
                                         std::string *out_connector = nullptr);
 static void build_sid_route_table(const xplane_context::XPlaneContext &ctx); // departure half of the route table
+static std::string approach_clearance_phrase(
+    const xplane_context::XPlaneContext &ctx); // "RNAV Zulu approach runway 08"; defined near poll_approach
+static double routed_distance_to_fix_idx(const xplane_context::XPlaneContext &ctx,
+                                         int target_idx); // defined before check_next_fix
 static std::string controller_label_for(const airspace_db::Controller *ctrl); // defined near handoff helpers
 static std::string openair_sector_label(const std::string &name); // openair NAME -> label ("MARSEILLE CTA..." -> "Marseille")
 // Spoken facility name from an ICAO: airport name with any "/..." suffix dropped
@@ -375,6 +379,27 @@ static bool              s_approach_final_issued     = false; // final altitude 
 static bool              s_approach_cleared_issued   = false; // "cleared <appr> runway <rwy>" issued once at the IAF
 static bool              s_approach_tower_handed_off = false; // "contact Tower, report established"
 static cifp_reader::FafFix s_approach_faf;                   // FAF from CIFP + earth_fix.dat
+// --- Vector-to-intercept (radar vectors to final) --------------------------
+// Bypass-IAF radar vectoring: when the arrival needs a large turn/reversal to join
+// the final approach course (LOWI R08-Z: direct ELMEM heading ~270, final 082 ->
+// ~172 deg), ATC issues up to 3 SEPARATE vectors that turn the aircraft onto an
+// intercept heading (final +/- 30) INSTEAD of overflying the IAF + procedure turn
+// (user 2026-07-31: bypass, established+timer cadence, magnetic headings). The last
+// vector carries the approach clearance ("...maintain <alt> until established on the
+// final approach course, cleared <appr>") and latches s_approach_cleared_issued so
+// the normal cleared-at-IAF gate no-ops. Generic by (course, start ref) -> reusable
+// at the FAF later. [C. P. Potter]
+struct VecInterceptPlan {
+  std::vector<int> vectors;      // ordered MAGNETIC headings to speak
+  bool turn_left = false;
+  bool needed = false;
+  int  maintain_ft = 0;          // "maintain <alt> until established" = IAF platform alt
+  bool maintain_is_fl = false;   // IAF constraint expressed as FL (else feet/QNH)
+};
+static VecInterceptPlan s_vec_plan;
+static int   s_vec_step  = -1;    // -1 = not started; else index of the NEXT vector to issue
+static float s_vec_timer = 0.0f;  // seconds on the current vector (timer-fallback cadence)
+static bool  s_vec_done  = false; // whole sequence issued (latch, once per arrival)
 // Sector-boundary handoff during approach descent: tracks the enclosing
 // TRACON/CTR frequency baseline so a sector exit (e.g. leaving Melun TMA)
 // triggers a handoff to the destination INFO/Tower — same mechanism as
@@ -610,6 +635,10 @@ void reset() {
   s_approach_cleared_issued = false;
   s_approach_tower_handed_off = false;
   s_approach_faf = {};
+  s_vec_plan = {};
+  s_vec_step = -1;
+  s_vec_timer = 0.0f;
+  s_vec_done = false;
   s_last_cleared_route_idx    = -1;
   s_faf_route_idx             = -1;
   s_iaf_route_idx             = -1;
@@ -657,6 +686,10 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
+  s_vec_plan = {};
+  s_vec_step = -1;
+  s_vec_timer = 0.0f;
+  s_vec_done = false;
   s_tod_dist_nm = -1.0f;
   s_tod_alert_nm = -1.0f;
   s_speed_250_warned = false;
@@ -758,6 +791,10 @@ void training_jump_approach() {
   s_approach_cleared_issued = false;
   s_approach_tower_handed_off = false;
   s_approach_faf = {};
+  s_vec_plan = {};
+  s_vec_step = -1;
+  s_vec_timer = 0.0f;
+  s_vec_done = false;
   s_last_cleared_route_idx    = -1;
   s_faf_route_idx             = -1;
   s_iaf_route_idx             = -1;
@@ -7639,6 +7676,191 @@ static bool poll_connector_direct(const xplane_context::XPlaneContext &ctx,
   return true;
 }
 
+// --- Vector-to-intercept (radar vectors to final) --------------------------
+static double vec_norm360(double d) { while (d < 0.0) d += 360.0; while (d >= 360.0) d -= 360.0; return d; }
+static double vec_norm180(double d) { while (d < -180.0) d += 360.0; while (d > 180.0) d -= 360.0; return d; }
+
+// Split the turn from current_hdg onto an intercept of final_course (joining at
+// 30 deg) into up to max_vectors ~equal steps (~<=55 deg each). Turn direction =
+// shorter arc; the intercept heading sits 30 deg off the course on the side turned
+// FROM, so it converges rather than parallels. All angles MAGNETIC. needed=false
+// (empty) when already within 30 deg of the course. [C. P. Potter]
+static VecInterceptPlan plan_intercept_vectors(double current_hdg, double final_course,
+                                               int max_vectors = 3) {
+  VecInterceptPlan p;
+  const double to_course = vec_norm180(final_course - current_hdg);
+  if (std::fabs(to_course) <= 30.0) return p;
+  p.needed = true;
+  p.turn_left = (to_course < 0.0);
+  const int side = p.turn_left ? -1 : 1;
+  const int intercept =
+      static_cast<int>(std::lround(vec_norm360(final_course - side * 30.0)));
+  double total = vec_norm180(static_cast<double>(intercept) - current_hdg);
+  if ((side > 0 && total < 0.0) || (side < 0 && total > 0.0))
+    total += side * 360.0;
+  const int steps = std::min(max_vectors,
+      std::max(1, static_cast<int>(std::ceil(std::fabs(total) / 55.0))));
+  for (int i = 1; i <= steps; ++i)
+    p.vectors.push_back(static_cast<int>(
+        std::lround(vec_norm360(current_hdg + total * i / steps))));
+  p.vectors.back() = intercept;
+  return p;
+}
+
+// Bypass-IAF radar vectoring to the final approach course. Called from poll_arrival
+// AND poll_approach; one-shot per arrival (s_vec_done). CONTAINED by a large-turn
+// gate (kVectorMinTurnDeg): an arrival whose STAR already lines up with final turns
+// less than the gate -> immediate no-op, nothing changes (LFLP/LFMN/SALEV3P stay on
+// the normal cleared-at-IAF path). Only a genuine reversal (LOWI R08-Z: direct ELMEM
+// heading ~270 -> final 082) arms it. Issues up to 3 SEPARATE vectors (established-
+// on-previous OR timer cadence); the last carries "maintain <alt> until established
+// ... cleared <appr>". From the first vector it latches s_approach_cleared_issued so
+// the normal cleared-at-IAF gate never double-issues mid-sequence. [C. P. Potter]
+static constexpr double kVectorStartNm    = 12.0;  // begin when routed dist to IAF <= this
+static constexpr double kVectorMinTurnDeg = 100.0; // only vector a reversal; smaller -> own-nav
+static constexpr float  kVectorMaxSecs    = 15.0f; // timer cap between vectors
+static constexpr double kVectorEstabDeg   = 6.0;   // "established" tolerance on the issued heading
+static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, float dt,
+                                     std::string *out_text, bool *out_rb) {
+  if (s_vec_done || out_text == nullptr) return false;
+  if (s_assigned_dest_icao.empty() || s_assigned_approach_designator.empty() ||
+      s_approach_faf.ident.empty() || s_route_fixes.empty())
+    return false;
+
+  const double cur_mag = static_cast<double>(ctx.heading_mag);
+
+  if (s_vec_step < 0) {
+    // Locate the selected IAF; start once within kVectorStartNm (routed distance).
+    std::string sel_iaf = s_no_star_direct_iaf;
+    if (sel_iaf.empty())
+      sel_iaf = resolve_approach_iaf(ctx, s_assigned_star_name,
+                                     s_assigned_approach_designator);
+    if (sel_iaf.empty()) return false;
+    int iaf_idx = -1;
+    for (int i = std::max(0, s_route_fix_idx);
+         i < static_cast<int>(s_route_fixes.size()); ++i)
+      if (s_route_fixes[i].ident == sel_iaf) { iaf_idx = i; break; }
+    if (iaf_idx < 0) return false;
+    if (routed_distance_to_fix_idx(ctx, iaf_idx) > kVectorStartNm) return false;
+
+    // Reference course = the PUBLISHED HEADING OF THE APPROACH AT THE IAF = the true
+    // bearing from the IAF to the NEXT approach fix (the first leg out of the IAF),
+    // converted to MAGNETIC with the live magvar (heading_true-heading_mag). This is
+    // the reference for BOTH the reversal decision AND the intercept target -- the
+    // aircraft is vectored to rejoin the published path ALIGNED at the IAF. Correct
+    // for an RNP approach with curved RF legs: we never intercept a curved final, only
+    // the IAF entry heading (user 2026-07-31: "on arrive a l'inverse du heading publie
+    // de la RNAV a l'IAF"). LOWI R08-Z: ELMEM->WI749 ~087; arrival via RTT1B ~260 ->
+    // ~173 deg reversal -> vector; a runway-08 STAR (XEBI1B) reaches ELMEM ~aligned ->
+    // no reversal -> no vectoring (fly the procedure).
+    const RouteFix &iaf_fix = s_route_fixes[iaf_idx];
+    const RouteFix *nxt = nullptr;
+    for (int i = iaf_idx + 1; i < static_cast<int>(s_route_fixes.size()); ++i)
+      if (s_route_fixes[i].lat != 0.0 || s_route_fixes[i].lon != 0.0) {
+        nxt = &s_route_fixes[i];
+        break;
+      }
+    if (nxt == nullptr || (iaf_fix.lat == 0.0 && iaf_fix.lon == 0.0)) {
+      s_vec_done = true; // no next-fix geometry -> cannot derive the IAF course
+      return false;
+    }
+    const double course_true =
+        traffic_geometry::bearing_deg(iaf_fix.lat, iaf_fix.lon, nxt->lat, nxt->lon);
+    const double magvar = static_cast<double>(ctx.heading_true) -
+                          static_cast<double>(ctx.heading_mag);
+    const double final_mag = vec_norm360(course_true - magvar);
+
+    // LARGE turn only: vector ONLY when the arrival heading is ~opposite the IAF's
+    // published course (a reversal the procedure has no maneuver for). A modest turn
+    // means the aircraft reaches the IAF ~aligned -> fly the published procedure.
+    if (std::fabs(vec_norm180(final_mag - cur_mag)) < kVectorMinTurnDeg) {
+      s_vec_done = true; // no reversal here -> stand down for this arrival
+      return false;
+    }
+    s_vec_plan = plan_intercept_vectors(cur_mag, final_mag);
+    if (!s_vec_plan.needed || s_vec_plan.vectors.empty()) {
+      s_vec_done = true;
+      return false;
+    }
+    // Descend-to altitude = the IAF platform constraint (e.g. LOWI ELMEM +13000 ft
+    // QNH), NOT the en-route cleared FL. For a BLOCK ("B") alt.feet is the CEILING =
+    // the minimum-compliant descent (enter the block from above) -- user 2026-07-31
+    // "reste pour l'instant avec le plafond" (FAF-clamped-to-block is a future
+    // refinement). For at-or-above / at / at-or-below, alt.feet is the constraint
+    // value. Fall back to the FAF crossing altitude (feet) when the IAF has none.
+    if (iaf_fix.alt.feet > 0) {
+      s_vec_plan.maintain_ft    = iaf_fix.alt.feet;
+      s_vec_plan.maintain_is_fl = iaf_fix.alt.is_fl;
+    } else if (s_approach_faf.alt_ft > 0) {
+      s_vec_plan.maintain_ft    = s_approach_faf.alt_ft;
+      s_vec_plan.maintain_is_fl = false;
+    }
+    s_vec_step = 0;
+    s_vec_timer = 0.0f;
+    logging::info("IFR arrival: vector-to-intercept armed -- final %03d mag, turn %s, "
+                  "%d vectors", static_cast<int>(std::lround(final_mag)),
+                  s_vec_plan.turn_left ? "left" : "right",
+                  static_cast<int>(s_vec_plan.vectors.size()));
+  }
+
+  // Cadence: established on the previous vector (heading within kVectorEstabDeg) OR
+  // the timer cap elapsed. The first vector (step 0) fires immediately.
+  s_vec_timer += dt;
+  if (s_vec_step > 0) {
+    const double off =
+        std::fabs(vec_norm180(cur_mag - s_vec_plan.vectors[s_vec_step - 1]));
+    if (off > kVectorEstabDeg && s_vec_timer < kVectorMaxSecs)
+      return false;
+  }
+
+  // From the first vector on, the vectoring OWNS the approach clearance: latch the
+  // gate flag so poll_approach's cleared-at-IAF never double-issues mid-sequence.
+  s_approach_cleared_issued = true;
+
+  const int h = s_vec_plan.vectors[s_vec_step];
+  const bool last = (s_vec_step + 1 == static_cast<int>(s_vec_plan.vectors.size()));
+  const char *lr = s_vec_plan.turn_left ? "left" : "right";
+  const std::string &cs_ref = atc_state_machine::session_callsign();
+  const std::string &cs = cs_ref.empty() ? settings::pilot_callsign() : cs_ref;
+  char buf[224];
+  if (last) {
+    const int maintain_ft = s_vec_plan.maintain_ft;
+    const AltHint hint =
+        s_vec_plan.maintain_is_fl ? AltHint::FlightLevel : AltHint::Feet;
+    std::string alt_str =
+        maintain_ft > 0 ? format_alt_clearance(maintain_ft, hint, ctx.qnh_hpa,
+                                               ctx.transition_alt_ft)
+                        : std::string("present altitude");
+    // "descend to <alt>" when the aircraft is above the IAF platform (the normal
+    // case on a vectored arrival), else "maintain <alt>" (user 2026-07-31).
+    const char *alt_verb =
+        (maintain_ft > 0 &&
+         ctx.altitude_ft_msl > static_cast<float>(maintain_ft) + 200.0f)
+            ? "descend to"
+            : "maintain";
+    const std::string phrase = approach_clearance_phrase(ctx);
+    std::snprintf(buf, sizeof(buf),
+                  "%s, turn %s heading %03d, %s %s until established on the "
+                  "approach, cleared %s.",
+                  cs.c_str(), lr, h, alt_verb, alt_str.c_str(),
+                  phrase.empty() ? "the approach" : phrase.c_str());
+    s_approach_final_issued = true; // open the FAF/Tower handoff gate
+    s_vec_done = true;
+    s_vec_step = -1;
+    logging::info("IFR arrival: vector-to-intercept -- final vector %03d + cleared "
+                  "approach (%s %s)", h, alt_verb, alt_str.c_str());
+  } else {
+    std::snprintf(buf, sizeof(buf),
+                  "%s, turn %s heading %03d, vectors for the approach.",
+                  cs.c_str(), lr, h);
+    ++s_vec_step;
+  }
+  s_vec_timer = 0.0f;
+  *out_text = buf;
+  if (out_rb) *out_rb = false;
+  return true;
+}
+
 // Second step of a stepped high-cruise descent. build_descent_clearance capped
 // the first descent at FL200 and stashed the ultimate STAR-entry target in
 // s_descent_final_target_ft. Once the aircraft nears FL200 (within ~2000 ft),
@@ -7884,6 +8106,12 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
 
   // Connector-STAR "direct <IAF>" (FMS discontinuity at the filed-STAR terminus).
   if (poll_connector_direct(ctx, out_text, out_requires_readback))
+    return true;
+
+  // Bypass-IAF radar vectors to final (reversal onto the approach course, e.g. LOWI
+  // R08-Z). One-shot, large-turn-gated -> no-op for normal arrivals. Runs here in
+  // case the approach phase has not been entered yet at ~12 NM from the IAF.
+  if (poll_vector_to_intercept(ctx, dt, out_text, out_requires_readback))
     return true;
 
   s_arrival_timer += dt;
@@ -8807,6 +9035,10 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
     s_approach_cleared_issued = false;
     s_approach_tower_handed_off = false;
     s_approach_faf = {};
+    s_vec_plan = {};
+    s_vec_step = -1;
+    s_vec_timer = 0.0f;
+    s_vec_done = false;
     s_last_cleared_route_idx    = -1;
     s_faf_route_idx             = -1;
     s_iaf_route_idx             = -1;
@@ -9303,6 +9535,14 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
 
   s_approach_timer += dt;
 
+  // Bypass-IAF radar vectors to final (reversal onto the approach course, e.g. LOWI
+  // R08-Z). Must run BEFORE the cleared-at-IAF gate below: from its first vector it
+  // latches s_approach_cleared_issued so that gate no-ops, and the last vector emits
+  // "maintain <alt> until established ... cleared <appr>". One-shot, large-turn-gated
+  // -> immediate no-op for normal arrivals (the cleared-at-IAF gate then fires).
+  if (poll_vector_to_intercept(ctx, dt, out_text, out_requires_readback))
+    return true;
+
   // IFR_APPROACH_DESCENT: step through constrained waypoints.
   // Trigger: aircraft has descended within 10% above the constraint altitude
   // (or 3-minute fallback after previous clearance).
@@ -9367,9 +9607,17 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         const double gs = ctx.groundspeed_kts > 40.0f
                               ? static_cast<double>(ctx.groundspeed_kts)
                               : 120.0;
-        const double eta = traffic_geometry::distance_nm(
-                               ctx.latitude, ctx.longitude, iaf.lat, iaf.lon) /
-                           gs * 3600.0;
+        // ROUTED distance (fix-by-fix along the tracked route) to the IAF, not
+        // straight-line (user 2026-07-31: do it now, with the vectoring). On a
+        // dog-legged / looping STAR (SALEV3P) the great-circle acft->IAF under-reads
+        // -- COLLO sits ~2 NM from PIRUV straight-line but 4 fixes of loop away -- so
+        // the routed sum measures the real track remaining and stops the clearance
+        // firing early. routed_distance_to_fix_idx already falls back to straight-line
+        // when the IAF is behind the tracker, and skips backward-lagging fixes. The
+        // <=2-fix sequence guard below stays as belt-and-suspenders. Once the
+        // connector-direct jumps the tracker to ELMEM, the routed sum == direct, so
+        // LOWI gets "direct ELMEM" then the clearance a few NM later, as intended.
+        const double eta = routed_distance_to_fix_idx(ctx, iaf_idx) / gs * 3600.0;
         // On-terminal already gates this to the Chambery TMA; fire across a wider
         // window (<=180 s, ~10 NM) so it lands right after the terminal check-in
         // rather than waiting to ~3 NM (Option B). Still >=3 NM before the IAF.

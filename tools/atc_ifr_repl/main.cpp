@@ -53,6 +53,8 @@ bool has_ground_freq_for(const std::string &icao) { return !icao.empty(); }
 std::pair<double, double> airport_pos_for(const std::string &icao) {
   if (icao == "LFLP")
     return {45.929, 6.099};
+  if (icao == "LOWI")
+    return {47.260, 11.344};
   return {0.0, 0.0};
 }
 } // namespace xplane_context
