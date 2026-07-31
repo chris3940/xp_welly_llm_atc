@@ -196,8 +196,17 @@ static float s_descent_arrival_check_sec = 0.0f; // throttle DESCENT->ARRIVAL po
 static int  s_descent_final_target_ft = 0;    // ultimate STAR-entry target when stepped
 static int  s_descent_first_step_ft   = 0;    // FL of the first (TMA-top) step
 static bool s_descent_second_step_issued = false;
+// Connector-STAR "direct <IAF>": when the arrival uses a connector STAR NOT in the
+// pilot's FMS (LOWI NANI2A->RTT bridged to the R08-Z IAF ELMEM by RTT1B), ATC issues
+// an explicit "direct <IAF>" as the aircraft reaches the end of the FILED STAR (RTT),
+// well BEFORE the approach clearance (which comes near the IAF). One-shot. [C.P.Potter]
+static bool s_connector_direct_issued = false;
 static float s_arrival_timer        = 0.0f; // time spent in IFR_ARRIVAL (guards 50 NM fallback)
 static float s_enroute_approach_freq_mhz = 0.0f; // set by build_approach_handoff
+// TOD estimate for the IFR tab, updated each frame in poll_enroute (routed distance
+// to the STAR entry + the alert distance where the pre-TOD descent fires). -1 = N/A.
+static float s_tod_dist_nm  = -1.0f;
+static float s_tod_alert_nm = -1.0f;
 // Navlog altitude step tracking: index into OFP navlog for the next fix whose
 // planned alt_ft may require a climb or descent clearance during cruise.
 // Used only as a fallback when ofp.route_steps is empty (single-cruise-FL
@@ -544,6 +553,9 @@ void reset() {
   s_descent_final_target_ft = 0;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
+  s_connector_direct_issued = false;
+  s_tod_dist_nm = -1.0f;
+  s_tod_alert_nm = -1.0f;
   s_enroute_sector_freq_khz = 0;
   s_enroute_visited_sector_freqs.clear();
   s_enroute_sector_check_sec = 0.0f;
@@ -636,6 +648,23 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_qnh_stated = false;
   s_jump_no_enroute_descent = false;
   s_descent_timer = 0.0f;
+  // Statics NOT covered by the manual list above -- must be cleared so a jump (or a
+  // repeated jump) does not inherit stale values from a previous flight. TODO: the
+  // jump functions do a MANUAL partial reset; a full engine::reset() first would be
+  // more robust but currently also clears s_route_fixes that the en-route jump relies
+  // on -- revisit. (user 2026-07-30)
+  s_descent_final_target_ft = 0;
+  s_descent_first_step_ft = 0;
+  s_descent_second_step_issued = false;
+  s_connector_direct_issued = false;
+  s_tod_dist_nm = -1.0f;
+  s_tod_alert_nm = -1.0f;
+  s_speed_250_warned = false;
+  // No clearance was actually read back before a mid-flight jump: clear any pending
+  // readback inherited from a previous flight so the fresh jump starts clean. The FL
+  // "last clearance" IS set (s_enroute_cleared_alt_ft = cruise, above); speed has no
+  // restriction at cruise.
+  atc_state_machine::cancel_readback();
 
   // Hardening 1: seed the controller label from the enclosing CTR sector at
   // the aircraft's current 3-D position, so the first clearance is spoken by
@@ -6910,6 +6939,39 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
           }
         }
       }
+      // Too far from the TOD -> DENY and hold cruise (user 2026-07-30: > ~5 min from
+      // the routed TOD). A planned navlog step (matched above) is exempt -- it is a
+      // filed cruise step, not an early arrival descent. Uses the routed TOD estimate
+      // (s_tod_dist_nm/alert, refreshed each frame below); if not yet known, allow.
+      if (!issued_step) {
+        float min_to_tod = -1.0f;
+        if (s_tod_dist_nm > 0.0f && s_tod_alert_nm > 0.0f &&
+            ctx.groundspeed_kts > 40.0f)
+          min_to_tod =
+              (s_tod_dist_nm - s_tod_alert_nm) / ctx.groundspeed_kts * 60.0f;
+        if (min_to_tod > 5.0f) {
+          const int cur = s_enroute_cleared_alt_ft > 0 ? s_enroute_cleared_alt_ft
+                                                       : ctx.ifr_cruise_alt_ft;
+          if (out_text) {
+            char buf[144];
+            std::snprintf(
+                buf, sizeof(buf),
+                "%s, maintain flight level %d, expect descent in %d minutes.",
+                callsign.c_str(), round_to_fl(cur),
+                static_cast<int>(std::lround(min_to_tod)));
+            *out_text = buf;
+          }
+          logging::info("IFR en-route: descent request DENIED -- %.0f min from TOD, "
+                        "maintain cruise",
+                        static_cast<double>(min_to_tod));
+          rb(false);
+          return true;
+        }
+      }
+
+      // Near the TOD (or unknown), ATC gives the descent clearance -- it decides the
+      // FL, the pilot does not request a level. build_descent_clearance issues the
+      // arrival descent + STAR + expected approach.
       if (!issued_step) {
         if (build_descent_clearance(ctx, callsign, defaults, out_text)) {
           rb(true);
@@ -6958,23 +7020,42 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
         bool se_valid = find_star_entry(ctx.cifp_dir, ofp, se);
         if (se_valid && se.entry_alt_ft > 0 && se.entry_alt_ft < cruise_ref)
           descent_target = se.entry_alt_ft;
-        // alert = NM needed for 3-deg descent  +  clearance exchange buffer (gs/20)
-        float alt_component =
-            static_cast<float>(std::max(0, cruise_ref - descent_target)) / 300.0f;
+        // alert = NM to lose the altitude at the shared descent slope
+        // (kDescentSlopeFtPerNm = 265 ft/NM = 2.5 deg, matching the crossing/navlog-step
+        // calcs and a typical VNAV) + clearance-exchange buffer (gs/20). PROPORTIONAL to
+        // the altitude to lose: the cap is a sanity limit (160 NM), NOT a value that cuts
+        // a high-cruise descent -- the old 80 NM cap forced FL450->FL150 (~113 NM) into a
+        // ~3.5 deg steep descent (user 2026-07-31).
+        float alt_component = static_cast<float>(std::max(0, cruise_ref - descent_target)) /
+                              static_cast<float>(kDescentSlopeFtPerNm);
         tod_alt_component = alt_component;
         float spd_component = gs / 20.0f;
-        alert_nm = std::max(15.0f, std::min(80.0f, alt_component + spd_component));
+        alert_nm = std::max(15.0f, std::min(160.0f, alt_component + spd_component));
 
         if (se_valid && !se.star_name.empty()) {
-          // CIFP-confirmed STAR entry: measure to that fix.
-          dist_nm = traffic_geometry::distance_nm(
-              ctx.latitude, ctx.longitude, se.lat, se.lon);
+          // ROUTED (fix-by-fix) distance to the STAR entry -- sums every leg so a
+          // dogleg before the entry is counted, unlike great-circle which
+          // underestimates and fires the TOD late/steep. Reuses the SALEV3P
+          // routed helper; the STAR entry is a filed navlog fix so it is already in
+          // s_route_fixes en route. Falls back to great-circle if not found.
+          // (user 2026-07-30)
+          int se_idx = -1;
+          for (int i = 0; i < static_cast<int>(s_route_fixes.size()); ++i)
+            if (s_route_fixes[i].ident == se.ident) { se_idx = i; break; }
+          dist_nm = (se_idx >= 0)
+                        ? routed_distance_to_fix_idx(ctx, se_idx)
+                        : traffic_geometry::distance_nm(ctx.latitude,
+                                                        ctx.longitude, se.lat,
+                                                        se.lon);
         } else {
           // No CIFP match — measure to destination so prompt fires at correct time.
           const auto &dest_fix = ofp.navlog.back();
           dist_nm = traffic_geometry::distance_nm(
               ctx.latitude, ctx.longitude, dest_fix.lat, dest_fix.lon);
         }
+        // Expose the TOD estimate to the IFR tab (routed dist + alert distance).
+        s_tod_dist_nm = static_cast<float>(dist_nm);
+        s_tod_alert_nm = alert_nm;
       }
     }
 
@@ -7490,6 +7571,74 @@ static bool poll_descend_to_enter_tma(const xplane_context::XPlaneContext &ctx,
   return true;
 }
 
+// GENERAL RULE for ANY ATC direct-to: every route fix BETWEEN the aircraft and the
+// direct target is SKIPPED. Advance the route tracker to that fix so the intermediate
+// fixes sit BEHIND the index (removed from ATC tracking -- the DirectMonitor, the
+// ARRIVAL->APPROACH eta gate and routed_distance_to_fix_idx all measure to the target,
+// not a skipped fix), and cancel any pending readback (a direct supersedes it). The
+// en-route direct shortcut does the same inline (~6837). Shared so every direct-to
+// (en-route / connector IAF / no-STAR IAF) follows the rule identically. (user
+// 2026-07-31) [C. P. Potter]
+static void apply_direct_to(const std::string &fix_ident) {
+  for (int i = std::max(0, s_route_fix_idx);
+       i < static_cast<int>(s_route_fixes.size()); ++i)
+    if (s_route_fixes[i].ident == fix_ident) {
+      s_route_fix_idx = i;
+      break;
+    }
+  atc_state_machine::cancel_readback();
+}
+
+// GENERIC (not LOWI-specific): when the arrival uses a CONNECTOR STAR that is not in
+// the pilot's FMS -- the filed STAR terminates at a fix that is not an IAF of the
+// selected approach, and a linking STAR bridges it (resolve_approach_iaf's
+// out_connector, e.g. LOWI NANI2A->RTT + RTT1B: RTT->ELMEM) -- the FMS has a
+// discontinuity at the filed-STAR terminus. ATC issues an explicit "direct <IAF>"
+// as the aircraft reaches that terminus, so the pilot is guided across the gap
+// rather than left to deduce it. This is EARLY and SEPARATE from the approach
+// clearance (which still fires near the IAF via the eta gate). One-shot. Any airport
+// with the same STAR/approach gap benefits -- no per-field exception. [C. P. Potter]
+static bool poll_connector_direct(const xplane_context::XPlaneContext &ctx,
+                                  std::string *out_text, bool *out_rb) {
+  if (s_connector_direct_issued || ctx.cifp_dir.empty() ||
+      s_assigned_star_name.empty() || s_assigned_approach_designator.empty() ||
+      s_assigned_dest_icao.empty())
+    return false;
+  std::string connector;
+  const std::string iaf = resolve_approach_iaf(
+      ctx, s_assigned_star_name, s_assigned_approach_designator, &connector);
+  if (connector.empty() || iaf.empty())
+    return false; // no connector -> normal arrival, nothing to guide
+  // Connector-start = the terminating fix of the FILED STAR (RTT for NANI2A).
+  const std::string start = cifp_reader::star_last_fix(ctx.cifp_dir,
+                                                       s_assigned_dest_icao,
+                                                       s_assigned_star_name);
+  if (start.empty())
+    return false;
+  int start_idx = -1;
+  for (int i = 0; i < static_cast<int>(s_route_fixes.size()); ++i)
+    if (s_route_fixes[i].ident == start) { start_idx = i; break; }
+  if (start_idx < 0 || s_route_fix_idx < start_idx)
+    return false; // tracker not yet at the filed-STAR terminus
+  s_connector_direct_issued = true;
+  // Direct-to rule: skip the intermediate fixes (RTT) -- advance the tracker to the
+  // IAF so the DirectMonitor and the ARRIVAL->APPROACH eta gate measure to ELMEM, not
+  // stall at RTT (which looped the approach handoff, stuck at cruise -- LOWI
+  // 2026-07-31, the connector STAR RTT1B was never reflected in the tracker).
+  apply_direct_to(iaf);
+  if (out_text) {
+    const std::string &cs_ref = atc_state_machine::session_callsign();
+    const std::string &cs = cs_ref.empty() ? settings::pilot_callsign() : cs_ref;
+    *out_text = cs + ", direct " + iaf + ".";
+  }
+  if (out_rb)
+    *out_rb = false;
+  logging::info("IFR arrival: connector direct -> direct %s (filed-STAR end %s, "
+                "connector %s)",
+                iaf.c_str(), start.c_str(), connector.c_str());
+  return true;
+}
+
 // Second step of a stepped high-cruise descent. build_descent_clearance capped
 // the first descent at FL200 and stashed the ultimate STAR-entry target in
 // s_descent_final_target_ft. Once the aircraft nears FL200 (within ~2000 ft),
@@ -7552,6 +7701,10 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
   // Second step of a stepped high-cruise descent (FL200 -> STAR entry). Fires
   // once the aircraft nears the FL200 first step, so it keeps descending.
   if (poll_descent_second_step(ctx, out_text, out_requires_readback))
+    return true;
+
+  // Connector-STAR "direct <IAF>" (FMS discontinuity at the filed-STAR terminus).
+  if (poll_connector_direct(ctx, out_text, out_requires_readback))
     return true;
 
   // DirectMonitor (descent course): extend course enforcement into DESCENT (was
@@ -7727,6 +7880,10 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
   // ACC/FIR handoff continues in ARRIVAL (Milan -> France -> Marseille) until
   // the Approach TRACON handoff below takes over. Runs first.
   if (poll_acc_sector_change(ctx, dt, out_text, out_requires_readback))
+    return true;
+
+  // Connector-STAR "direct <IAF>" (FMS discontinuity at the filed-STAR terminus).
+  if (poll_connector_direct(ctx, out_text, out_requires_readback))
     return true;
 
   s_arrival_timer += dt;
@@ -9989,5 +10146,16 @@ void set_pending_handoff_freq(float mhz) {
 }
 
 float pending_handoff_freq() { return s_pending_handoff_freq_mhz; }
+
+bool tod_to_go(float groundspeed_kts, float *out_nm, float *out_min) {
+  if (s_tod_dist_nm < 0.0f || s_tod_alert_nm < 0.0f)
+    return false;
+  const float nm = s_tod_dist_nm - s_tod_alert_nm; // >0 before TOD, <=0 at/after
+  if (out_nm)
+    *out_nm = nm;
+  if (out_min)
+    *out_min = (groundspeed_kts > 40.0f) ? (nm / groundspeed_kts * 60.0f) : -1.0f;
+  return true;
+}
 
 } // namespace engine

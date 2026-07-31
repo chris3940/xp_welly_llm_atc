@@ -309,6 +309,13 @@ int current_speed_restriction_kt();
 void set_pending_handoff_freq(float mhz);
 float pending_handoff_freq();
 
+// Top-of-descent estimate for the IFR tab, updated while IFR en-route (before the
+// descent is issued). Routed (fix-by-fix) distance to the STAR entry minus the
+// alert distance where the pre-TOD descent fires. Returns false when not applicable
+// (not en-route / no OFP). *out_nm = NM still to run to the TOD (<=0 = at/after TOD);
+// *out_min = minutes at `groundspeed_kts` (-1 if groundspeed too low).
+bool tod_to_go(float groundspeed_kts, float *out_nm, float *out_min);
+
 // Ground runway-change poll: fires when the active runway changes while the
 // aircraft is on the ground and the dialog is in an active ground state
 // (GROUND_CONTACT, TAXI_CLEARED, TOWER_CONTACT, IFR_PREDEP_CLEARANCE,

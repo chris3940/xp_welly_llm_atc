@@ -2691,6 +2691,24 @@ static void draw_ifr_tab() {
   }
   ImGui::Spacing();
 
+  // Top-of-descent estimate (routed distance to the STAR entry) while en route.
+  {
+    const auto &ctx = xplane_context::get();
+    float tod_nm = 0.0f, tod_min = 0.0f;
+    if (engine::tod_to_go(ctx.groundspeed_kts, &tod_nm, &tod_min)) {
+      if (tod_nm > 0.5f) {
+        if (tod_min >= 0.0f)
+          ImGui::Text("Top of descent: %.0f NM (%.1f min)", tod_nm, tod_min);
+        else
+          ImGui::Text("Top of descent: %.0f NM", tod_nm);
+      } else {
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
+                           "Top of descent: reached / descending");
+      }
+      ImGui::Spacing();
+    }
+  }
+
   // SimBrief OFP section
   ImGui::SeparatorText("SimBrief OFP");
 
