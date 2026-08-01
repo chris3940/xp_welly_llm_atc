@@ -1861,6 +1861,75 @@ FafFix approach_faf(const std::string &cifp_dir,
 
 // ────────────────────────────────────────────────────────────────────────
 
+HoldSpec published_hold(const std::string &cifp_dir, const std::string &fix,
+                        int alt_ft) {
+  HoldSpec result;
+  if (cifp_dir.empty() || fix.empty())
+    return result;
+
+  // earth_hold.dat lives one directory above the CIFP directory (sibling of
+  // earth_fix.dat). Strip trailing separators then drop the last path component.
+  std::string navdata_dir = cifp_dir;
+  while (!navdata_dir.empty() &&
+         (navdata_dir.back() == '/' || navdata_dir.back() == '\\'))
+    navdata_dir.pop_back();
+  const auto slash     = navdata_dir.rfind('/');
+  const auto backslash = navdata_dir.rfind('\\');
+  const size_t last =
+      (slash != std::string::npos && backslash != std::string::npos)
+          ? std::max(slash, backslash)
+          : (slash != std::string::npos ? slash : backslash);
+  if (last != std::string::npos)
+    navdata_dir = navdata_dir.substr(0, last + 1);
+  else
+    navdata_dir += '/';
+
+  std::ifstream in(navdata_dir + "earth_hold.dat");
+  if (!in.good())
+    return result;
+
+  // Columns: FIX REGION TYPE ? INBOUND LEG_TIME LEG_DIST TURN MIN_ALT MAX_ALT SPEED
+  // Keep the FIRST matching row as a fallback; prefer a row whose [min,max] band
+  // contains alt_ft (max 0 = open ceiling).
+  // Header lines ("I", "1140 Version - ...") and the "99" footer fail the token
+  // parse below (non-numeric where a number is expected) or simply don't match
+  // `fix`, so they are skipped without a special case.
+  HoldSpec first_match;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty())
+      continue;
+    std::istringstream ss(line);
+    std::string ident, region, type, dummy4, turn;
+    double inbound = 0, leg_t = 0, leg_d = 0;
+    int minA = 0, maxA = 0, spd = 0;
+    if (!(ss >> ident >> region >> type >> dummy4 >> inbound >> leg_t >> leg_d >>
+          turn >> minA >> maxA >> spd))
+      continue;
+    if (ident != fix)
+      continue;
+    HoldSpec h;
+    h.fix               = ident;
+    h.inbound_course_deg = static_cast<int>(std::lround(inbound));
+    h.turn_right        = (turn != "L"); // L = left, anything else = right
+    h.leg_time_min      = leg_t;
+    h.leg_dist_nm       = leg_d;
+    h.min_alt_ft        = minA;
+    h.max_alt_ft        = maxA;
+    h.max_speed_kt      = spd;
+    h.valid             = true;
+    if (!first_match.valid)
+      first_match = h;
+    const bool in_band = (minA == 0 || alt_ft >= minA) &&
+                         (maxA == 0 || alt_ft <= maxA);
+    if (in_band)
+      return h; // best match for this altitude band
+  }
+  return first_match; // no band matched -> first row (valid=false if none)
+}
+
+// ────────────────────────────────────────────────────────────────────────
+
 void clear_cache() {
   std::lock_guard<std::mutex> lk(g_alt_cache_mutex);
   g_alt_cache.clear();

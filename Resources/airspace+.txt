@@ -1,0 +1,53 @@
+* xp_wellys_atc - additional airspace overlay (openair). Appended AFTER the base
+* Custom Data/airspaces/airspace.txt; overlay wins on same name. Cross-border
+* delegation polygons are matched by NAME: "DELEGATED BY <from> TO <ICAO>" ->
+* engine resolves the delegated ACC (ICAO) and takes its atc.dat frequency.
+* Two same-name entries coexist (the loader appends all overlay entries).
+*
+* --- DELEGATED BY LIMM TO LJLA (2 polygons) -----------------------------------
+* Parts of the Milan (LIMM) FIR/UIR delegated to Ljubljana (LJLA) control, along
+* the Italy/Slovenia/Austria border NW of the LJLA FIR. Missing from the openair
+* export (the app shows them via a separate FIR/delegation layer) so ATC never
+* handed off to Ljubljana there (Milan -> Glockner direct). Published chart gives
+* two bands for the SAME polygons: FL145-FL195 and FL195-FL660 -> one AC C volume
+* FL145->FL660 each. Vertices from the published chart (user-read, 2026-07-31).
+* NORTH piece: 21 vertices (~VEKEN corridor). SOUTH piece: 4 vertices (A-B-D-C,
+* D = the lower bevel). Together with the ACC visited-guard the aircraft stays on
+* Ljubljana across the small gap between them. [C. P. Potter]
+*
+* NORTH piece
+AC C
+AN DELEGATED BY LIMM TO LJLA
+AL FL145
+AH FL660
+DP 46:32:17.5 N 013:34:26.4 E
+DP 46:32:44.6 N 013:35:33.7 E
+DP 46:32:23.7 N 013:37:41.7 E
+DP 46:31:23.3 N 013:40:21.6 E
+DP 46:31:18.1 N 013:41:37.0 E
+DP 46:31:22.3 N 013:42:49.3 E
+DP 46:30:59.2 N 013:41:59.7 E
+DP 46:26:00.1 N 013:40:59.8 E
+DP 46:21:59.4 N 013:27:59.7 E
+DP 46:18:53.3 N 013:24:07.3 E
+DP 46:29:52.0 N 013:15:59.0 E
+DP 46:34:00.1 N 013:22:13.7 E
+DP 46:34:45.7 N 013:22:20.7 E
+DP 46:34:25.4 N 013:23:49.1 E
+DP 46:34:18.8 N 013:24:35.0 E
+DP 46:33:41.1 N 013:24:26.7 E
+DP 46:33:25.6 N 013:28:29.0 E
+DP 46:33:33.9 N 013:28:35.0 E
+DP 46:33:58.2 N 013:30:14.9 E
+DP 46:32:54.8 N 013:30:54.1 E
+DP 46:33:05.9 N 013:33:45.9 E
+*
+* SOUTH piece (A-B-D-C, D = lower bevel)
+AC C
+AN DELEGATED BY LIMM TO LJLA
+AL FL145
+AH FL660
+DP 46:12:26.8 N 013:28:49.0 E
+DP 46:10:59.3 N 013:39:58.0 E
+DP 46:04:58.1 N 013:33:58.7 E
+DP 46:05:22.7 N 013:33:24.2 E

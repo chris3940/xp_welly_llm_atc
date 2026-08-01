@@ -400,6 +400,19 @@ static VecInterceptPlan s_vec_plan;
 static int   s_vec_step  = -1;    // -1 = not started; else index of the NEXT vector to issue
 static float s_vec_timer = 0.0f;  // seconds on the current vector (timer-fallback cadence)
 static bool  s_vec_done  = false; // whole sequence issued (latch, once per arrival)
+
+// --- Published hold at a STAR fix (random, once per arrival) ----------------
+// As the aircraft nears a STAR fix that has a PUBLISHED hold (earth_hold.dat), ATC
+// may (random roll, once per arrival) issue "hold at <FIX> as published, maintain
+// <alt>, expect further clearance in <N> minutes" -- for flow/sequencing. After a
+// random 2-6 min the pilot is cleared to continue. Altitude is clamped to the hold's
+// published [min,max] band. STAR fixes ONLY for now (user 2026-07-31). Generic by
+// fix -> reusable at an IAF / en-route fix later. [C. P. Potter]
+static cifp_reader::HoldSpec s_hold;
+static int   s_hold_state    = 0;     // 0 = none, 1 = holding, 2 = done (released)
+static float s_hold_secs     = 0.0f;  // seconds elapsed since entering the hold
+static float s_hold_efc_secs = 0.0f;  // random hold duration (expect-further-clearance)
+static int   s_hold_alt_ft   = 0;     // altitude held at (clamped to the band)
 // Sector-boundary handoff during approach descent: tracks the enclosing
 // TRACON/CTR frequency baseline so a sector exit (e.g. leaving Melun TMA)
 // triggers a handoff to the destination INFO/Tower — same mechanism as
@@ -639,6 +652,11 @@ void reset() {
   s_vec_step = -1;
   s_vec_timer = 0.0f;
   s_vec_done = false;
+  s_hold = {};
+  s_hold_state = 0;
+  s_hold_secs = 0.0f;
+  s_hold_efc_secs = 0.0f;
+  s_hold_alt_ft = 0;
   s_last_cleared_route_idx    = -1;
   s_faf_route_idx             = -1;
   s_iaf_route_idx             = -1;
@@ -690,6 +708,11 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_vec_step = -1;
   s_vec_timer = 0.0f;
   s_vec_done = false;
+  s_hold = {};
+  s_hold_state = 0;
+  s_hold_secs = 0.0f;
+  s_hold_efc_secs = 0.0f;
+  s_hold_alt_ft = 0;
   s_tod_dist_nm = -1.0f;
   s_tod_alert_nm = -1.0f;
   s_speed_250_warned = false;
@@ -795,6 +818,11 @@ void training_jump_approach() {
   s_vec_step = -1;
   s_vec_timer = 0.0f;
   s_vec_done = false;
+  s_hold = {};
+  s_hold_state = 0;
+  s_hold_secs = 0.0f;
+  s_hold_efc_secs = 0.0f;
+  s_hold_alt_ft = 0;
   s_last_cleared_route_idx    = -1;
   s_faf_route_idx             = -1;
   s_iaf_route_idx             = -1;
@@ -7352,10 +7380,25 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
   // terminal TMA, defer -- otherwise poll_acc_sector_change ALSO resolves that TMA
   // and the pilot gets a DOUBLE "contact <dest> Approach" (LFLP 2026-07-18).
   // Non-destination TMAs (Geneva) and enroute ACC sectors are unaffected
-  // (on_destination_terminal is false there). Guarded on dest known so the helper's
-  // permissive true-when-unknown never disables enroute handoffs.
+  // (on_destination_terminal is false there).
+  // NOTE (build 165): on_destination_terminal() returns its permissive "can't tell
+  // -> true" whenever the aircraft is ABOVE every openair sector (acft_tma empty).
+  // At enroute high altitude that WRONGLY DEFERRED this whole sector-change -- incl.
+  // the atc.dat FIR/CTR fallback below -- so no enroute handoff fired until the
+  // aircraft descended into an openair volume: Milan->Vienna (LOWI arrival) never
+  // fired at ~FL270 and only Glockner (openair CTA) took over at FL245; same cause
+  // as the pre-overlay Slovenia miss at KUBUD FL397 (real vols 2026-07-31). Only
+  // honour the dest-terminal defer when the aircraft is ACTUALLY inside an openair
+  // volume -- otherwise it is enroute (above all TMAs) and the fallback must run.
+  // [C. P. Potter]
+  bool acft_in_openair_vol = false;
+  if (openair_db::ready()) {
+    const auto acft_enc = openair_db::find_enclosing(
+        ctx.latitude, ctx.longitude, openair_alt(ctx));
+    acft_in_openair_vol = !acft_enc.name.empty();
+  }
   if (!s_assigned_dest_icao.empty() && openair_db::ready() &&
-      on_destination_terminal(ctx))
+      acft_in_openair_vol && on_destination_terminal(ctx))
     return false;
   // Latch: once the destination APPROACH handoff has fired, the aircraft is
   // committed to the approach controller -- never hand it back to an ACC/enroute
@@ -7410,6 +7453,10 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
     // (LFMN 2026-07-20). Falls back to the atc.dat label when openair is absent.
     const std::string oa_label = openair_sector_label(enc.name);
     new_label = oa_label.empty() ? controller_label_for(best) : oa_label;
+    logging::info("[acc] atc.dat fallback resolved %s (%s) %.3f MHz "
+                  "(openair empty at %.4f,%.4f %dft)",
+                  new_label.c_str(), best->facility_id.c_str(), new_mhz,
+                  ctx.latitude, ctx.longitude, openair_alt(ctx));
   }
   if (new_mhz <= 0.0f)
     return false;
@@ -7482,6 +7529,16 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
 bool poll_altitude_compliance(const xplane_context::XPlaneContext &ctx, float dt,
                               std::string *out_text) {
   using AS = atc_state_machine::ATCState;
+  // Suppressed while the aircraft is in a published hold: the pilot is flying the
+  // pattern (altitude excursions in the turns are normal, and the hold altitude may
+  // differ from the descent-profile target), NOT tracking a descent -- so a "confirm
+  // climbing/descending <level>" nag here is spurious (user 2026-07-31). Resumes on
+  // release (s_hold_state != 1).
+  if (s_hold_state == 1) {
+    s_alt_comp_arm_sec = 0.0f; // re-arm the grace timer for after the hold
+    s_alt_comp_sent = false;
+    return false;
+  }
   const AS st = atc_state_machine::get_state();
   if (st != AS::IFR_DESCENT && st != AS::IFR_ARRIVAL &&
       st != AS::IFR_APPROACH_CONTACT && st != AS::IFR_APPROACH_DESCENT) {
@@ -7722,10 +7779,23 @@ static constexpr float  kVectorMaxSecs    = 15.0f; // timer cap between vectors
 static constexpr double kVectorEstabDeg   = 6.0;   // "established" tolerance on the issued heading
 static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, float dt,
                                      std::string *out_text, bool *out_rb) {
+  // Diagnostic: log WHY the vector-to-intercept declines to arm, once per changed
+  // reason (never armed on the LOWI R08-Z ELMEM reversal in-sim -- real vol
+  // 2026-07-31/08-01 -- and poll_vector logged nothing, so the bail cause was
+  // invisible). Throttled by reason string so it never spams. [C. P. Potter]
+  static std::string s_vec_diag;
+  auto bail = [&](const std::string &why) {
+    if (s_vec_diag != why) {
+      s_vec_diag = why;
+      logging::info("IFR vector: not arming -- %s", why.c_str());
+    }
+    return false;
+  };
+
   if (s_vec_done || out_text == nullptr) return false;
   if (s_assigned_dest_icao.empty() || s_assigned_approach_designator.empty() ||
       s_approach_faf.ident.empty() || s_route_fixes.empty())
-    return false;
+    return bail("precondition (dest/designator/faf/route empty)");
 
   const double cur_mag = static_cast<double>(ctx.heading_mag);
 
@@ -7735,13 +7805,17 @@ static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, f
     if (sel_iaf.empty())
       sel_iaf = resolve_approach_iaf(ctx, s_assigned_star_name,
                                      s_assigned_approach_designator);
-    if (sel_iaf.empty()) return false;
+    if (sel_iaf.empty()) return bail("no IAF resolved");
     int iaf_idx = -1;
     for (int i = std::max(0, s_route_fix_idx);
          i < static_cast<int>(s_route_fixes.size()); ++i)
       if (s_route_fixes[i].ident == sel_iaf) { iaf_idx = i; break; }
-    if (iaf_idx < 0) return false;
-    if (routed_distance_to_fix_idx(ctx, iaf_idx) > kVectorStartNm) return false;
+    if (iaf_idx < 0)
+      return bail("IAF " + sel_iaf + " not ahead of tracker (idx " +
+                  std::to_string(s_route_fix_idx) + ")");
+    const double iaf_d = routed_distance_to_fix_idx(ctx, iaf_idx);
+    if (iaf_d > kVectorStartNm)
+      return bail("IAF " + sel_iaf + " far (" + std::to_string((int)iaf_d) + " NM)");
 
     // Reference course = the PUBLISHED HEADING OF THE APPROACH AT THE IAF = the true
     // bearing from the IAF to the NEXT approach fix (the first leg out of the IAF),
@@ -7762,6 +7836,7 @@ static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, f
       }
     if (nxt == nullptr || (iaf_fix.lat == 0.0 && iaf_fix.lon == 0.0)) {
       s_vec_done = true; // no next-fix geometry -> cannot derive the IAF course
+      bail("no next-fix geometry after IAF " + sel_iaf);
       return false;
     }
     const double course_true =
@@ -7773,8 +7848,13 @@ static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, f
     // LARGE turn only: vector ONLY when the arrival heading is ~opposite the IAF's
     // published course (a reversal the procedure has no maneuver for). A modest turn
     // means the aircraft reaches the IAF ~aligned -> fly the published procedure.
-    if (std::fabs(vec_norm180(final_mag - cur_mag)) < kVectorMinTurnDeg) {
+    const double turn = std::fabs(vec_norm180(final_mag - cur_mag));
+    if (turn < kVectorMinTurnDeg) {
       s_vec_done = true; // no reversal here -> stand down for this arrival
+      bail("turn " + std::to_string((int)turn) + " deg < " +
+           std::to_string((int)kVectorMinTurnDeg) + " (final " +
+           std::to_string((int)final_mag) + " vs hdg " +
+           std::to_string((int)cur_mag) + ")");
       return false;
     }
     s_vec_plan = plan_intercept_vectors(cur_mag, final_mag);
@@ -7861,6 +7941,111 @@ static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, f
   return true;
 }
 
+// Published hold at a STAR fix (random, once per arrival). See the static block near
+// s_hold. Runs in poll_descent + poll_arrival. STAR fixes ONLY: the eligible fix must
+// belong to the assigned STAR (star_waypoints) and not be an approach-proc fix. When
+// holding, ticks the random EFC timer and clears the aircraft to continue. Altitude is
+// clamped to the published [min,max] band. [C. P. Potter]
+static constexpr double kHoldArmNm     = 8.0;    // roll when within this (routed) of the fix
+static constexpr int    kHoldChancePct = 100;    // probability %  (TEST=100; realistic ~35)
+static constexpr float  kHoldMinSecs   = 180.0f; // 3 min (user 2026-08-01: +1 min)
+static constexpr float  kHoldMaxSecs   = 420.0f; // 7 min
+static bool poll_hold(const xplane_context::XPlaneContext &ctx, float dt,
+                      std::string *out_text, bool *out_rb) {
+  if (out_text == nullptr) return false;
+
+  // HOLDING: wait out the random EFC, then clear the aircraft to continue.
+  if (s_hold_state == 1) {
+    s_hold_secs += dt;
+    if (s_hold_secs < s_hold_efc_secs) {
+      // Still in the pattern: OWN the frame (empty text) so NO other clearance --
+      // approach, vectoring, step-down -- fires while the aircraft is holding. The
+      // caller returns true; the consumer skips the empty text (no message, no state
+      // advance). poll_hold runs first in poll_descent/arrival/approach.
+      out_text->clear();
+      if (out_rb) *out_rb = false;
+      return true;
+    }
+    s_hold_state = 2; // released -> one hold per arrival
+    const std::string &cs_ref = atc_state_machine::session_callsign();
+    const std::string &cs = cs_ref.empty() ? settings::pilot_callsign() : cs_ref;
+    *out_text = cs + ", cleared to leave the hold, continue via the arrival.";
+    if (out_rb) *out_rb = false;
+    logging::info("IFR hold: released at %s after %.0f s", s_hold.fix.c_str(),
+                  static_cast<double>(s_hold_secs));
+    return true;
+  }
+  if (s_hold_state != 0) return false; // 2 = already held/decided this arrival
+
+  if (s_assigned_dest_icao.empty() || s_assigned_star_name.empty() ||
+      ctx.cifp_dir.empty() || s_route_fixes.empty())
+    return false;
+
+  // STAR fixes only: the eligible fix must belong to the assigned STAR.
+  const auto star_wps = cifp_reader::star_waypoints(
+      ctx.cifp_dir, s_assigned_dest_icao, s_assigned_star_name, /*constrained_only=*/false);
+  if (star_wps.empty()) return false;
+  std::unordered_set<std::string> star_idents;
+  for (const auto &w : star_wps) star_idents.insert(w.ident);
+
+  // First STAR fix ahead of the tracker, within the arm distance, that has a
+  // published hold. One decision per arrival: roll at that fix and latch either way.
+  for (int i = std::max(0, s_route_fix_idx);
+       i < static_cast<int>(s_route_fixes.size()); ++i) {
+    const RouteFix &f = s_route_fixes[i];
+    if (f.is_approach_proc) continue;                             // out of STAR scope
+    if (star_idents.find(f.ident) == star_idents.end()) continue; // not a STAR fix
+    if (routed_distance_to_fix_idx(ctx, i) > kHoldArmNm)
+      return false; // nearest STAR fix ahead not reached yet
+    cifp_reader::HoldSpec h = cifp_reader::published_hold(
+        ctx.cifp_dir, f.ident, static_cast<int>(ctx.altitude_ft_msl));
+    if (!h.valid) continue; // no published hold at this fix -> consider the next one
+
+    static bool s_hold_seeded = false;
+    if (!s_hold_seeded) {
+      std::srand(static_cast<unsigned>(std::time(nullptr)));
+      s_hold_seeded = true;
+    }
+    const bool hit = (std::rand() % 100) < kHoldChancePct;
+    s_hold_state = hit ? 1 : 2; // latch -> one decision per arrival
+    if (!hit) {
+      logging::info("IFR hold: no hold this arrival (roll miss at %s)", f.ident.c_str());
+      return false;
+    }
+    s_hold = h;
+    s_hold_secs = 0.0f;
+    s_hold_efc_secs =
+        kHoldMinSecs +
+        static_cast<float>(std::rand() %
+                           static_cast<int>(kHoldMaxSecs - kHoldMinSecs + 1));
+    // Altitude = current cleared level, clamped to the published [min,max] band.
+    int alt = s_enroute_cleared_alt_ft > 0 ? s_enroute_cleared_alt_ft
+                                           : static_cast<int>(ctx.altitude_ft_msl);
+    if (h.min_alt_ft > 0 && alt < h.min_alt_ft) alt = h.min_alt_ft;
+    if (h.max_alt_ft > 0 && alt > h.max_alt_ft) alt = h.max_alt_ft;
+    s_hold_alt_ft = alt;
+    const std::string &cs_ref = atc_state_machine::session_callsign();
+    const std::string &cs = cs_ref.empty() ? settings::pilot_callsign() : cs_ref;
+    const std::string alt_str = format_alt_clearance(
+        alt, AltHint::Auto, ctx.qnh_hpa, ctx.transition_alt_ft);
+    const int efc_min =
+        std::max(1, static_cast<int>(std::lround(s_hold_efc_secs / 60.0f)));
+    char buf[224];
+    std::snprintf(buf, sizeof(buf),
+                  "%s, hold at %s as published, maintain %s, expect further clearance "
+                  "in %d minutes.",
+                  cs.c_str(), f.ident.c_str(), alt_str.c_str(), efc_min);
+    *out_text = buf;
+    if (out_rb) *out_rb = false;
+    logging::info("IFR hold: HOLD at %s as published (inbound %03d, %s turns, %.1f min "
+                  "legs), maintain %d ft, EFC %d min", f.ident.c_str(),
+                  h.inbound_course_deg, h.turn_right ? "right" : "left",
+                  h.leg_time_min, alt, efc_min);
+    return true;
+  }
+  return false;
+}
+
 // Second step of a stepped high-cruise descent. build_descent_clearance capped
 // the first descent at FL200 and stashed the ultimate STAR-entry target in
 // s_descent_final_target_ft. Once the aircraft nears FL200 (within ~2000 ft),
@@ -7923,6 +8108,11 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
   // Second step of a stepped high-cruise descent (FL200 -> STAR entry). Fires
   // once the aircraft nears the FL200 first step, so it keeps descending.
   if (poll_descent_second_step(ctx, out_text, out_requires_readback))
+    return true;
+
+  // Published hold at a STAR fix (random, once per arrival). Runs early so it owns the
+  // frame while holding (issues the hold, ticks the EFC, then the release).
+  if (poll_hold(ctx, dt, out_text, out_requires_readback))
     return true;
 
   // Connector-STAR "direct <IAF>" (FMS discontinuity at the filed-STAR terminus).
@@ -8102,6 +8292,11 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
   // ACC/FIR handoff continues in ARRIVAL (Milan -> France -> Marseille) until
   // the Approach TRACON handoff below takes over. Runs first.
   if (poll_acc_sector_change(ctx, dt, out_text, out_requires_readback))
+    return true;
+
+  // Published hold at a STAR fix (random, once per arrival). Runs early so it owns the
+  // frame while holding.
+  if (poll_hold(ctx, dt, out_text, out_requires_readback))
     return true;
 
   // Connector-STAR "direct <IAF>" (FMS discontinuity at the filed-STAR terminus).
@@ -8913,6 +9108,15 @@ std::string poll_route_tracker(const xplane_context::XPlaneContext &ctx) {
   if (s_route_fixes.empty()) return {};
   if (s_route_fix_idx >= static_cast<int>(s_route_fixes.size())) return {};
 
+  // FREEZE the walker while actively holding: the aircraft is orbiting the hold fix,
+  // so the proximity check (and worse, the 2 NM RESYNC scan below) would keep advancing
+  // s_route_fix_idx past the hold fix -- and could even jump forward to a later fix that
+  // an orbit leg wanders within 2 NM of. On the real vol (LIMF->LOWI 2026-07-31) the
+  // tracker logged "near NANIT, next: RTT" mid-hold. Pin the route position until the
+  // hold is released (s_hold_state != 1); the arrival then resumes cleanly from the hold
+  // fix. [C. P. Potter]
+  if (s_hold_state == 1) return {};
+
   // Rate-limit to 1 Hz — distance check is not time-critical.
   // atc_session::update() is called at ~60 FPS; we accumulate real dt.
   // Use a simple flight-loop frame counter approximation via a static.
@@ -9039,6 +9243,15 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
     s_vec_step = -1;
     s_vec_timer = 0.0f;
     s_vec_done = false;
+    // NOTE: the hold statics (s_hold*) are deliberately NOT reset here. The hold is
+    // descent/arrival-scoped -- armed by poll_hold from poll_descent/poll_arrival, i.e.
+    // BEFORE the aircraft ever reaches IFR_APPROACH_*. Because this not-in-approach
+    // branch runs every frame while still in descent, resetting the hold here wiped the
+    // s_hold_state==1 latch each frame, so poll_hold re-armed and re-issued the hold call
+    // repeatedly with a freshly-rolled EFC (real vol LIMF->LOWI 2026-07-31: 7x "hold at
+    // NANIT ... EFC 5/5/4/4/2/4/3 min"). The hold is reset by the three per-flight paths
+    // (engine::reset, training_jump_enroute, training_jump_approach) and self-latches to
+    // state 2 (done) on release -- one hold per arrival. [C. P. Potter]
     s_last_cleared_route_idx    = -1;
     s_faf_route_idx             = -1;
     s_iaf_route_idx             = -1;
@@ -9295,29 +9508,23 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           // HOLD. Stay-only by design -- a CTA can only SUPPRESS the spurious
           // handoff, never create one -- so LFLP's TMA-driven forward handoffs
           // (Geneva->Chambery, SALEV3P) are provably unchanged.
-          const airspace_db::Controller *lc = nullptr;
-          const airspace_db::Controller *oc =
-              resolve_terminal_ctrl(inner.name, &lc);
-          // SCOPE GUARD (SALEV3P cross-check 2026-07-19): fire ONLY for the
-          // DESTINATION's own stacked CTA. NICE CTA SECTOR 2 -> NICE APPROACH ->
-          // facility LFMN == dest, so a stay is correct. But an ENROUTE CTA can
-          // also be the innermost volume mid-descent -- verified on the LIMF->LFLP
-          // SALEV3P arrival, MILAN CTA ZONE 9/24 is innermost at 8-17 kft (facility
-          // LIMx != dest). Requiring oc->facility_id == dest excludes every enroute
-          // CTA, so enroute/ACC handoffs (Milan->Geneva->Chambery) are provably
-          // untouched -- the CTA branch can only keep the aircraft on the arrival
-          // field's OWN approach when it is briefly above that field's TMA.
-          if (oc && !oc->freqs_khz.empty() &&
-              !s_assigned_dest_icao.empty() &&
-              oc->facility_id == s_assigned_dest_icao) {
-            const uint32_t of = oc->freqs_khz.front();
-            const float acom =
-                (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
-            const uint32_t acom_khz =
-                static_cast<uint32_t>(std::lround(acom * 1000.0f));
-            if (of == s_approach_sector_freq_khz || of == acom_khz)
-              stay = true;
-          }
+          // STAY unconditionally (build 165). This block runs ONLY in
+          // IFR_APPROACH_DESCENT, where the aircraft is committed to the dest
+          // approach -- forward terminal handoffs go through the TMA branch above
+          // (force_forward, e.g. Geneva->Chambery), never here. So an innermost CTA
+          // can only SUPPRESS a spurious handoff, never create one: the dest's own
+          // stacked CTA (LFMN NICE CTA SECTOR 2), the SALEV3P backward-to-Marseille
+          // case, AND an ENROUTE CTA the approach path re-crosses -- the LOWI R08-Z
+          // RTT->ELMEM reversal into VIENNA CTA C (real vol 2026-07-31: a spurious
+          // "contact Vienna" mid-approach that then suppressed the vectoring +
+          // cleared-approach). The earlier dest-facility restriction let that enroute
+          // CTA through; keying on APPROACH_DESCENT (this block's gate) instead makes
+          // the broad stay safe -- enroute Milan->Geneva->Chambery handoffs live in
+          // poll_acc_sector_change / the TMA branch, not this CTA branch. Replaces the
+          // s_enroute_approach_handoff_issued latch attempt (that flag is reset every
+          // frame by poll_enroute outside CRUISE, so it was always false here).
+          // [C. P. Potter]
+          stay = true;
         }
       }
       if (stay)
@@ -9534,6 +9741,11 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
     return false;
 
   s_approach_timer += dt;
+
+  // Published hold at a STAR fix (random, once per arrival). Safe here: only fires on
+  // a STAR fix still AHEAD of the tracker (past the STAR -> no eligible fix -> no-op).
+  if (poll_hold(ctx, dt, out_text, out_requires_readback))
+    return true;
 
   // Bypass-IAF radar vectors to final (reversal onto the approach course, e.g. LOWI
   // R08-Z). Must run BEFORE the cleared-at-IAF gate below: from its first vector it
@@ -9777,6 +9989,25 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       logging::debug("[approach] at_faf suppressed (IAF not yet passed): "
                      "route_idx=%d iaf_idx=%d faf_idx=%d",
                      s_route_fix_idx, s_iaf_route_idx, s_faf_route_idx);
+      at_faf = false;
+    }
+
+    // Cannot hand off to Tower before the aircraft has flown the approach fixes
+    // PRECEDING the FAF (user 2026-08-01: "on ne peut pas passer sur la tour avant
+    // d'etre passe sur les points precedant le FAF"). Two ways the distance-only
+    // at_faf trips early on a reversal: (a) the vector-to-intercept is still turning
+    // the aircraft onto the approach -- it is NOT established; (b) LOWI R08-Z, where
+    // the IAF (ELMEM) sits WEST of the FAF (WI749), so an east->west arrival crosses
+    // WI749 BEFORE reaching ELMEM (real vol 2026-07-31/08-01: Tower fired at the IAF
+    // and killed the vectoring). Suppress the Tower handoff while vectoring, and until
+    // the route tracker has actually passed the IAF. [C. P. Potter]
+    if (at_faf && s_vec_step >= 0 && !s_vec_done) {
+      logging::info("[approach] Tower handoff held -- vector-to-intercept in progress");
+      at_faf = false;
+    }
+    if (at_faf && s_iaf_route_idx >= 0 && s_route_fix_idx <= s_iaf_route_idx) {
+      logging::info("[approach] Tower handoff held -- IAF not yet passed "
+                    "(route_idx=%d iaf_idx=%d)", s_route_fix_idx, s_iaf_route_idx);
       at_faf = false;
     }
 

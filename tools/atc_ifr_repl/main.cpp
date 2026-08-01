@@ -131,11 +131,20 @@ int main(int argc, char **argv) {
     if (const char *v = std::getenv("XP_AIRSPACE")) ap = v;
     else if (const char *home = std::getenv("HOME"))
       ap = std::string(home) + "/X-Plane 12/Custom Data/airspaces/airspace.txt";
+    // Hand-maintained overlay (delegation polygons, e.g. LIMM->LJLA) so the REPL
+    // exercises the same enroute handoffs as the deployed plugin. Env override
+    // XP_AIRSPACE_OVERLAY; default = the installed plugin's Resources/airspace+.txt.
+    std::string ov;
+    if (const char *v = std::getenv("XP_AIRSPACE_OVERLAY")) ov = v;
+    else if (const char *home = std::getenv("HOME"))
+      ov = std::string(home) +
+           "/X-Plane 12/Resources/plugins/xp_wellys_atc/Resources/airspace+.txt";
     if (!ap.empty()) {
-      openair_db::init(ap); // async loader thread
+      openair_db::init(ap, ov); // async loader thread
       for (int i = 0; i < 300 && !openair_db::ready(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100)); // wait <=30s
-      std::fprintf(stderr, "openair: %s (ready=%d)\n", ap.c_str(),
+      std::fprintf(stderr, "openair: %s (+overlay %s) (ready=%d)\n", ap.c_str(),
+                   ov.empty() ? "(none)" : ov.c_str(),
                    openair_db::ready() ? 1 : 0);
     }
   }

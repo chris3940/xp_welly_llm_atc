@@ -15,7 +15,7 @@
         "SID climb shaping (local procedure not in CIFP/airspace). ordered, first whose match_fixes contains the SID exit fix wins; empty/absent match_fixes = any SID from this field. {match_fixes?, hold_alt_ft, release_nm?, step2_alt_ft?}. OVERRIDES the generic data-driven step1 / 10-NM hold. omitted fields keep the generic default (e.g. step2 stays the generic FL140). still clamped: step1 never below a SID fix min; step2 skipped if >= cruise."
       ],
       "sid_initial_climb": [
-        "SID 'Initial climb clearance' altitude from the CHART (NOT in the CIFP -- Jeppesen annotation only). ordered, first whose match_sids contains the assigned SID name wins; empty/absent match_sids = any SID from this field. {match_sids?, alt_ft?, jet_alt_ft?, prop_alt_ft?}. alt_ft = single value for all types; jet_alt_ft/prop_alt_ft = optional per-category split (jets vs turboprops), takes precedence over alt_ft when the aircraft category matches. This is the altitude ATC clears the aircraft to in the pre-departure clearance ('climb FLxxx'), distinct from the transition altitude."
+        "SID 'Initial climb clearance' altitude from the published chart (NOT in the CIFP -- chart annotation only). ordered, first whose match_sids contains the assigned SID name wins; empty/absent match_sids = any SID from this field. {match_sids?, alt_ft?, jet_alt_ft?, prop_alt_ft?}. alt_ft = single value for all types; jet_alt_ft/prop_alt_ft = optional per-category split (jets vs turboprops), takes precedence over alt_ft when the aircraft category matches. This is the altitude ATC clears the aircraft to in the pre-departure clearance ('climb FLxxx'), distinct from the transition altitude."
       ]
     }
   },
@@ -30,8 +30,8 @@
       { "runway": "04L", "designator": "R04LZ" }
     ],
     "sid_initial_climb": [
-      { "match_sids": ["BASI8X"], "jet_alt_ft": 10000, "prop_alt_ft": 7000, "_comment": "BASIP 8X RNAV DEP (rwys 22L/R). Jeppesen 'Initial climb clearance: JETS FL100 / PROP FL070'. NOT in CIFP LFMN.dat (BASI8X fixes carry no FL100/FL070 constraint -- verified). Trans alt 5000." },
-      { "match_sids": ["PERU8A"], "alt_ft": 13000, "_comment": "PERUS 8A RNAV DEP (rwys 04L/R). Jeppesen 'Initial climb clearance: FL130' (single value, no jet/prop split shown; RFL above FL135). NOT in CIFP. ORKAC has MAX 210 KT / FL070 but that is a fix constraint, separate. Trans alt 5000." }
+      { "match_sids": ["BASI8X"], "jet_alt_ft": 10000, "prop_alt_ft": 7000, "_comment": "BASIP 8X RNAV DEP (rwys 22L/R). Published initial climb clearance: JETS FL100 / PROP FL070. NOT in CIFP LFMN.dat (BASI8X fixes carry no FL100/FL070 constraint -- verified). Trans alt 5000." },
+      { "match_sids": ["PERU8A"], "alt_ft": 13000, "_comment": "PERUS 8A RNAV DEP (rwys 04L/R). Published initial climb clearance: FL130 (single value, no jet/prop split; RFL above FL135). NOT in CIFP. ORKAC has MAX 210 KT / FL070 but that is a fix constraint, separate. Trans alt 5000." }
     ]
   },
 

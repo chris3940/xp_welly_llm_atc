@@ -306,6 +306,30 @@ struct FafFix {
   int    final_track_deg = 0; // final approach track in degrees (0 = unknown)
 };
 
+// A PUBLISHED holding pattern at a fix, from earth_hold.dat (one directory above
+// cifp_dir, sibling of earth_fix.dat). Columns:
+//   FIX REGION TYPE ? INBOUND LEG_TIME LEG_DIST TURN MIN_ALT MAX_ALT SPEED
+// e.g. "NANIT LO ENRT 11 155.0 1.0 0.0 L 10000 0 170". A fix may have several rows
+// (different altitude bands); published_hold() picks the band containing alt_ft.
+struct HoldSpec {
+  std::string fix;
+  int    inbound_course_deg = 0; // MAGNETIC inbound course to the fix
+  bool   turn_right = true;      // R (standard) / L (non-standard)
+  double leg_time_min = 0.0;     // leg by time (0 -> distance-based)
+  double leg_dist_nm  = 0.0;     // leg by distance (0 -> time-based)
+  int    min_alt_ft = 0;         // hold altitude band (0 = none)
+  int    max_alt_ft = 0;         // 0 = open (no ceiling)
+  int    max_speed_kt = 0;       // published max holding speed (0 = none)
+  bool   valid = false;
+};
+
+// Look up the published hold at `fix` from earth_hold.dat, choosing the row whose
+// [min,max] altitude band contains alt_ft (max 0 = open). Falls back to the first
+// row for the fix when no band matches. Returns valid=false when the fix has no
+// published hold. Reusable at any fix (STAR fix, IAF, en-route). [C. P. Potter]
+HoldSpec published_hold(const std::string &cifp_dir, const std::string &fix,
+                        int alt_ft);
+
 // Finds the FAF for the given approach designator (e.g. "I04LY") by:
 //   1. Reading the final-approach segment (route_type "I") of the CIFP file
 //      for icao and finding the waypoint whose description 4th char is 'F'.

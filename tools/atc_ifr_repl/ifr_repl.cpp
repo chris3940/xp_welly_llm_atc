@@ -25,6 +25,7 @@
 #include "atc/flight_phase.hpp"
 #include "atc/intent_parser.hpp"
 #include "core/xplane_context.hpp"
+#include "data/airspace_db.hpp"
 #include "data/cifp_reader.hpp"
 #include "data/openair_db.hpp"
 #include "data/simbrief_ofp.hpp"
@@ -101,12 +102,33 @@ void advance_position(xplane_context::XPlaneContext &ctx, float nm) {
   ctx.longitude += nm * std::sin(hdg_rad) / (60.0 * std::cos(lat_rad));
 }
 
+// Populate ctx.enclosing_airspaces from the real atc.dat controller index at the
+// current position -- exactly like xplane_context_runtime.cpp does each frame in the
+// plugin (pressure alt above the transition altitude, MSL below). Without this the
+// REPL cannot exercise the enroute/approach SECTOR-CHANGE handoffs
+// (poll_acc_sector_change / poll_approach's sector block), which iterate
+// enclosing_airspaces -- so those handoffs were previously untestable headless and
+// bugs (Vienna hysteresis, high-altitude defer) only surfaced in-sim. [C. P. Potter]
+void refresh_enclosing(xplane_context::XPlaneContext &ctx) {
+  if (!airspace_db::enabled()) {
+    ctx.enclosing_airspaces.clear();
+    return;
+  }
+  const int trans_alt_ft = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+  const float airspace_alt_ft =
+      (ctx.altitude_ft_msl > static_cast<float>(trans_alt_ft)) ? ctx.pressure_alt_ft
+                                                               : ctx.altitude_ft_msl;
+  ctx.enclosing_airspaces =
+      airspace_db::find_enclosing(ctx.latitude, ctx.longitude, airspace_alt_ft);
+}
+
 // ── Poll helper: run all frame-driven IFR polls for one dt step ──────
 
 void run_polls(float dt) {
   auto &ctx = xplane_context::g_cli_ctx;
   g_now_secs += dt;
   ctx.now_secs = g_now_secs;
+  refresh_enclosing(ctx); // atc.dat enclosing sectors, as the plugin does per frame
 
   auto emit = [](const char *tag, const std::string &text) {
     if (!text.empty())
@@ -391,8 +413,22 @@ void cmd_jump(const std::string &rest) {
     std::printf("Jumped to IFR_PREDEP_CLEARANCE\n");
     std::printf("STATE : %s\n",
                 atc_state_machine::state_name(atc_state_machine::get_state()));
+  } else if (sub == "descent") {
+    // Enroute jump (sets dest / controller baseline / cleared alt) then force the
+    // DESCENT state so poll_acc_sector_change runs (it fires only in DESCENT/ARRIVAL,
+    // never CRUISE). Lets the harness replay enroute SECTOR handoffs without a full
+    // TOD/STAR setup. [C. P. Potter]
+    int alt = 0;
+    try { alt = std::stoi(arg); } catch (...) {}
+    if (alt <= 0) { std::fprintf(stderr, "Usage: jump descent <alt_ft>\n"); return; }
+    engine::training_jump_enroute(alt);
+    atc_state_machine::set_state(atc_state_machine::ATCState::IFR_DESCENT);
+    std::printf("Jumped to IFR_DESCENT at %d ft (dest=%s)\n", alt,
+                xplane_context::g_cli_ctx.ifr_destination.c_str());
+    std::printf("STATE : %s\n",
+                atc_state_machine::state_name(atc_state_machine::get_state()));
   } else {
-    std::fprintf(stderr, "Usage: jump approach|enroute <alt_ft>|predep\n");
+    std::fprintf(stderr, "Usage: jump approach|enroute <alt_ft>|descent <alt_ft>|predep\n");
   }
 }
 
@@ -407,6 +443,38 @@ void cmd_enc() {
   for (const auto &e : all)
     std::printf("   enclosing: '%s' class=%d floor=%d ceil=%d\n", e.name.c_str(),
                 static_cast<int>(e.ac_class), e.floor_ft, e.ceiling_ft);
+  // atc.dat enclosing controllers -- what the SECTOR-CHANGE handoffs actually see.
+  refresh_enclosing(ctx);
+  std::printf("atc.dat enclosing (%zu):\n", ctx.enclosing_airspaces.size());
+  for (const auto *c : ctx.enclosing_airspaces) {
+    if (!c) continue;
+    std::printf("   CTR '%s' (%s) role=%d freqs=%zu\n", c->name.c_str(),
+                c->facility_id.c_str(), static_cast<int>(c->role),
+                c->freqs_khz.size());
+  }
+}
+
+// Replay a single track point: teleport to lat/lon/alt, refresh enclosing, run one
+// poll step. Scriptable line-by-line to walk a real flight path and watch the
+// handoff chain fire. Usage: track <lat> <lon> <alt_ft> [dt]
+void cmd_track(const std::string &rest) {
+  std::istringstream iss(rest);
+  double lat, lon;
+  float alt;
+  float dt = 30.0f;
+  if (!(iss >> lat >> lon >> alt)) {
+    std::fprintf(stderr, "Usage: track <lat> <lon> <alt_ft> [dt]\n");
+    return;
+  }
+  iss >> dt;
+  auto &ctx = xplane_context::g_cli_ctx;
+  ctx.latitude = lat;
+  ctx.longitude = lon;
+  ctx.altitude_ft_msl = alt;
+  ctx.pressure_alt_ft = alt;
+  run_polls(dt);
+  std::printf("[t=%.0fs] @ %.4f,%.4f %.0fft  freq COM1=%.3f\n",
+              g_now_secs, lat, lon, alt, ctx.com1_freq_mhz);
 }
 
 void cmd_state(const std::string &callsign) {
@@ -456,6 +524,7 @@ void cmd_help() {
       "  poll [dt=5]             Advance dt seconds and run all IFR polls\n"
       "  fly <nm>                Fly NM at current hdg/gs/vs, polling every 5 s\n"
       "  goto <FIXNAME>          Teleport aircraft to fix (earth_fix.dat lookup)\n"
+      "  track <lat> <lon> <alt> [dt]  Teleport to a point + run one poll (sector handoffs)\n"
       "  jump approach           Jump to IFR_APPROACH_CONTACT state\n"
       "  jump enroute <alt_ft>   Jump to IFR_ENROUTE_CRUISE state\n"
       "  jump predep             Jump to IFR_PREDEP_CLEARANCE state\n"
@@ -549,6 +618,8 @@ int run(xplane_context::XPlaneContext ctx, std::string callsign) {
       cmd_jump(rest);
     else if (cmd == "enc")
       cmd_enc();
+    else if (cmd == "track")
+      cmd_track(rest);
     else if (cmd == "state")
       cmd_state(callsign);
     else if (cmd == "reset")
