@@ -12,6 +12,7 @@
 #ifndef OPENAIR_DB_HPP
 #define OPENAIR_DB_HPP
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,7 @@ struct AirspaceEntry {
   AirspaceClass ac_class = AirspaceClass::OTHER;
   int floor_ft = 0;
   int ceiling_ft = 0;
+  std::uint32_t freq_khz = 0; // openair "AF" field (overlay-carried controller freq)
 };
 
 // Parse CTR / TMA / CTA / FIR / UIR entries from an OpenAir-format airspace

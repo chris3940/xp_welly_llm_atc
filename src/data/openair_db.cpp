@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +32,7 @@ struct Entry {
   AirspaceClass ac_class = AirspaceClass::OTHER;
   int floor_ft = 0;
   int ceiling_ft = 0;
+  std::uint32_t freq_khz = 0; // openair "AF" field (overlay-carried controller freq)
   // Bounding box for fast rejection.
   double bbox_min_lat = 0.0, bbox_max_lat = 0.0;
   double bbox_min_lon = 0.0, bbox_max_lon = 0.0;
@@ -183,6 +185,15 @@ static std::vector<Entry> load_file(const std::string &path) {
       cur.ceiling_ft = parse_alt(line + 3);
     } else if (std::strncmp(line, "AL ", 3) == 0) {
       cur.floor_ft = parse_alt(line + 3);
+    } else if (std::strncmp(line, "AF ", 3) == 0) {
+      // "AF <MHz>" -- controller frequency carried by the overlay (e.g.
+      // "AF 125.155"). Standard OpenAir has no ATC-freq field; this lets a
+      // hand-maintained sector (missing from the vendor export, e.g. LYON TMA
+      // SECTOR 2.2) name its OWN frequency so resolve_sector_controller speaks it
+      // directly instead of falling back to the atc.dat nearest ACC (Marseille).
+      // [C. P. Potter]
+      cur.freq_khz = static_cast<std::uint32_t>(
+          std::lround(std::atof(line + 3) * 1000.0));
     } else if (std::strncmp(line, "DP ", 3) == 0) {
       double lat, lon;
       if (parse_dp(line + 3, lat, lon)) {
@@ -286,7 +297,8 @@ AirspaceEntry find_enclosing(double lat, double lon, int alt_ft) {
   }
   if (!best)
     return {};
-  return {best->name, best->ac_class, best->floor_ft, best->ceiling_ft};
+  return {best->name, best->ac_class, best->floor_ft, best->ceiling_ft,
+          best->freq_khz};
 }
 
 std::vector<AirspaceEntry> find_all_enclosing(double lat, double lon,
@@ -305,7 +317,7 @@ std::vector<AirspaceEntry> find_all_enclosing(double lat, double lon,
       continue;
     if (!point_in_polygon(lat, lon, e.polygon))
       continue;
-    result.push_back({e.name, e.ac_class, e.floor_ft, e.ceiling_ft});
+    result.push_back({e.name, e.ac_class, e.floor_ft, e.ceiling_ft, e.freq_khz});
   }
   return result;
 }

@@ -51,3 +51,28 @@ DP 46:12:26.8 N 013:28:49.0 E
 DP 46:10:59.3 N 013:39:58.0 E
 DP 46:04:58.1 N 013:33:58.7 E
 DP 46:05:22.7 N 013:33:24.2 E
+
+* --- LYON TMA SECTOR 2.2 (missing from the Navigraph openair export) -----------
+* The vendor export ships LYON TMA SECTOR 1, 2.1, 3, 4, 5, 6, 6.1, 7, 8, 10, 11 --
+* but NOT 2.2 (nor 9). SECTOR 2.2 (class E, 3500 ft - FL065) covers the Rhone
+* valley / Valence departure area SOUTH of the other Lyon TMA sectors (they start
+* ~45:16N). Without it, openair was empty at ~45:02N / 5300 ft on a LFLU departure
+* and the enroute resolver fell back to the atc.dat nearest ACC -> MARSEILLE (wrong;
+* the aircraft is still with LYON). Vertices user-read from the published chart
+* (2026-08-03). "AF" pins the controller frequency to Lyon Approach 125.155 -- the
+* same freq the IFR clearance was delivered on, so entering this sector is a SILENT
+* handoff (already on freq) and the aircraft simply stays with Lyon. atc.dat's
+* generic LYON tracon is 123.70/131.315, which would instead move the pilot off the
+* clearance freq. [C. P. Potter]
+AC E
+AN LYON TMA SECTOR 2.2
+AL 3500 MSL
+AH FL065 MSL
+AF 125.155
+DP 44:40:00.0 N 004:44:41.9 E
+DP 44:40:00.1 N 004:57:39.7 E
+DP 44:48:03.8 N 005:00:21.9 E
+DP 45:04:01.2 N 005:08:01.4 E
+DP 45:11:10.3 N 005:08:01.9 E
+DP 45:12:49.5 N 004:53:11.2 E
+DP 44:55:26.5 N 004:42:53.4 E

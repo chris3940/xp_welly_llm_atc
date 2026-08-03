@@ -5770,6 +5770,26 @@ static bool resolve_sector_controller(const openair_db::AirspaceEntry &enc,
                                       bool terminal, std::string *out_label,
                                       float *out_mhz,
                                       std::uint32_t avoid_freq_khz) {
+  // Overlay-carried frequency (openair "AF" field): a hand-maintained sector that
+  // names its OWN frequency (e.g. LYON TMA SECTOR 2.2 missing from the vendor export)
+  // resolves directly to that freq + a spoken label from its name -- no atc.dat
+  // nearest-ACC lookup, which was mis-resolving the gap to Marseille (user
+  // 2026-08-03). [C. P. Potter]
+  if (enc.freq_khz > 0) {
+    if (avoid_freq_khz != 0 && enc.freq_khz == avoid_freq_khz)
+      return false;
+    const std::string place = openair_sector_label(enc.name);
+    if (!place.empty()) {
+      const bool terminal_class =
+          enc.ac_class == openair_db::AirspaceClass::TMA ||
+          enc.ac_class == openair_db::AirspaceClass::CTR;
+      if (out_label)
+        *out_label = place + (terminal_class ? " Approach" : " Control");
+      if (out_mhz)
+        *out_mhz = static_cast<float>(enc.freq_khz) / 1000.0f;
+      return true;
+    }
+  }
   switch (enc.ac_class) {
   case openair_db::AirspaceClass::TMA:
   case openair_db::AirspaceClass::CTR:
