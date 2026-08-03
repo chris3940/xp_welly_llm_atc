@@ -35,6 +35,7 @@
 #include "data/simbrief_ofp.hpp"
 #include "persistence/model_manifest.hpp"
 #include "persistence/model_paths.hpp"
+#include "data/airport_overrides.hpp"
 #include "persistence/settings.hpp"
 
 #include <XPLMProcessing.h>
@@ -162,6 +163,28 @@ static std::string current_tower_label() {
   const std::string &ctrl = engine::current_controller_label();
   if (!ctrl.empty())
     return ctrl;
+  // AFIS DEPARTURE field (airport+.json "info" role): pre-departure on the ground the
+  // engine has no controller label yet, so the generic "<airport> ATC" fallback
+  // mislabelled the Lyon clearance "Valence ATC" (user 2026-08-03). Label the speaker
+  // by the ACTIVE FREQUENCY instead -- on the overlying ACC's "delivery" freq (the
+  // IFR clearance) -> "Lyon Control"; on the AFIS "info" freq (ground info) ->
+  // "Valence Information". [C. P. Potter]
+  {
+    const auto &cxa = xplane_context::get();
+    if (cxa.on_ground) {
+      std::string info_n, del_n;
+      float info_f = 0.0f, del_f = 0.0f;
+      const std::string &icao = cxa.nearest_airport_id;
+      if (airport_overrides::controller(icao, "info", &info_n, &info_f)) {
+        const float acom =
+            cxa.active_com == 2 ? cxa.com2_freq_mhz : cxa.com1_freq_mhz;
+        if (airport_overrides::controller(icao, "delivery", &del_n, &del_f) &&
+            del_f > 100.0f && std::fabs(acom - del_f) < 0.02f)
+          return del_n; // on the ACC freq -> clearance controller (e.g. Lyon Control)
+        return info_n;  // AFIS field -> Valence Information
+      }
+    }
+  }
   // For IFR airborne states: use the pending departure label stored when the
   // takeoff clearance was issued. This covers the window between takeoff and
   // when poll_departure_handoff() fires and activates the label officially.
@@ -2080,6 +2103,33 @@ void update() {
       speak_response(enroute_text, role, 1.0f);
       if (enroute_rb)
         atc_state_machine::arm_readback(enroute_text);
+      return; // one tower utterance per frame
+    }
+
+    // STAR-clearance safety net: a SHORT flight can reach the STAR entry before
+    // cruise/TOD (LFLU->LFLP FL140 / ROMAM in the climb), so poll_enroute (cruise
+    // only) never issues the arrival clearance. Issue it a bit before the STAR
+    // entry if it hasn't been. Runs after poll_enroute so the normal TOD flow wins
+    // in cruise; in the climb poll_enroute no-ops and this takes over.
+    std::string starnet_text;
+    bool starnet_rb = false;
+    if (engine::poll_star_clearance_safety_net(ctx_now, &starnet_text,
+                                               &starnet_rb) &&
+        !starnet_text.empty()) {
+      float active_freq = (ctx_now.active_com == 1) ? ctx_now.com1_freq_mhz
+                                                    : ctx_now.com2_freq_mhz;
+      char freq_str[16];
+      std::snprintf(freq_str, sizeof(freq_str), "%.3f", active_freq);
+      push_transcript(TranscriptEntry{
+          static_cast<double>(XPLMGetElapsedTime()),
+          TranscriptKind::Tower,
+          starnet_text,
+          freq_str,
+          engine::current_controller_label(),
+      });
+      speak_response(starnet_text, role_for_frequency(ctx_now), 1.0f);
+      if (starnet_rb)
+        atc_state_machine::arm_readback(starnet_text);
       return; // one tower utterance per frame
     }
 

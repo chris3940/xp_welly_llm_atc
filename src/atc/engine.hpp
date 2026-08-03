@@ -212,6 +212,14 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
                   std::string *out_text,
                   bool *out_requires_readback = nullptr);
 
+// STAR-clearance safety net: issues the arrival clearance (STAR + expect-approach)
+// a bit BEFORE the STAR entry when it was never issued -- for SHORT flights that
+// reach the STAR entry in the climb before cruise/TOD (LFLU->LFLP FL140 / ROMAM).
+// Runs in IFR_RADAR_CONTACT + IFR_ENROUTE_CRUISE only.
+bool poll_star_clearance_safety_net(const xplane_context::XPlaneContext &ctx,
+                                    std::string *out_text,
+                                    bool *out_requires_readback = nullptr);
+
 // IFR descent phase (IFR_DESCENT state): advances to IFR_ARRIVAL when the
 // aircraft reaches the STAR entry fix. Runs after build_descent_clearance fires.
 // Altitude-compliance courtesy prompt for IFR_DESCENT + IFR_ARRIVAL (the gap

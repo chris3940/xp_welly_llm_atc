@@ -5539,6 +5539,56 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   return true;
 }
 
+// STAR-clearance safety net. The arrival clearance (STAR + expect-approach, via
+// build_descent_clearance) is normally issued around the TOD inside poll_enroute,
+// which runs ONLY in IFR_ENROUTE_CRUISE. On a SHORT flight the aircraft can reach
+// the STAR entry BEFORE cruise/TOD -- LFLU->LFLP filed FL140 crosses ROMAM (the
+// ROMA3P entry) still in the CLIMB (IFR_RADAR_CONTACT) -- so the clearance is never
+// issued at the STAR. This fires build_descent_clearance a bit BEFORE the STAR
+// entry when it hasn't been issued yet (user rule 2026-08-03). build_descent_clearance
+// itself picks the altitude: if the STAR profile is below the current cleared level
+// it says "descend FLxxx" (stop the climb -- correct for the compressed profile),
+// else routing only. Runs ONLY in IFR_RADAR_CONTACT (climb) + IFR_ENROUTE_CRUISE
+// (backup); IFR_DESCENT is entered BY build_descent_clearance so the clearance is
+// already given there -- no descent scenario (user confirmed). [C. P. Potter]
+static constexpr float kStarClearanceLeadNm =
+    12.0f; // issue the arrival clearance this far before the STAR entry
+bool poll_star_clearance_safety_net(const xplane_context::XPlaneContext &ctx,
+                                    std::string *out_text,
+                                    bool *out_requires_readback) {
+  using AS = atc_state_machine::ATCState;
+  const AS st = atc_state_machine::get_state();
+  if (st != AS::IFR_RADAR_CONTACT && st != AS::IFR_ENROUTE_CRUISE)
+    return false;
+  if (s_enroute_descent_issued || !s_assigned_star_name.empty())
+    return false; // arrival clearance already issued
+  if (ctx.cifp_dir.empty())
+    return false;
+  auto ofp = simbrief_ofp::get();
+  if (!ofp.valid)
+    return false;
+  StarEntryResult se;
+  if (!find_star_entry(ctx.cifp_dir, ofp, se) ||
+      (se.lat == 0.0 && se.lon == 0.0))
+    return false; // no STAR (AFIS / no-STAR arrival) -> nothing to pre-empt
+  const double d = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
+                                                 se.lat, se.lon);
+  if (d > kStarClearanceLeadNm)
+    return false; // not yet within lead distance of the STAR entry
+  const std::string &cs = atc_state_machine::session_callsign();
+  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const auto &defaults = flight_phase::get_ifr_defaults();
+  logging::info("IFR STAR safety-net: %.0f NM from STAR entry %s, arrival clearance "
+                "not yet issued -> issuing now (state %s)",
+                d, se.ident.c_str(), atc_state_machine::state_name(st));
+  if (build_descent_clearance(ctx, callsign, defaults, out_text)) {
+    if (out_requires_readback)
+      *out_requires_readback = true;
+    return true;
+  }
+  return false;
+}
+
 // Issue the Approach frequency handoff ("contact Nice Approach on X.XXX").
 // Called when the aircraft crosses the CTA/TMA boundary during descent.
 // Sets s_enroute_approach_handoff_issued and transitions to IFR_APPROACH_CONTACT.
