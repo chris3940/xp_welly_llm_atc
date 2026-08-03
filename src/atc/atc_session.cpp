@@ -1911,6 +1911,37 @@ void update() {
   if (atis_cooldown_ > 0.0f)
     atis_cooldown_ -= dt;
 
+  // AFIS departure safety net: at an AFIS field (airport+.json "info" role) NOBODY
+  // issues a takeoff clearance -- the ACC gave the IFR clearance on the ground
+  // (state IFR_CLEARED) and the pilot self-announces the departure. So the state
+  // never advances past IFR_CLEARED, and when the aircraft becomes airborne the
+  // generic on_airborne auto-correction reverts IFR_CLEARED -> IDLE (real vol LFLU
+  // 2026-08-03): the subsequent airborne "passing 3000, direct ROMAM" check-in then
+  // hits the LM in state IDLE, is mis-classified INITIAL_CALL_INBOUND, and answered
+  // "contact Tower for inbound" (there is NO Tower at an AFIS field). Advance
+  // IFR_CLEARED -> IFR_DEPARTURE_CLEARED the moment we lift off at an AFIS field --
+  // exactly what a takeoff clearance would have done at a towered field -- so the
+  // on_airborne revert can't fire and the departure level-report / Lyon handoff
+  // machinery takes over. Runs BEFORE check_auto_correction so it wins the frame.
+  // [C. P. Potter]
+  {
+    const auto &cx = xplane_context::get();
+    if (!cx.on_ground &&
+        atc_state_machine::get_state() ==
+            atc_state_machine::ATCState::IFR_CLEARED) {
+      std::string n;
+      float f = 0.0f;
+      if (airport_overrides::controller(cx.nearest_airport_id, "info", &n, &f)) {
+        atc_state_machine::set_state(
+            atc_state_machine::ATCState::IFR_DEPARTURE_CLEARED);
+        logging::info("AFIS departure: airborne from IFR_CLEARED at %s (AFIS) -> "
+                      "IFR_DEPARTURE_CLEARED (no takeoff clearance at AFIS; prevents "
+                      "on_airborne revert to IDLE)",
+                      cx.nearest_airport_id.c_str());
+      }
+    }
+  }
+
   // Flight-phase auto-correction of ATC state
   double now_secs_for_state = static_cast<double>(XPLMGetElapsedTime());
   atc_state_machine::check_auto_correction(flight_phase::get(), dt,
