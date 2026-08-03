@@ -11369,6 +11369,39 @@ bool poll_ground_runway_change(const xplane_context::XPlaneContext &ctx,
   if (!active_ground_state)
     return false;
 
+  // Frequency gate: you cannot hear a station you are not tuned to. Only announce
+  // the runway change if the pilot is on the relevant GROUND station's frequency --
+  // the AFIS info freq at an AFIS field, or any of Delivery/Ground/Tower at a towered
+  // field. If the airport's ground freqs are unknown, don't gate (never silence a
+  // legit airport). Real vol LFLU 2026-08-03: pilot mistuned 120.230 (an apt.dat
+  // Approach freq, not AFIS 120.105) yet still heard "Valence Information" runway
+  // announcements -- the proactive announce was freq-blind. [C. P. Potter]
+  {
+    const float acom = (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
+    std::string an;
+    float af = 0.0f;
+    if (airport_overrides::controller(ctx.nearest_airport_id, "info", &an, &af)) {
+      if (!(af > 100.0f && std::fabs(acom - af) < 0.02f))
+        return false; // AFIS -> must be on the info freq
+    } else {
+      bool any_known = false, on_station = false;
+      for (auto t : {xplane_context::FrequencyType::DELIVERY,
+                     xplane_context::FrequencyType::GROUND,
+                     xplane_context::FrequencyType::TOWER}) {
+        const float ff = ctx.airport_freqs.first_mhz(t);
+        if (ff > 100.0f) {
+          any_known = true;
+          if (std::fabs(acom - ff) < 0.02f) {
+            on_station = true;
+            break;
+          }
+        }
+      }
+      if (any_known && !on_station)
+        return false; // towered -> known ground freqs but pilot on none of them
+    }
+  }
+
   // Don't interrupt a pending readback — the pilot is mid-clearance.
   if (atc_state_machine::is_readback_pending())
     return false;
@@ -11391,6 +11424,29 @@ bool poll_ground_runway_change(const xplane_context::XPlaneContext &ctx,
   if (!out_text)
     return true;
 
+  const std::string &cs = atc_state_machine::session_callsign();
+  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  char buf[192];
+
+  // AFIS field (airport+.json "info" role): AFIS gives INFORMATION only -- it issues
+  // no taxi clearance and no holding-point instruction. So a runway-in-use change is
+  // advisory only ("runway in use is now runway X"), NOT "taxi to holding point Y,
+  // runway X" (real vol LFLU 2026-08-03 said "taxi to holding point Tango Zero One").
+  // [C. P. Potter]
+  {
+    std::string n;
+    float f = 0.0f;
+    if (airport_overrides::controller(ctx.nearest_airport_id, "info", &n, &f)) {
+      std::snprintf(buf, sizeof(buf),
+                    "%s, be advised, runway in use is now runway %s.",
+                    callsign.c_str(), ctx.active_runway.c_str());
+      *out_text = buf;
+      logging::info("Ground: active runway changed to %s (AFIS info-only)",
+                    ctx.active_runway.c_str());
+      return true;
+    }
+  }
+
   std::string hp_phrase = "runway " + ctx.active_runway;
   auto hp_it = ctx.runway_holding_points.find(ctx.active_runway);
   if (hp_it != ctx.runway_holding_points.end() && !hp_it->second.empty()) {
@@ -11399,9 +11455,6 @@ bool poll_ground_runway_change(const xplane_context::XPlaneContext &ctx,
                 ctx.active_runway;
   }
 
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
-  char buf[192];
   std::snprintf(buf, sizeof(buf),
                 "%s, be advised, active runway is now runway %s, taxi to %s.",
                 callsign.c_str(), ctx.active_runway.c_str(),
