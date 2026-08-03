@@ -5,12 +5,12 @@
     "IDLE": {
       "_comment_ifr": "IFR clearance controller resolved via {clearance_controller} (Delivery when freq exists, Tower otherwise). _TOWER_ONLY variant kept for explicit tower-only routing.",
       "REQUEST_IFR_CLEARANCE": {
-        "response": "{callsign}, {airport} {clearance_controller}, cleared to {ifr_destination} as filed via {ifr_sid_phrase}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
+        "response": "{callsign}, {clearance_facility}, cleared to {ifr_destination} {ifr_clearance_route}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
         "next_state": "IFR/PREDEP_CLEARANCE",
         "requires_readback": true
       },
       "REQUEST_IFR_CLEARANCE_TOWER_ONLY": {
-        "response": "{callsign}, {airport} Tower, cleared to {ifr_destination} as filed via {ifr_sid_phrase}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
+        "response": "{callsign}, {clearance_facility}, cleared to {ifr_destination} {ifr_clearance_route}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
         "next_state": "IFR/PREDEP_CLEARANCE",
         "requires_readback": true
       },
@@ -87,12 +87,12 @@
     "GROUND_CONTACT": {
       "_comment_ifr": "Pilot already exchanged initial call but hasn't yet requested IFR clearance (e.g. called Ground, got position check, then called 'request IFR clearance'). Mirror the IDLE handler so the clearance is issued regardless of which state the system is in after the initial call.",
       "REQUEST_IFR_CLEARANCE": {
-        "response": "{callsign}, {airport} {clearance_controller}, cleared to {ifr_destination} as filed via {ifr_sid_phrase}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
+        "response": "{callsign}, {clearance_facility}, cleared to {ifr_destination} {ifr_clearance_route}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
         "next_state": "IFR/PREDEP_CLEARANCE",
         "requires_readback": true
       },
       "REQUEST_IFR_CLEARANCE_TOWER_ONLY": {
-        "response": "{callsign}, {airport} Tower, cleared to {ifr_destination} as filed via {ifr_sid_phrase}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
+        "response": "{callsign}, {clearance_facility}, cleared to {ifr_destination} {ifr_clearance_route}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
         "next_state": "IFR/PREDEP_CLEARANCE",
         "requires_readback": true
       }
@@ -101,12 +101,12 @@
     "TOWER_CONTACT": {
       "_comment_ifr": "IFR clearance may arrive after the two-step 'go ahead' flow. Handle it here before the VFR TOWER_CONTACT template sees it.",
       "REQUEST_IFR_CLEARANCE": {
-        "response": "{callsign}, {airport} {clearance_controller}, cleared to {ifr_destination} as filed via {ifr_sid_phrase}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
+        "response": "{callsign}, {clearance_facility}, cleared to {ifr_destination} {ifr_clearance_route}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
         "next_state": "IFR/PREDEP_CLEARANCE",
         "requires_readback": true
       },
       "REQUEST_IFR_CLEARANCE_TOWER_ONLY": {
-        "response": "{callsign}, {airport} Tower, cleared to {ifr_destination} as filed via {ifr_sid_phrase}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
+        "response": "{callsign}, {clearance_facility}, cleared to {ifr_destination} {ifr_clearance_route}, initial climb to {ifr_initial_altitude}{ifr_departure_constraint}, squawk {squawk}, QNH {qnh}{atis_tail}.",
         "next_state": "IFR/PREDEP_CLEARANCE",
         "requires_readback": true
       }

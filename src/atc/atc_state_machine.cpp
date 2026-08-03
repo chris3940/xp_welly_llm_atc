@@ -1142,6 +1142,11 @@ ATCResponse process(const intent_parser::PilotMessage &msg_in,
   if (ground_ops::handle_unicom_flow(msg, ctx, resp))
     return resp;
 
+  // AFIS (Information) departure field: startup/taxi/ready return INFORMATION, not
+  // Tower clearances. Runs before the towered guards / template lookup.
+  if (ground_ops::handle_afis_ground_flow(msg, ctx, resp))
+    return resp;
+
   if (ground_ops::handle_frequency_hint(msg, ctx, resp))
     return resp;
 

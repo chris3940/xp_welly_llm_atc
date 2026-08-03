@@ -102,6 +102,19 @@ bool debug_text_input();
 bool traffic_features_enabled();
 void set_traffic_features_enabled(bool v);
 
+// IFR published holding patterns: when true, ATC may issue "hold at <FIX> as
+// published" at a STAR fix (random, once per arrival). When false, holds are
+// never issued. Default true. (C. P. Potter)
+bool hold_enabled();
+void set_hold_enabled(bool v);
+
+// ATC-initiated shortcuts ("direct <fix>"): when true, every eligible shortcut
+// (SID exit fix, en-route fix, STAR/approach IAF) fires at 100% instead of the
+// default ~20% probability roll. When false (default) shortcuts stay occasional.
+// (C. P. Potter)
+bool shortcut_always();
+void set_shortcut_always(bool v);
+
 // SimBrief pilot ID (numeric, 0 = not configured).
 int simbrief_pilot_id();
 void set_simbrief_pilot_id(int id);

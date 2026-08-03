@@ -26,6 +26,7 @@
 #include "atc/atc_state_machine.hpp"
 #include "atc/atc_templates.hpp"
 #include "atc/flight_phase.hpp"
+#include "data/airport_overrides.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/airspace_db.hpp"
 #include "data/openair_db.hpp"
@@ -119,6 +120,20 @@ int main(int argc, char **argv) {
   flight_phase::init();
   atc_state_machine::init();
   airport_vrps::init();
+
+  // Per-airport overrides (airport+.json: controllers/AFIS, runway_config, approaches,
+  // tower_handoff_fixes, sid_initial_climb). Env XP_AIRPORT_OVERRIDES; default = the
+  // installed plugin's Resources/airport+.json. Point it at the repo's Resources copy
+  // to test edits before installing.
+  {
+    std::string aj;
+    if (const char *v = std::getenv("XP_AIRPORT_OVERRIDES")) aj = v;
+    else if (const char *home = std::getenv("HOME"))
+      aj = std::string(home) +
+           "/X-Plane 12/Resources/plugins/xp_wellys_atc/Resources/airport+.json";
+    airport_overrides::init(aj);
+    std::fprintf(stderr, "airport_overrides: %s\n", aj.c_str());
+  }
 
   std::string cifp_dir = detect_cifp_dir();
   if (argc >= 2) cifp_dir = argv[1]; // explicit override

@@ -75,6 +75,12 @@ void apply_state_reverts(const PilotMessage &msg);
 bool handle_unicom_flow(const PilotMessage &msg, const XPlaneContext &ctx,
                         ATCResponse &resp);
 
+// AFIS (Information) departure ground flow: startup/taxi/ready -> INFORMATION, no
+// clearances (marked by an airport+.json "info" role). Runs before the towered
+// guards. Returns true when it produced the response.
+bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
+                             ATCResponse &resp);
+
 bool handle_frequency_hint(const PilotMessage &msg, const XPlaneContext &ctx,
                            ATCResponse &resp);
 

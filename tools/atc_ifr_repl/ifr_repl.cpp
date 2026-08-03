@@ -28,6 +28,7 @@
 #include "data/airspace_db.hpp"
 #include "data/cifp_reader.hpp"
 #include "data/openair_db.hpp"
+#include "backends/simbrief_client.hpp"
 #include "data/simbrief_ofp.hpp"
 #include "persistence/settings.hpp"
 
@@ -243,6 +244,11 @@ void cmd_set(std::string &callsign, const std::string &rest) {
       ofp.destination_icao = up;
       ofp.valid = true;
       simbrief_ofp::set(ofp);
+    } else if (field == "zulu") {
+      // HHMM (e.g. 1420) -> seconds since midnight for ctx.zulu_time_sec.
+      int hhmm = static_cast<int>(std::stof(value));
+      ctx.zulu_time_sec =
+          static_cast<float>((hhmm / 100) * 3600 + (hhmm % 100) * 60);
     } else if (field == "qnh") {
       ctx.qnh_hpa = static_cast<int>(std::stof(value));
     } else if (field == "wind_dir") {
@@ -305,6 +311,16 @@ void cmd_set(std::string &callsign, const std::string &rest) {
                      [](unsigned char c) { return std::toupper(c); });
       ofp.preferred_approach_designator = up;
       simbrief_ofp::set(ofp);
+    } else if (field == "state") {
+      atc_state_machine::set_state(atc_state_machine::state_from_name(value));
+    } else if (field == "on_ground") {
+      ctx.on_ground = (value == "1" || value == "true");
+    } else if (field == "agl") {
+      ctx.height_agl_ft = std::stof(value);
+    } else if (field == "ifr_sid") {
+      ctx.ifr_cifp_sid = value; // ATC-assigned CIFP SID (empty = omni departure)
+    } else if (field == "ifr_sid_last_fix") {
+      ctx.ifr_sid_last_fix = value;
     } else {
       std::fprintf(stderr, "Unknown field '%s' (try 'help')\n", field.c_str());
       return;
@@ -517,10 +533,60 @@ void cmd_reset() {
   std::fprintf(stderr, "Engine state reset (context unchanged, t=0).\n");
 }
 
+// load_ofp <file>: replay a saved SimBrief last_ofp.json (raw API response) --
+// runs the SAME parser as the live plugin fetch, so the harness sees the exact
+// route/STAR/steps/navlog the sim would. After loading, drive the flight with
+// jump/fly/say to observe every sector handoff + clearance. [C. P. Potter]
+void cmd_load_ofp(const std::string &path) {
+  if (path.empty()) {
+    std::fprintf(stderr, "Usage: load_ofp <path-to-last_ofp.json>\n");
+    return;
+  }
+  FILE *fp = std::fopen(path.c_str(), "rb");
+  if (!fp) {
+    std::fprintf(stderr, "load_ofp: cannot open '%s'\n", path.c_str());
+    return;
+  }
+  std::string body;
+  char buf[8192];
+  size_t n;
+  while ((n = std::fread(buf, 1, sizeof(buf), fp)) > 0)
+    body.append(buf, n);
+  std::fclose(fp);
+  if (body.empty()) {
+    std::fprintf(stderr, "load_ofp: '%s' is empty\n", path.c_str());
+    return;
+  }
+
+  simbrief_client::load_ofp_body(body);
+  const auto ofp = simbrief_ofp::get();
+  if (!ofp.valid) {
+    std::fprintf(stderr,
+                 "load_ofp: parsed but OFP not valid for IFR (%s). "
+                 "A SimBrief OFP must carry origin/dest + cruise FL.\n",
+                 simbrief_client::last_error().c_str());
+    return;
+  }
+  // Mirror the destination into the context so training jumps + arrival logic
+  // pick it up (dest ICAO drives best_approach / the STAR/approach resolution).
+  auto &ctx = xplane_context::g_cli_ctx;
+  ctx.ifr_destination = ofp.destination_icao;
+  std::fprintf(stderr,
+               "load_ofp: %s -> %s  cruise=%dft  SID=%s  first_fix=%s  "
+               "navlog=%zu fixes  route=[%s]\n",
+               ofp.origin_icao.c_str(), ofp.destination_icao.c_str(),
+               ofp.cruise_alt_ft, ofp.sid_name.empty() ? "none" : ofp.sid_name.c_str(),
+               ofp.fpl_first_fix.empty() ? "none" : ofp.fpl_first_fix.c_str(),
+               ofp.navlog.size(), ofp.raw_route.c_str());
+}
+
 void cmd_help() {
   std::printf(
       "Commands:\n"
       "  say <text>              Process a pilot transcript\n"
+      "  load_ofp <file>         Replay a saved SimBrief last_ofp.json (real flight\n"
+      "                          plan). Plugin still CHOOSES the SID/STAR/approach\n"
+      "                          from CIFP -- the OFP only supplies the route fixes.\n"
       "  poll [dt=5]             Advance dt seconds and run all IFR polls\n"
       "  fly <nm>                Fly NM at current hdg/gs/vs, polling every 5 s\n"
       "  goto <FIXNAME>          Teleport aircraft to fix (earth_fix.dat lookup)\n"
@@ -606,6 +672,8 @@ int run(xplane_context::XPlaneContext ctx, std::string callsign) {
     auto [cmd, rest] = split_first(line);
     if (cmd == "say")
       cmd_say(callsign, rest);
+    else if (cmd == "load_ofp")
+      cmd_load_ofp(rest);
     else if (cmd == "set")
       cmd_set(callsign, rest);
     else if (cmd == "poll")

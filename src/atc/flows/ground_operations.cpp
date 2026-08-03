@@ -27,6 +27,7 @@
 #include "atc/flows/state_storage.hpp"
 #include "core/logging.hpp"
 #include "data/airspace_db.hpp"
+#include "data/airport_overrides.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/cifp_reader.hpp"
 #include "persistence/settings.hpp"
@@ -442,6 +443,29 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
       // {ifr_sid_last_fix}: last waypoint on the ATC-assigned SID (from CIFP).
       // Used for ATC-initiated "direct {ifr_sid_last_fix}" shortcut messages.
       {"ifr_sid_last_fix", ctx.ifr_sid_last_fix},
+      // {ifr_clearance_route}: the routing clause spoken right after
+      // "cleared to <dest>". With a SID (CIFP-assigned, else filed): the standard
+      // "as filed via <SID spoken>". With NO SID (omnidirectional / no published
+      // departure -- e.g. LFLU Saint-Yan): the official omnidirectional-departure
+      // form "omnidirectional departure runway <rwy>, then direct <first FPL fix>"
+      // (ICAO/DGAC CAG: "autorise depart omnidirectionnel piste 28 puis direct
+      // GAI"). This replaces the old "as filed via {ifr_sid_phrase}", which spoke
+      // the literal word "SID" when no procedure was assigned (format_sid_for_tts
+      // returns its input unchanged for the non-designator string "SID"). The
+      // data-driven climb ladder behind the clearance is unchanged and already
+      // handles the no-SID case. [C. P. Potter]
+      {"ifr_clearance_route", [&]() -> std::string {
+        const std::string sid_name =
+            !ctx.ifr_cifp_sid.empty() ? ctx.ifr_cifp_sid : ctx.ifr_sid;
+        if (!sid_name.empty())
+          return "as filed via " +
+                 format_sid_for_tts(sid_name, ctx.ifr_sid_last_fix);
+        std::string phrase =
+            "omnidirectional departure runway " + get_runway(msg, ctx);
+        if (!ctx.ifr_fpl_first_fix.empty())
+          phrase += ", then direct " + ctx.ifr_fpl_first_fix;
+        return phrase;
+      }()},
       // {ifr_initial_altitude}: clearance altitude from CIFP SID constraint,
       // falling back to apt.dat 1302 transition_alt then ifr_defaults.
       // {ifr_initial_altitude}: clearance altitude from CIFP SID constraint,
@@ -513,6 +537,20 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
           else
             std::snprintf(buf, sizeof(buf), "%d feet", current_cleared_ft);
           return buf;
+        }
+        // airport+.json published SID initial-climb clearance (chart annotation, NOT in
+        // the CIFP): e.g. LFMN BASI8X jets FL100 / props FL070, PERU8A FL130. Wins over
+        // the CIFP/midpoint computation below; is_jet from the aircraft engine kind. Any
+        // field with a sid_initial_climb rule benefits -- no per-field code. [C. P. Potter]
+        {
+          const std::string sid =
+              !ctx.ifr_cifp_sid.empty() ? ctx.ifr_cifp_sid : ctx.ifr_sid;
+          const bool is_jet =
+              ctx.aircraft_engine_kind == xplane_context::EngineKind::Jet;
+          const int ov = airport_overrides::sid_initial_climb_ft(
+              ctx.nearest_airport_id, sid, is_jet);
+          if (ov > 0)
+            return fl_str(ov / 100);
         }
         if (ctx.nearest_airport_id == "LFLP") {
           if (ctx.active_runway == "04") {
@@ -624,6 +662,26 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
                                    : ctx.airport_freqs.has(FT::GROUND)
                                        ? std::string("Ground")
                                        : std::string("Tower")},
+      // {clearance_facility}: the full facility that DELIVERS the IFR clearance.
+      // Normal field: "<airport> <Delivery|Ground|Tower>". AFIS field -- marked by
+      // an airport+.json "info" role (e.g. LFLU Valence Information) -- has NO ATC
+      // control, so the clearance is delivered by the OVERLYING ACC named in the
+      // "delivery" role (LFLU -> "Lyon Control"); the AFIS itself issues no
+      // clearance. Reads those two roles from airport+.json. [C. P. Potter]
+      {"clearance_facility", [&]() -> std::string {
+        std::string nm;
+        float fr = 0.0f;
+        if (airport_overrides::controller(ctx.nearest_airport_id, "info", &nm,
+                                          &fr) &&
+            airport_overrides::controller(ctx.nearest_airport_id, "delivery", &nm,
+                                          &fr))
+          return nm; // AFIS -> the ACC/Approach that delivers the clearance
+        const std::string cc = ctx.airport_freqs.has(FT::DELIVERY)
+                                   ? "Delivery"
+                                   : ctx.airport_freqs.has(FT::GROUND) ? "Ground"
+                                                                       : "Tower";
+        return airport_name(ctx) + " " + cc;
+      }()},
       // {ifr_ground_handoff}: ", contact Ground on X.XXX when ready"
       // appended to the startup-approved readback. Empty when the pilot is
       // already on Ground or Delivery (clearance was issued on Ground directly).
@@ -889,6 +947,77 @@ bool handle_unicom_flow(const PilotMessage &msg, const XPlaneContext &ctx,
   return true;
 }
 
+// AFIS DEPARTURE ground flow. At an Information (AFIS) field -- marked by an
+// airport+.json "info" role (e.g. LFLU Valence Information) -- the AFIS issues NO
+// clearances: it provides INFORMATION (runway in use, QNH, wind, known traffic) and
+// the pilot self-announces + decides. So startup/taxi/ready-for-departure return
+// INFO, never "taxi to holding point X" / "line up and wait" / "cleared for
+// takeoff" (all of which the Tower flow would wrongly issue -- LFLU real vol
+// 2026-08-02: fabricated "holding point Lima", "Valence Ground", bogus crossing,
+// "cleared for takeoff"). The IFR clearance itself comes from the overlying ACC
+// (handled in check_freq_precondition -> Lyon). Runs before the towered guards.
+// [C. P. Potter]
+bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
+                             ATCResponse &resp) {
+  using PI = intent_parser::PilotIntent;
+  std::string info_name;
+  float info_freq = 0.0f;
+  if (!airport_overrides::controller(ctx.nearest_airport_id, "info", &info_name,
+                                     &info_freq))
+    return false; // not an AFIS field
+  if (!ctx.on_ground)
+    return false;
+  // Only the ground, pre-departure IFR states (the pilot already has the ACC
+  // clearance). Airborne states + arrival are handled elsewhere.
+  const std::string s = atc_state_machine::state_name(internal::get_state_ref());
+  const bool ground_ifr =
+      (s == "IFR/CLEARED" || s == "IFR/PREDEP_CLEARANCE" ||
+       s == "TAXI_CLEARED" || s == "TOWER_CONTACT" || s == "GROUND_CONTACT");
+  if (!ground_ifr)
+    return false;
+
+  auto vars = build_vars(msg, ctx);
+  const std::string rwy = get_runway(msg, ctx);
+  switch (msg.intent) {
+  case PI::REQUEST_STARTUP:
+    resp.text = atc_templates::fill(
+        "{callsign}, " + info_name + ", runway " + rwy +
+            " in use, QNH {qnh}, startup at your discretion.",
+        vars);
+    resp.next_state = ATCState::IFR_CLEARED;
+    internal::transition_to(ATCState::IFR_CLEARED, "afis_startup_info");
+    return true;
+  case PI::REQUEST_TAXI:
+    resp.text = atc_templates::fill(
+        "{callsign}, " + info_name + ", runway " + rwy +
+            " in use, QNH {qnh}, no reported traffic.",
+        vars);
+    resp.next_state = ATCState::TOWER_CONTACT;
+    internal::transition_to(ATCState::TOWER_CONTACT, "afis_taxi_info");
+    return true;
+  case PI::REPORT_HOLDING_SHORT:
+    // Pilot reports holding short (before departure) -> AFIS INFO, never a takeoff
+    // clearance. The pilot then self-announces line-up / rolling.
+    resp.text = atc_templates::fill("{callsign}, " + info_name + ", runway " +
+                                        rwy + " in use, wind {wind}, "
+                                              "no reported traffic.",
+                                    vars);
+    resp.next_state = internal::get_state_ref();
+    return true;
+  case PI::READY_FOR_DEPARTURE:
+  case PI::READY_FOR_DEPARTURE_VFR:
+    resp.text = atc_templates::fill("{callsign}, " + info_name + ", runway " +
+                                        rwy + ", wind {wind}, no reported traffic.",
+                                    vars);
+    resp.next_state = ATCState::IFR_DEPARTURE_CLEARED;
+    internal::transition_to(ATCState::IFR_DEPARTURE_CLEARED,
+                            "afis_departure_info");
+    return true;
+  default:
+    return false;
+  }
+}
+
 bool handle_frequency_hint(const PilotMessage &msg, const XPlaneContext &ctx,
                            ATCResponse &resp) {
   using FT = xplane_context::FrequencyType;
@@ -1143,6 +1272,41 @@ bool check_freq_precondition(const PilotMessage &msg, const XPlaneContext &ctx,
                              ATCResponse &resp) {
   using FT  = xplane_context::FrequencyType;
   using PI  = intent_parser::PilotIntent;
+  // AFIS DEPARTURE field (airport+.json "info" role, e.g. LFLU Valence Information):
+  // the AFIS issues NO clearance -- the IFR clearance is delivered by the overlying
+  // ACC named in the "delivery" role (LFLU -> Lyon Control 125.155). A clearance
+  // request on THAT ACC frequency is accepted (fall through to the clearance
+  // template); on any other frequency the pilot is told to call the ACC, NOT the
+  // (non-existent) Tower. This READS both roles from airport+.json -- runs before
+  // the generic Delivery/Ground/Tower gate below. [C. P. Potter]
+  if (msg.intent == PI::REQUEST_IFR_CLEARANCE || msg.intent == PI::READBACK) {
+    std::string info_n, acc_n;
+    float info_f = 0.0f, acc_f = 0.0f;
+    if (airport_overrides::controller(ctx.nearest_airport_id, "info", &info_n,
+                                      &info_f) &&
+        airport_overrides::controller(ctx.nearest_airport_id, "delivery", &acc_n,
+                                      &acc_f) &&
+        acc_f > 100.0f) {
+      const float acom =
+          ctx.active_com == 2 ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
+      if (std::fabs(acom - acc_f) < 0.02f)
+        return false; // on the ACC freq -> allow the clearance AND its readback
+      // A READBACK on the wrong freq falls through to the normal handling; only a
+      // fresh clearance REQUEST is redirected to the ACC (never to the Tower).
+      if (msg.intent == PI::REQUEST_IFR_CLEARANCE) {
+        auto vars = build_vars(msg, ctx);
+        char tmpl[160];
+        std::snprintf(tmpl, sizeof(tmpl),
+                      "{callsign}, for IFR clearance contact %s on %.3f.",
+                      acc_n.c_str(), acc_f);
+        resp.text = atc_templates::fill(tmpl, vars);
+        resp.next_state = internal::get_state_ref();
+        logging::info("AFIS departure: IFR clearance -> %s %.3f (not Tower)",
+                      acc_n.c_str(), acc_f);
+        return true;
+      }
+    }
+  }
   // IFR clearance requested on the wrong frequency (Tower, UNKNOWN, ATIS, …)
   // when Delivery or Ground is available: redirect with controller name + freq.
   // Covers Tower (common mistake) and any unrecognised freq (e.g. airport DB

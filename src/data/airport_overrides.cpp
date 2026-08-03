@@ -51,6 +51,16 @@ struct DepartureHold {
   int   step2_alt_ft = 0; // 0 = no explicit second step
 };
 
+// Published SID initial-climb clearance altitude (a CHART annotation, NOT in the CIFP):
+// the altitude ATC clears the aircraft to in the pre-departure clearance ("climb FLxxx").
+// jet_alt_ft / prop_alt_ft optionally split by aircraft type; alt_ft = single value.
+struct SidInitialClimb {
+  std::vector<std::string> match_sids; // SID names (UPPER); empty = any SID from this field
+  int alt_ft = 0;       // single value for all types
+  int jet_alt_ft = 0;   // optional jet override (takes precedence for jets)
+  int prop_alt_ft = 0;  // optional turboprop/prop override
+};
+
 // Delegated / override controller: a facility that atc.dat / apt.dat cannot
 // resolve correctly (absent, or wrong frequency). role is normalised UPPER.
 struct ControllerOverride {
@@ -63,6 +73,14 @@ std::unordered_map<std::string, std::vector<ApproachRule>> s_approaches;
 std::unordered_map<std::string, std::vector<RunwayRule>> s_runways;
 std::unordered_map<std::string, std::vector<DepartureHold>> s_dep_holds;
 std::unordered_map<std::string, std::vector<ControllerOverride>> s_controllers;
+// Per-approach override of the Approach->Tower handoff trigger fix (replaces the
+// FAF). icao -> designator(UPPER) -> handoff-fix ident(UPPER). For curved RNP
+// approaches whose FAF sits far out (LOWI RNP 08: FAF WI749 ~28 NM from RW08), so
+// the aircraft is "established on final" only at a late last-turn fix; the FAF-based
+// Tower handoff would fire far too early. [C. P. Potter]
+std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
+    s_tower_handoff_fixes;
+std::unordered_map<std::string, std::vector<SidInitialClimb>> s_sid_initial_climb;
 bool s_ready = false;
 
 // Tailwind component (kt, +ve = tailwind) on a runway given the wind. Runway heading
@@ -245,6 +263,47 @@ void init(std::string path) {
       if (!ctrls.empty())
         s_controllers[icao] = std::move(ctrls);
     }
+
+    // tower_handoff_fixes (per-designator override of the Approach->Tower handoff
+    // trigger, replacing the FAF -- for curved RNP finals; LOWI RNP 08 -> WI754).
+    if (auto th = it->find("tower_handoff_fixes");
+        th != it->end() && th->is_object()) {
+      std::unordered_map<std::string, std::string> m;
+      for (auto jt = th->begin(); jt != th->end(); ++jt) {
+        if (jt.key().empty() || jt.key()[0] == '_') // skip _comment
+          continue;
+        if (jt.value().is_string() && !jt.value().get<std::string>().empty())
+          m[upper(jt.key())] = upper(jt.value().get<std::string>());
+      }
+      if (!m.empty())
+        s_tower_handoff_fixes[icao] = std::move(m);
+    }
+
+    // sid_initial_climb (published initial-climb clearance alt, a chart annotation)
+    if (auto sic = it->find("sid_initial_climb");
+        sic != it->end() && sic->is_array()) {
+      std::vector<SidInitialClimb> rules;
+      for (const auto &entry : *sic) {
+        if (!entry.is_object())
+          continue;
+        SidInitialClimb r;
+        float a = 0.0f, j = 0.0f, p = 0.0f;
+        read_num(entry, "alt_ft", a);
+        read_num(entry, "jet_alt_ft", j);
+        read_num(entry, "prop_alt_ft", p);
+        r.alt_ft = static_cast<int>(a);
+        r.jet_alt_ft = static_cast<int>(j);
+        r.prop_alt_ft = static_cast<int>(p);
+        if (auto ms = entry.find("match_sids"); ms != entry.end() && ms->is_array())
+          for (const auto &s : *ms)
+            if (s.is_string())
+              r.match_sids.push_back(upper(s.get<std::string>()));
+        if (r.alt_ft > 0 || r.jet_alt_ft > 0 || r.prop_alt_ft > 0)
+          rules.push_back(std::move(r));
+      }
+      if (!rules.empty())
+        s_sid_initial_climb[icao] = std::move(rules);
+    }
   }
 
   logging::info("airport_overrides: %d approach + %d runway rules + %zu dep-hold "
@@ -259,7 +318,55 @@ void stop() {
   s_runways.clear();
   s_dep_holds.clear();
   s_controllers.clear();
+  s_tower_handoff_fixes.clear();
+  s_sid_initial_climb.clear();
   s_ready = false;
+}
+
+// Published SID initial-climb clearance altitude (feet) for icao + sid_name, chosen by
+// aircraft type: is_jet -> jet_alt_ft; else prop_alt_ft; else the single alt_ft (with the
+// set jet/prop value as a last-resort fallback). First rule whose match_sids contains
+// sid_name wins (empty match_sids = any SID). 0 = no override -> caller keeps the CIFP /
+// generic initial climb. [C. P. Potter]
+int sid_initial_climb_ft(const std::string &icao, const std::string &sid_name,
+                         bool is_jet) {
+  if (!s_ready || icao.empty())
+    return 0;
+  auto it = s_sid_initial_climb.find(upper(icao));
+  if (it == s_sid_initial_climb.end())
+    return 0;
+  const std::string want = upper(sid_name);
+  for (const SidInitialClimb &r : it->second) {
+    bool match = r.match_sids.empty();
+    for (const auto &m : r.match_sids)
+      if (m == want) { match = true; break; }
+    if (!match)
+      continue;
+    if (is_jet && r.jet_alt_ft > 0)
+      return r.jet_alt_ft;
+    if (!is_jet && r.prop_alt_ft > 0)
+      return r.prop_alt_ft;
+    if (r.alt_ft > 0)
+      return r.alt_ft;
+    if (r.jet_alt_ft > 0)
+      return r.jet_alt_ft; // only jet set -> use it
+    if (r.prop_alt_ft > 0)
+      return r.prop_alt_ft;
+  }
+  return 0;
+}
+
+// Per-approach Tower-handoff override fix (replaces the FAF trigger). Empty when
+// no override -> caller keeps the FAF-based handoff. [C. P. Potter]
+std::string tower_handoff_fix(const std::string &icao,
+                              const std::string &designator) {
+  if (!s_ready || icao.empty() || designator.empty())
+    return {};
+  auto it = s_tower_handoff_fixes.find(upper(icao));
+  if (it == s_tower_handoff_fixes.end())
+    return {};
+  auto jt = it->second.find(upper(designator));
+  return jt == it->second.end() ? std::string{} : jt->second;
 }
 
 bool controller(const std::string &icao, const std::string &role,

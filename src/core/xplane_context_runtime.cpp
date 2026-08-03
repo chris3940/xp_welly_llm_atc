@@ -49,6 +49,7 @@ static XPLMDataRef dr_indicated_airspeed = nullptr;
 static XPLMDataRef dr_vertical_speed = nullptr;
 static XPLMDataRef dr_heading_true = nullptr;
 static XPLMDataRef dr_heading_mag = nullptr;
+static XPLMDataRef dr_zulu_time = nullptr;
 static XPLMDataRef dr_y_agl = nullptr;
 static XPLMDataRef dr_onground_any = nullptr;
 static XPLMDataRef dr_com1_freq = nullptr;
@@ -1218,6 +1219,7 @@ void init() {
   dr_vertical_speed = XPLMFindDataRef("sim/flightmodel/position/vh_ind_fpm");
   dr_heading_true = XPLMFindDataRef("sim/flightmodel/position/psi");
   dr_heading_mag = XPLMFindDataRef("sim/flightmodel/position/mag_psi");
+  dr_zulu_time = XPLMFindDataRef("sim/time/zulu_time_sec");
   dr_y_agl = XPLMFindDataRef("sim/flightmodel/position/y_agl");
   dr_onground_any = XPLMFindDataRef("sim/flightmodel/failures/onground_any");
   dr_com1_freq =
@@ -1285,6 +1287,8 @@ void stop() {
 
 void update() {
   ctx.now_secs = static_cast<double>(XPLMGetElapsedTime());
+  if (dr_zulu_time)
+    ctx.zulu_time_sec = XPLMGetDataf(dr_zulu_time);
   if (dr_latitude)
     ctx.latitude = XPLMGetDatad(dr_latitude);
   if (dr_longitude)

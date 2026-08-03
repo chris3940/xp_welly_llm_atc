@@ -205,6 +205,9 @@ struct XPlaneContext {
   // intent rules with a require_just_landed flag) read this instead of
   // taking the timestamp as a separate parameter.
   double now_secs = 0.0;
+  // Sim Zulu (UTC) time of day in seconds, from sim/time/zulu_time_sec. Used to speak
+  // a clock-time EFC in a holding clearance ("expect further clearance at HHMM").
+  float zulu_time_sec = 0.0f;
   // Transponder state — read from sim/cockpit/radios/transponder_code and
   // sim/cockpit2/radios/actuators/transponder_mode (0=OFF,1=STBY,2=ALT).
   int transponder_code = 0;

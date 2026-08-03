@@ -76,6 +76,8 @@ static json default_config() {
       {"debug_traffic", false},
       {"debug_text_input", false},
       {"traffic_features_enabled", true},
+      {"hold_enabled", true},
+      {"shortcut_always", false},
       {"simbrief_pilot_id", 0},
       {"start_mode", "engines_running"},
       {"backend_mode", "local"},
@@ -351,6 +353,10 @@ std::string atc_profile() {
 std::string backend_language() { return "en"; }
 bool debug_traffic() { return cfg.value("debug_traffic", false); }
 bool debug_text_input() { return cfg.value("debug_text_input", false); }
+bool hold_enabled() { return cfg.value("hold_enabled", true); }
+
+bool shortcut_always() { return cfg.value("shortcut_always", false); }
+
 bool traffic_features_enabled() {
   return cfg.value("traffic_features_enabled", true);
 }
@@ -476,6 +482,14 @@ void set_debug_traffic(bool v) { cfg["debug_traffic"] = v; }
 void set_debug_text_input(bool v) { cfg["debug_text_input"] = v; }
 void set_traffic_features_enabled(bool v) {
   cfg["traffic_features_enabled"] = v;
+}
+void set_hold_enabled(bool v) {
+  cfg["hold_enabled"] = v;
+  save();
+}
+void set_shortcut_always(bool v) {
+  cfg["shortcut_always"] = v;
+  save();
 }
 int simbrief_pilot_id() { return cfg.value("simbrief_pilot_id", 0); }
 void set_simbrief_pilot_id(int id) {

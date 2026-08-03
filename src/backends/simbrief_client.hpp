@@ -27,6 +27,13 @@ void fetch_async(int pilot_id);
 FetchStatus status();
 std::string last_error(); // non-empty only when status() == FAILED
 
+// Parse a raw SimBrief API JSON response body (the exact bytes the plugin dumps
+// to <plugin>/Resources/last_ofp.json) directly into simbrief_ofp, bypassing the
+// network fetch. Same parser as the live path (no drift). Used by the headless
+// atc_ifr_repl "load_ofp <file>" harness to replay a real flight plan and get
+// every sector handoff + clearance. Sets status()/last_error() like a fetch.
+void load_ofp_body(const std::string &body);
+
 } // namespace simbrief_client
 
 #endif // BACKENDS_SIMBRIEF_CLIENT_HPP

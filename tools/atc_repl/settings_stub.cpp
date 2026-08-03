@@ -24,6 +24,12 @@ static std::string env_or(const char *key, const std::string &fallback) {
 
 bool debug_logging() { return std::getenv("XP_ATC_DEBUG") != nullptr; }
 
+// IFR published holds: on by default in the headless REPL so hold scenarios run
+// (XP_ATC_NO_HOLD disables, to exercise the OFF path). [C. P. Potter]
+bool hold_enabled() { return std::getenv("XP_ATC_NO_HOLD") == nullptr; }
+bool shortcut_always() { return std::getenv("XP_ATC_SHORTCUT_ALWAYS") != nullptr; }
+void set_shortcut_always(bool) {}
+
 // Overridable at runtime so scenarios / REPL `set callsign` feed the
 // value used by the intent parser (which matches the transcript against
 // the configured pilot callsign).

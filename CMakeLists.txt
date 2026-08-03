@@ -685,6 +685,11 @@ add_executable(atc_ifr_repl
     tools/atc_ifr_repl/ifr_repl.cpp
     tools/atc_repl/settings_stub.cpp
     tools/atc_repl/xplane_context_stub.cpp
+    # SimBrief OFP parser for the "load_ofp <file>" harness (replay a saved
+    # last_ofp.json). simbrief_client.cpp links CURL (already linked) + references
+    # model_paths only in the live-fetch path -> model_paths_stub.cpp satisfies it.
+    src/backends/simbrief_client.cpp
+    tools/atc_repl/model_paths_stub.cpp
 )
 target_include_directories(atc_ifr_repl PRIVATE
     ${CMAKE_SOURCE_DIR}/src

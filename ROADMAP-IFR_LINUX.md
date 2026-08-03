@@ -5,9 +5,9 @@ for the `xp_wellys_atc` fork. VFR features are maintained upstream.
 Organized **per functionality** (a by-version changelog lives in the separate
 release-notes document).
 
-Last synced with the code: **v4.4.0-alpha** (branch `feat/ifr-4.4.0`, based on
-tag `v4.3.1`, 2026-07-13). Overall IFR completion: **~75%**. The `4.4.0` label
-is provisional pending the upstream maintainer.
+Last synced with the code: **v4.4.0-beta** (2026-08-02, based on tag `v4.3.1`,
+2026-07-13). Overall IFR completion: **~75%**. The `4.4.0` label is provisional
+pending the upstream maintainer.
 
 ---
 
@@ -15,7 +15,7 @@ is provisional pending the upstream maintainer.
 
 | Version | Headline | Date |
 |---------|----------|------|
-| **v4.4.0** (alpha) | Corrective enforcement + terrain/procedure safety: block-alt floor, compliance monitor (`check_next_fix`), corrective speed, IAF-approach timing, CIFP SID route table, STT-bias fix | in progress |
+| **v4.4.0** (beta) | Radar-vectored teardrop approach (large-turn reversal onto the IAF course, inbound intercept) + published STAR holds (Zulu EFC); **per-airport override system** (`airport+.json` + `airspace+` overlays): override ATC controllers & frequencies, facility labels (Tower / AFIS / Information), SID initial-climb altitude, runway config, weather-gated preferred approach, departure holds, per-approach Tower-handoff fix, and airspace delegation — e.g. fixes the Slovenia/Ljubljana en-route handoff and the LOWI Tower mislabel; STAR chaining + multi-IAF shortcut; multi-sector ACC handoff robustness (Vienna/Innsbruck approach hysteresis, dest-CTA handoff, handoff continuity); curved-RNP final (Tower handoff + cross-track axis at the last-turn fix); corrective enforcement across altitude / speed / course (compliance monitor `check_next_fix` [alt+speed] + lateral `check_course` [heading/route], block-alt floor, corrective speed, CIFP SID route table); STT bias + readback fixes | in progress |
 | **v4.3.1** | Complete IFR arrival flow (TOD → landing): arrival phase model, multi-sector ACC handoff, CIFP DA/MDA, AFIS destinations, STT/readback robustness | 2026-07-12 |
 | **v4.2.1** | Full implementation and test of NON-STAR / AFIS-ONLY airport arrivals (IFR LFLP → LFQA, RNAV RWY 07 validated end-to-end) | 2026-07-05 |
 | v4.2.0 | IFR engine improvements, airspace fixes, STT accuracy | 2026-06-27 |
@@ -68,6 +68,12 @@ LFLP → LFQA (no-STAR AFIS, < FL100) · LIMF (SID) → LFLP (STAR, UIR > FL195)
 - [x] Takeoff clearance: wind stated (not read back) + "passing Xft contact Approach on Y.YYY"
 - [x] Tower → Departure/Approach freq handoff (`IFR_FREQ_HANDOFF`); pilot reads back
 - [x] Departure check-in → `IFR_RADAR_CONTACT`; ATC issues SID step climbs
+- [x] **Omnidirectional (no-SID) departure clearance** (v4.4.0-beta) — fields with no
+      ATC-assigned CIFP SID (e.g. LFLU Valence-Chabeuil) get the official form "cleared to
+      DEST, omnidirectional departure runway RW, then direct FIRST-FPL-FIX, climb …"
+      (ICAO/DGAC CAG), replacing the old blank/"via SID" clause. The data-driven climb
+      ladder is SID-agnostic; a field may publish SIDs AND still get an omni clearance
+      when none is assigned. `{ifr_clearance_route}` in `ground_operations.cpp`.
 - [x] Direct-to last SID fix + step1 FL + cruise FL clearances via `poll_sid_climb()`
 - [x] Radar handoff at TMA upper boundary (openair_db) → Centre (`IFR_ENROUTE_CRUISE`)
 - [x] Controller name + frequency from `atc.dat` TRACON at 3-D aircraft position
@@ -152,9 +158,13 @@ Phase 4 STAR descent enforcement to be fully realistic.
 - [x] TL-aware FL / feet+QNH format (`ctx.transition_alt_ft` + QNH → dynamic TL) —
       single `format_alt_clearance()` (v4.4.0)
 - [x] `current_flight_airport()` — destination-authoritative airborne lookups (v4.4.0)
-- [ ] Next-fix heading check: bearing to next assigned STAR fix vs
-      `ctx.heading_true`. If deviation >30° for >60 s: "confirm routing,
-      you appear to be deviating from [FIX]." 2-min cooldown. (`DirectMonitor`, → v4.4.0)
+- [~] Next-fix heading / course check — **PARTIAL (v4.4.0-beta)**: `check_course()` (the
+      lateral analog of `check_next_fix`, the **"DirectMonitor" primitive**) compares
+      heading-vs-bearing to the tracked fix and fires "confirm routing, you appear off
+      track / deviating from [FIX]"; wired at **en-route + approach** sites
+      (`s_enroute_course_cooldown` / `s_approach_course_cooldown`). **SID uses a separate
+      inline check (`s_sid_deviation_cooldown_sec`); full unification across all phases via
+      one primitive + the unified route table is still open.**
 - [ ] Reuse the compliance monitor en-route
 
 ---
@@ -217,6 +227,12 @@ Phase 4 STAR descent enforcement to be fully realistic.
       not one fix past it (v4.4.0)
 - [x] Block-altitude "B" floor honored: never clear below the block; no bogus descent
       when already at the floor ("cleared \<appr\> runway NN" with no descent) (v4.4.0)
+- [x] Curved-RNP final handling (`airport+.json tower_handoff_fixes`): Approach→Tower
+      handoff at the per-approach **last-turn fix** instead of the far-out FAF (LOWI R08-Z
+      WI754 / R26-Z WI103), and the "confirm established" cross-track axis follows the same
+      last-turn-fix → threshold segment; a `controllers` override marks LOWI **towered**
+      (Innsbruck Tower 120.100), stopping the "Information" mislabel and a bogus
+      post-clearance step-down ("descend flight level 135" on a speed-only fix) (v4.4.0-beta)
 
 **Still open:**
 
@@ -229,8 +245,12 @@ Phase 4 STAR descent enforcement to be fully realistic.
       before the Information handoff (→ v4.4.0)
 - [ ] IAF shortcut — ATC offers "direct \<closer IAF\>" bypassing part of the STAR;
       accept/decline (→ v4.4.0)
-- [ ] Radar-vectoring approach (CIFP FM legs) — headings + descents to intercept,
-      "cleared approach, report established" — *experimental* (→ v4.4.0)
+- [~] Radar-vectoring approach — **PARTIAL (v4.4.0-beta)**: ONE case only — a teardrop
+      *reversal* onto the final approach course at the IAF (arrival/approach; large-turn
+      >=100 deg gated; LOWI R08-Z ELMEM). Opens ~45 deg off the approach axis, fixed
+      outbound leg, reverses, and the last vector **intercepts the inbound** + carries the
+      approach clearance. **General heading vectors, other-phase (departure / en-route) and
+      sequencing / traffic / weather vectoring are still open.**
 
 **Traffic separation directives (future — TCAS-driven):**
 
@@ -303,7 +323,10 @@ Phase 4 STAR descent enforcement to be fully realistic.
 
 - [ ] **Unified full-flight route table** — one ordered SID → enroute → STAR →
       approach structure feeding the monitor everywhere (SID prepend done; merge pending)
-- [ ] **`DirectMonitor`** — course / next-fix enforcement (SID + en-route + approach)
+- [~] **`DirectMonitor`** — course / next-fix enforcement — **PARTIAL (v4.4.0-beta)**:
+      `check_course()` primitive done, wired en-route + approach; SID course still a
+      separate inline check; unify across SID + en-route + approach (one primitive on the
+      unified route table) remaining
 - [ ] **[P0] Proactive sector handoff** 5–10 NM before the boundary (see Candidate below)
 - [ ] **IAF shortcut** (accept/decline) · **sub-CTA / UIR / delegation freq** (openair overlay)
 - [ ] **Taxiway routing** (IFR-first, apt.dat 1202 graph) · **ICAO semicircular FL**
@@ -316,8 +339,12 @@ Phase 4 STAR descent enforcement to be fully realistic.
 - [ ] **MSA / MORA compliance** — clamp every ATC-issued altitude to the terrain
       minimum (grid MSA/MORA enroute; CIFP charted minima on a published segment).
       Critical in mountainous terrain (LSGG → LOWI).
-- [ ] **Holding pattern** — "hold at \<FIX\> as published, EFC \<time\>" → readback →
-      fly the hold → release. Parse CIFP HM/HA/HF legs + HOLDING state + EFC timer.
+- [~] **Holding pattern** — **PARTIAL (v4.4.0-beta)**: published hold at a **STAR fix only**
+      (`earth_hold.dat`), random once per arrival — "hold at \<FIX\> as published, maintain
+      \<alt\>, expect further clearance at \<HHMM Zulu\>" → release "cleared to leave the
+      hold, continue via the arrival"; blocks other clearances while holding. **Open: IAF /
+      en-route / missed-approach (CIFP HM/HA/HF) holds; release phraseology is STAR-specific;
+      no readback enforcement.**
 - [ ] **Go-around / missed approach** — fly the published missed approach (post-MAP
       CIFP fixes) to the MA hold, then ATC re-sequences (vectors / hold / divert).
 - [ ] **Climb-aware SID altitude corrective monitor**
@@ -339,11 +366,14 @@ Phase 4 STAR descent enforcement to be fully realistic.
 
 ## Known limitations (release-notes caveats)
 
-- **Read-back is non-cumulative** — a new clearance that changes state cancels a
-  previously-waiting read-back (latest wins). Chosen over cumulative read-back
-  because current STT (Voxtral) is too unreliable to require several items per
-  transmission. If ATC issues a new clearance before the pilot reads back the
-  previous one, the earlier read-back requirement is silently dropped. (v4.4.0)
+- **Read-back is cumulative (multi-item queue)** — several clearances can be
+  outstanding at once via independent field slots (altitude [`fl`/`alt` share one],
+  `runway`, `speed`, `freq`, `squawk`); a new clearance replaces only its OWN slot
+  (latest-wins per field via `rb_overlap_class`) and does **not** drop unrelated
+  pending read-backs. The pilot may read them back all at once or piecemeal — each
+  field clears independently (`pending_clearances_` + `readback_ok_fields_`).
+  (implemented v4.4.0-beta — replaces the earlier non-cumulative single-slot model,
+  which silently dropped the previous read-back on a state-changing clearance.)
 - **Read-back verification is best-effort (STT-bound)** — value mismatches from
   mishearings (pilot says 250, STT emits 150) are correctly rejected but
   originate in STT. Strict fix/waypoint/SID/STAR identifier read-back deferred.
@@ -365,6 +395,9 @@ Phase 4 STAR descent enforcement to be fully realistic.
 | `format_alt_clearance()` / `current_flight_airport()` | done (v4.4.0) |
 | Route tracker (`s_route_fix_idx`, IAF/FAF guards) | done (v4.2.1) |
 | `earth_fix.dat` / `earth_nav.dat` waypoint resolution (`lookup_fix_positions`) | done (v4.4.0) |
+| **Per-airport override system** (`airport+.json`): controllers + frequencies, facility label (Tower / AFIS / Information), SID initial-climb altitude, runway config (wind-gated), weather-gated preferred approach, departure holds, per-approach Tower-handoff fix; + `airspace+` delegation overlay | done (v4.4.0-beta) |
+| **Airspace model** — openair (`airspace.txt`) authoritative for the enclosing volume / ceiling / handoff trigger + sector name across all phases; `atc.dat` for frequency (always) + geometry fallback in upper airspace / FIR / UIR where openair has no polygons; `airspace+.txt` delegation overlay for gaps | done (v4.4.0-beta) |
+| **apt.dat traffic-flow runway selection** — parse the apt.dat flow section (rows 1000 / 1001 / 1100: wind / ceiling / vis / time runway-in-use rules) as the authoritative base for the active arrival/departure runway, **overridable by `airport+.json runway_config`**; replaces the generic wind heuristic (calm→longest / max-headwind). Base data used by X-Plane's own ATC + defined by custom sceneries | not started |
 | Unified full-flight route table (SID prepend) | partial (v4.4.0) |
 | Taxi routing — Dijkstra on apt.dat 1201/1202 graph | not started |
 | Navigraph data support | not started |
@@ -398,8 +431,10 @@ Phase 4 STAR descent enforcement to be fully realistic.
 - **WhisperATC is NOT the path forward** — fine-tuned aviation Whisper models
   were evaluated; comprehension of general ICAO phraseology is worse than
   Voxtral.
-- A **new clearance supersedes a stale waiting read-back** (non-cumulative) so a
-  speed read-back can't hijack a subsequent landing read-back (v4.4.0).
+- Read-backs coexist in **independent field slots** (`rb_overlap_class`): a new
+  clearance replaces only its own slot, so a pending speed read-back no longer
+  hijacks a subsequent landing/runway read-back — and neither is silently dropped
+  (v4.4.0-beta, cumulative multi-item queue).
 
 ---
 

@@ -187,6 +187,7 @@ $(CATCH2_SENTINEL):
 RELEASE_FLAG ?=
 
 build: $(SUBMODULES_SENTINEL) $(SDK_SENTINEL) $(IMGUI_SENTINEL) $(JSON_SENTINEL) $(CATCH2_SENTINEL)
+	@touch src/main.cpp   # refresh the __DATE__/__TIME__ build stamp logged at startup
 ifeq ($(OS),Darwin)
 	@echo "=== Building universal xp_wellys_atc (arm64 local+cloud, x86_64 cloud-only) ==="
 	@echo ""

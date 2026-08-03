@@ -1132,8 +1132,16 @@ static void submit_recording_to_stt() {
       // "04" -> "zero for"; user 2026-07-19).
       const std::string appr_spoken =
           engine::assigned_approach_spoken(ctx_for_whisper);
-      if (!appr_spoken.empty())
+      if (!appr_spoken.empty()) {
         airport_ctx += " " + appr_spoken;
+        // Also anchor the HYPHENATED "R-NAV" pronunciation of the SAME full phrase.
+        // The bare "R-NAV" + "R-NAV NN" entries exist, but the full variant phrase was
+        // only biased as un-hyphenated "RNAV Zulu approach runway 08" -- Voxtral maps
+        // the glued "RNAV" token poorly and heard "Arnulf/NABZULU Zulu" on the readback
+        // (real vol LOWI 2026-08-02). "RNAV ..." -> "R-NAV ...". [C. P. Potter]
+        if (appr_spoken.rfind("RNAV", 0) == 0)
+          airport_ctx += " R-NAV" + appr_spoken.substr(4);
+      }
       // Callsign-dilution guard (user 2026-07-19: N750XP is recognised well in
       // DEPARTURE / ENROUTE but worse in ARRIVAL / APPROACH). Once in the terminal
       // arrival/approach phase the whole ENROUTE navlog is behind the aircraft --

@@ -38,6 +38,7 @@
 #include "data/airspace_db.hpp"
 #include "data/openair_db.hpp"
 #include "data/simbrief_ofp.hpp"
+#include "data/airport_overrides.hpp"
 #include "data/traffic_context.hpp"
 #include "persistence/model_manifest.hpp"
 #include "persistence/models_catalog.hpp"
@@ -2537,6 +2538,27 @@ static bool path_exists(const std::string &p) {
 }
 
 static void draw_ifr_tab() {
+  // ── IFR options ─────────────────────────────────────────────────────────────
+  ImGui::SeparatorText("Options");
+  {
+    bool hold_on = settings::hold_enabled();
+    if (ImGui::Checkbox("HOLD", &hold_on))
+      settings::set_hold_enabled(hold_on);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("When ON, ATC may issue a published holding pattern at a STAR "
+                        "fix (random, once per arrival). Turn OFF to never be held.");
+
+    bool sc_always = settings::shortcut_always();
+    if (ImGui::Checkbox("SHORTCUTS ALWAYS", &sc_always))
+      settings::set_shortcut_always(sc_always);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("When ON, every eligible ATC shortcut (direct to SID exit "
+                        "fix, en-route fix, or the nearest approach IAF) fires at "
+                        "100%% instead of the default ~20%% chance. Directs still "
+                        "respect track saving and a max 3-degree descent.");
+  }
+  ImGui::Spacing();
+
   // ── Data File Status ────────────────────────────────────────────────────────
   ImGui::SeparatorText("Data Files");
   {
@@ -2637,12 +2659,64 @@ static void draw_ifr_tab() {
       ImGui::Text("Aircraft %.4f, %.4f  %d ft MSL (airspace cmp %d ft)",
                   ctx.latitude, ctx.longitude,
                   static_cast<int>(ctx.altitude_ft_msl), alt);
-      if (s_encl.empty()) {
-        // openair has no volume here -- typical in upper airspace / FIR, since
-        // airspace.txt carries no FIR polygons (e.g. over Slovenia at FL450).
-        // Show the atc.dat fallback: the polygons that ACTUALLY drive the enroute
-        // sector handoff (LJUBLJANA 0-FL660). Skip oceanic / global-junk polygons
-        // (same filter as sector_picker::pick_next).
+      // openair (airspace.txt) enclosing volumes -- GEOMETRY only, no frequency.
+      if (!s_encl.empty()) {
+        for (const auto &e : s_encl) {
+          const bool is_inner =
+              !s_inner.name.empty() && e.name == s_inner.name &&
+              e.ac_class == s_inner.ac_class;
+          if (is_inner) {
+            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
+                               "> %-3s %s  [%d-%d ft]", class_name(e.ac_class),
+                               e.name.c_str(), e.floor_ft, e.ceiling_ft);
+            // openair carries no frequency: resolve THIS innermost zone's contact freq
+            // from the destination's approach controller override (airport+.json) when
+            // the volume relates to the destination (name-token match) -- so the Innsbruck
+            // TMA shows Innsbruck Radar 128.975, not the coarse enclosing Vienna CTR
+            // (user 2026-08-02). Own freq per line. [C. P. Potter]
+            const auto &ofp2 = simbrief_ofp::get();
+            if (!ofp2.destination_icao.empty()) {
+              std::string on;
+              float of = 0.0f;
+              if (airport_overrides::controller(ofp2.destination_icao, "approach", &on,
+                                                &of) &&
+                  of > 100.0f) {
+                std::string tok = on.substr(0, on.find(' '));
+                auto up = [](std::string s) {
+                  for (char &c : s)
+                    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                  return s;
+                };
+                if (!tok.empty() && up(e.name).find(up(tok)) != std::string::npos) {
+                  const uint32_t khz =
+                      static_cast<uint32_t>(std::round(of * 1000.0f));
+                  char btn[80];
+                  std::snprintf(btn, sizeof(btn), "%s %.3f##openairfreq", on.c_str(), of);
+                  ImGui::SameLine();
+                  if (ImGui::SmallButton(btn))
+                    xplane_context::set_standby_freq(khz);
+                  if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(ui_strings::tr("tooltip.set_standby_format"),
+                                      ctx.active_com, of);
+                }
+              }
+            }
+          } else {
+            ImGui::Text("  %-3s %s  [%d-%d ft]", class_name(e.ac_class),
+                        e.name.c_str(), e.floor_ft, e.ceiling_ft);
+          }
+        }
+        ImGui::TextDisabled("> innermost openair (drives IFR sector/handoff)");
+      } else {
+        ImGui::TextDisabled("openair: no volume here (upper airspace / FIR)");
+      }
+      // atc.dat controllers = the FREQUENCY source for the zone we are in (openair
+      // carries none). Clickable freq button -> active COM standby, shown ALWAYS --
+      // previously only in the openair-empty fallback, so with an airspace.txt volume
+      // present the current-zone freq had no button (user 2026-08-02: "tu le fais deja
+      // quand tu affiches un volume atc.dat"). Skip oceanic / global-junk polygons
+      // (same filter as sector_picker::pick_next). [C. P. Potter]
+      {
         bool any_atc = false;
         for (size_t ci2 = 0; ci2 < ctx.enclosing_airspaces.size(); ++ci2) {
           const auto *c = ctx.enclosing_airspaces[ci2];
@@ -2655,7 +2729,6 @@ static void draw_ifr_tab() {
           ImGui::Text("  %-3s %s  [%d-%d ft]  (atc.dat)",
                       airspace_db::role_name(c->role), c->name.c_str(),
                       c->floor_ft, c->ceiling_ft);
-          // Clickable frequency -> COM standby (same as the En-Route tab).
           const uint32_t freq = c->freqs_khz.front();
           const float freq_mhz = static_cast<float>(freq) / 1000.0f;
           char btn[64];
@@ -2669,23 +2742,7 @@ static void draw_ifr_tab() {
           any_atc = true;
         }
         if (any_atc)
-          ImGui::TextDisabled("> openair empty here -- atc.dat fallback (drives handoff)");
-        else
-          ImGui::TextDisabled("outside all indexed airspaces");
-      } else {
-        for (const auto &e : s_encl) {
-          const bool is_inner =
-              !s_inner.name.empty() && e.name == s_inner.name &&
-              e.ac_class == s_inner.ac_class;
-          if (is_inner)
-            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f),
-                               "> %-3s %s  [%d-%d ft]", class_name(e.ac_class),
-                               e.name.c_str(), e.floor_ft, e.ceiling_ft);
-          else
-            ImGui::Text("  %-3s %s  [%d-%d ft]", class_name(e.ac_class),
-                        e.name.c_str(), e.floor_ft, e.ceiling_ft);
-        }
-        ImGui::TextDisabled("> innermost (drives IFR sector/handoff)");
+          ImGui::TextDisabled("> atc.dat freqs -- the zone to contact (-> COM standby)");
       }
     }
   }
@@ -2871,6 +2928,44 @@ static void draw_ifr_tab() {
       ImGui::TextDisabled("FPL:");
       ImGui::SameLine();
       ImGui::TextWrapped("%s", ofp.raw_route.c_str());
+    }
+
+    // Expanded waypoint chain from the navlog. SimBrief's one-line filed route
+    // (raw_route) FOLDS an enroute fix into a SID/STAR designator when that fix
+    // is the procedure's entry/exit point -- e.g. "LFLU DCT ROMAM ROMA2P LFLP"
+    // files as "DCT ROMA2P" because ROMAM is the ROMA2P STAR entry, so ROMAM
+    // never appears as its own token. The navlog still lists every waypoint, so
+    // surface the ident chain here to make the filed fixes visible. Idents only
+    // -- SimBrief's per-fix altitude profile is deliberately NOT shown (it is a
+    // planning artifact, not an ATC clearance; see the removed-list note below).
+    // [C. P. Potter]
+    {
+      std::string wpts;
+      std::string prev;
+      for (const auto &f : ofp.navlog) {
+        if (f.ident.empty() || f.ident == "TOC" || f.ident == "TOD")
+          continue;
+        if (f.ident == ofp.origin_icao || f.ident == ofp.destination_icao)
+          continue;
+        // Show ENROUTE fixes only. The plugin ignores SimBrief's filed SID/STAR
+        // (it resolves the procedure from the CIFP itself), so listing SimBrief's
+        // SID/STAR fixes here would be misleading -- e.g. LFLU->LFLP would show the
+        // ROMA3P STAR fixes LSE/GOVNA/PIRUV, which are not what ATC will fly. Keep
+        // the enroute fix (ROMAM) visible; drop is_sid_star fixes. [C. P. Potter]
+        if (f.is_sid_star)
+          continue;
+        if (f.ident == prev)
+          continue; // collapse consecutive duplicates
+        if (!wpts.empty())
+          wpts += " ";
+        wpts += f.ident;
+        prev = f.ident;
+      }
+      if (!wpts.empty()) {
+        ImGui::TextDisabled("Waypoints:");
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", wpts.c_str());
+      }
     }
 
     if (!ofp.sid_name.empty())

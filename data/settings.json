@@ -9,6 +9,7 @@
   "debug_traffic": false,
   "debug_text_input": false,
   "traffic_features_enabled": true,
+  "hold_enabled": true,
   "start_mode": "engines_running",
   "backend_mode": "local",
   "local_stt_model": "ggml-base.en-atc.bin",

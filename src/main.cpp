@@ -136,7 +136,10 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
   std::snprintf(desc, 256, "AI-powered ATC voice communication for VFR");
 
   logging::set_sink(&XPLMDebugString);
-  logging::info("Plugin started");
+  // Build stamp so the running build is ALWAYS identifiable in Log.txt (the tester flies
+  // on a separate PC -- recurring "which build did I deploy?" uncertainty). The Makefile
+  // touches this TU before every build so __DATE__/__TIME__ refresh. [C. P. Potter]
+  logging::info("Plugin started (built %s %s)", __DATE__, __TIME__);
 
   // Seed the PRNG used by probability-gated ATC choices (SID direct-to,
   // STAR direct-to, target-fix selection). Without seeding, std::rand()

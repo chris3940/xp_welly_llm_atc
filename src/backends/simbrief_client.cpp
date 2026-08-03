@@ -37,6 +37,11 @@ size_t write_to_string(char *ptr, size_t size, size_t nmemb, void *userdata) {
   return size * nmemb;
 }
 
+// Parse a raw SimBrief JSON body into simbrief_ofp, setting g_status/g_last_error
+// exactly as a live fetch does. Defined below; shared by do_fetch and the public
+// load_ofp_body harness entry so both run the SAME parser. [C. P. Potter]
+static void parse_body(const std::string &body);
+
 void do_fetch(int pilot_id) {
   g_status.store(FetchStatus::FETCHING);
   g_last_error.clear();
@@ -89,6 +94,13 @@ void do_fetch(int pilot_id) {
     }
   }
 
+  parse_body(body);
+}
+
+// The parser proper -- reparented out of do_fetch so load_ofp_body can reuse it
+// verbatim. The block below is unchanged; only the enclosing function boundary
+// moved. [C. P. Potter]
+static void parse_body(const std::string &body) {
   try {
     using json = nlohmann::json;
     auto j = json::parse(body);
@@ -417,6 +429,8 @@ void do_fetch(int pilot_id) {
 }
 
 } // namespace
+
+void load_ofp_body(const std::string &body) { parse_body(body); }
 
 void fetch_async(int pilot_id) {
   if (pilot_id <= 0)

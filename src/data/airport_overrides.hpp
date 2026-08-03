@@ -83,6 +83,22 @@ bool departure_hold(const std::string &icao, const std::string &sid_last_fix,
 bool controller(const std::string &icao, const std::string &role,
                 std::string *out_name, float *out_freq_mhz);
 
+// Per-approach override of the Approach->Tower handoff trigger FIX, replacing the
+// FAF. For curved RNP finals whose FAF is far out and the aircraft is only
+// "established on final" at a late last-turn fix (LOWI RNP 08: FAF WI749 ~28 NM out
+// -> handoff belongs at WI754 on the straight-in). Returns the fix ident (UPPER) for
+// (icao, approach designator), or "" when no override -> caller keeps the FAF. (CPP)
+std::string tower_handoff_fix(const std::string &icao,
+                              const std::string &designator);
+
+// Published SID initial-climb clearance altitude (feet) from the chart (NOT in the CIFP)
+// for icao + sid_name, chosen by aircraft type (is_jet -> jet_alt_ft, else prop_alt_ft,
+// else alt_ft). First rule whose match_sids contains sid_name wins (empty match_sids =
+// any SID). Returns 0 when no override -> caller keeps the CIFP / generic initial climb.
+// e.g. LFMN BASI8X: jets 10000 ft (FL100) / props 7000 ft (FL070). (C. P. Potter)
+int sid_initial_climb_ft(const std::string &icao, const std::string &sid_name,
+                         bool is_jet);
+
 } // namespace airport_overrides
 
 #endif // DATA_AIRPORT_OVERRIDES_HPP

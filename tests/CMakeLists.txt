@@ -34,6 +34,7 @@ add_executable(xp_wellys_atc_tests
     test_phraseology_hints.cpp
     test_airport_vrps.cpp
     test_traffic_geometry.cpp
+    test_route_shortcut.cpp
     test_traffic_context.cpp
     test_traffic_advisor.cpp
     test_traffic_dialog.cpp
