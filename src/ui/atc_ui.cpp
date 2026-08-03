@@ -90,6 +90,8 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <set>
+#include <sstream>
 #include <vector>
 
 namespace atc_ui {
@@ -2925,9 +2927,32 @@ static void draw_ifr_tab() {
     // This is the authoritative filed FPL that drives the enroute FL steps;
     // wrapped so a long route doesn't overflow the panel.
     if (!ofp.raw_route.empty()) {
-      ImGui::TextDisabled("FPL:");
-      ImGui::SameLine();
-      ImGui::TextWrapped("%s", ofp.raw_route.c_str());
+      // Strip SimBrief's SID/STAR DESIGNATORS from the displayed route -- the user
+      // does not want SimBrief SID/STAR surfaced anywhere (the plugin resolves the
+      // procedure from the CIFP). SimBrief folds them into the raw route as tokens
+      // (e.g. "N0285F140 DCT ROMAM ROMA3P" -> drop "ROMA3P"), so remove the filed
+      // SID name and every STAR-group via_airway token. [C. P. Potter]
+      std::set<std::string> procs;
+      if (!ofp.sid_name.empty())
+        procs.insert(ofp.sid_name);
+      for (const auto &f : ofp.navlog)
+        if (f.is_sid_star && !f.via_airway.empty() && f.via_airway != "DCT")
+          procs.insert(f.via_airway);
+      std::string route;
+      std::istringstream iss(ofp.raw_route);
+      std::string tok;
+      while (iss >> tok) {
+        if (procs.count(tok))
+          continue; // drop SID/STAR designator token
+        if (!route.empty())
+          route += " ";
+        route += tok;
+      }
+      if (!route.empty()) {
+        ImGui::TextDisabled("FPL:");
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", route.c_str());
+      }
     }
 
     // Expanded waypoint chain from the navlog. SimBrief's one-line filed route
@@ -2968,11 +2993,9 @@ static void draw_ifr_tab() {
       }
     }
 
-    if (!ofp.sid_name.empty())
-      ImGui::Text("Filed SID: %s  (ATC may assign different)",
-                  ofp.sid_name.c_str());
-    else
-      ImGui::TextDisabled("Filed SID: (none)");
+    // Filed SID line intentionally NOT shown: the user does not want SimBrief's
+    // SID/STAR surfaced in the panel at all (the plugin assigns the procedure from
+    // the CIFP). [C. P. Potter]
 
     if (ofp.cruise_alt_ft > 0) {
       if (ofp.cruise_alt_ft % 100 == 0 && ofp.cruise_alt_ft >= 10000)
