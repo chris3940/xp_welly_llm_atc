@@ -1183,6 +1183,12 @@ static void submit_recording_to_stt() {
       int fix_count = 0;
       if (!prune_navlog) {
         for (const auto &fix : ofp.navlog) {
+          // ENROUTE fixes only -- skip SimBrief SID/STAR fixes. The STAR arrival
+          // fixes (is_sid_star=1) were leaking into the DEPARTURE/climb prompt (user
+          // 2026-08-03); they re-enter via `upcoming` below once the arrival clearance
+          // loads the STAR (a bit before the STAR, when they matter). Mirrors the BIAS.
+          if (fix.is_sid_star)
+            continue;
           if (!fix.ident.empty() && fix_count < 60) {
             airport_ctx += " " + fix.ident;
             ++fix_count;
@@ -1684,6 +1690,15 @@ static void submit_recording_to_stt() {
           int nfix = 0;
           for (const auto &f : ofp.navlog) {
             if (f.ident.empty())
+              continue;
+            // Skip SimBrief SID/STAR fixes here -- ENROUTE fixes only. The STAR
+            // arrival fixes (LSE/GOVNA/PIRUV) are is_sid_star=1 and were leaking into
+            // the DEPARTURE/climb bias (user 2026-08-03: "LSE, direct LSE, GOVNA..."
+            // in the takeoff bias), risking arrival-fix mishearings on departure. They
+            // re-enter the bias via `upcoming` (tracker-forward) once the arrival
+            // clearance loads the STAR -- i.e. a bit BEFORE the STAR, which is when
+            // they matter. The plugin ignores SimBrief's filed SID/STAR anyway.
+            if (f.is_sid_star)
               continue;
             add(f.ident);
             add("direct " + f.ident);
