@@ -1668,6 +1668,22 @@ void update() {
       if (ctrl && ctrl->role == airspace_db::ControllerRole::TRACON)
         ctx.frequency_type = FrequencyType::APPROACH;
     }
+    // airport+.json "info" role frequency takes PRECEDENCE over apt.dat -- the
+    // overlay exists precisely to correct apt.dat's mislabels (LFLU's AFIS 120.105
+    // is filed in apt.dat as a TOWER at 120.100, so the raw lookup yields
+    // TOWER/UNKNOWN). If the active COM matches the AFIS info freq, classify it INFO
+    // so the ground AFIS flow + frequency guards recognise it instead of treating it
+    // as an unknown/wrong frequency (user 2026-08-03: "on definit le type de freq
+    // dans airport+ pour eviter les erreurs de l'autre base"). Only the "info" role
+    // is mapped -- "delivery" (e.g. Lyon 125.155) is shared ground+airborne and must
+    // not be forced to a type here. [C. P. Potter]
+    if (!ctx.nearest_airport_id.empty() && active_freq > 100.0f) {
+      std::string nm;
+      float f = 0.0f;
+      if (airport_overrides::controller(ctx.nearest_airport_id, "info", &nm, &f) &&
+          f > 100.0f && std::fabs(active_freq - f) < 0.02f)
+        ctx.frequency_type = FrequencyType::INFO;
+    }
   }
 
   // Nearest airport lookup — throttled to every 60 frames (~1s)

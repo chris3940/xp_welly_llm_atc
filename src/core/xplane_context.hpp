@@ -86,6 +86,7 @@ enum class FrequencyType {
   UNICOM,
   CTAF,
   ATIS,
+  INFO, // AFIS "Information" service (from airport+.json "info" role)
 };
 
 const char *frequency_type_name(FrequencyType ft);

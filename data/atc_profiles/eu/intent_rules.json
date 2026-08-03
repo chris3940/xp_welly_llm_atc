@@ -195,7 +195,8 @@
         "request start up",
         "request ifr clearance",
         "request clearance",
-        { "all": ["ready", { "any": ["departure", "takeoff", "take off"] }, { "none": ["contact"] }] }
+        { "all": ["ready", { "any": ["departure", "takeoff", "take off"] }, { "none": ["contact"] }] },
+        { "all": ["taxi", "runway"], "none": [" via "] }
       ],
       "any": [
         "wilco",
@@ -309,7 +310,8 @@
       "_note": "Plain 'request taxi' but exclude frequency-change readbacks and taxi-instruction readbacks (which mention 'taxi' but are echoes, not requests). 'report ready taxi' is excluded because ATC says 'report when ready to taxi' and Voxtral may drop 'when'.",
       "intent": "REQUEST_TAXI",
       "confidence": 0.90,
-      "any": ["request taxi", "requesting taxi", "taxiing", { "all": ["ready", "taxi"] }],
+      "any": ["request taxi", "requesting taxi", "taxiing", { "all": ["ready", "taxi"] },
+              { "all": ["taxi", "runway"] }],
       "none": [
         "contact ground", "contact tower", "contact approach", "contact departure",
         { "all": ["taxi", "holding point"] },

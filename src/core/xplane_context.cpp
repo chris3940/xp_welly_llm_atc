@@ -39,6 +39,8 @@ int priority_rank(FrequencyType t) {
     return 2;
   case FrequencyType::UNICOM:
     return 1;
+  case FrequencyType::INFO: // AFIS info service (set from airport+.json, not apt.dat)
+    return 2;
   case FrequencyType::UNKNOWN:
     return 0;
   }
@@ -109,6 +111,8 @@ const char *frequency_type_name(FrequencyType ft) {
     return "CTAF";
   case FrequencyType::ATIS:
     return "ATIS";
+  case FrequencyType::INFO:
+    return "Information";
   }
   return "Unknown";
 }

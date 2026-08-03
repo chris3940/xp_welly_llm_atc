@@ -264,6 +264,7 @@ role_for_frequency(const xplane_context::XPlaneContext &ctx) {
     return R::Atis;
   case FT::DELIVERY:
   case FT::GROUND:
+  case FT::INFO: // AFIS "Information" -- ground/advisory service voice
     return R::Ground;
   case FT::TOWER:
     return R::Tower;
