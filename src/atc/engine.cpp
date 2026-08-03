@@ -510,6 +510,10 @@ struct RouteFix {
 };
 static std::vector<RouteFix> s_route_fixes;
 static int   s_route_fix_idx      = 0;
+// Full route saved before a direct-to-off-route-IAF shortcut rebuilds s_route_fixes,
+// so an UNABLE restores the STAR routing (a bare idx-revert can't -- the STAR fixes
+// were spliced out). Empty when no rebuild is pending.
+static std::vector<RouteFix> s_star_shortcut_prev_route;
 static float s_route_tracker_tick = 0.0f; // seconds since last distance check
 // Pending ATC-direct event from poll_approach — returned by poll_route_tracker
 // so atc_session picks it up via the existing System transcript push.
@@ -699,6 +703,7 @@ void reset() {
   s_star_shortcut_offered = false;
   s_star_shortcut_pending = false;
   s_star_shortcut_prev_idx = -1;
+  s_star_shortcut_prev_route.clear();
   s_approach_faf = {};
   s_vec_plan = {};
   s_vec_step = -1;
@@ -876,6 +881,7 @@ void training_jump_approach() {
   s_star_shortcut_offered = false;
   s_star_shortcut_pending = false;
   s_star_shortcut_prev_idx = -1;
+  s_star_shortcut_prev_route.clear();
   s_approach_faf = {};
   s_vec_plan = {};
   s_vec_step = -1;
@@ -948,6 +954,7 @@ void training_jump_arrival() {
   s_star_shortcut_offered = false;
   s_star_shortcut_pending = false;
   s_star_shortcut_prev_idx = -1;
+  s_star_shortcut_prev_route.clear();
   s_approach_faf              = {};
   s_last_cleared_route_idx    = -1;
   s_faf_route_idx             = -1;
@@ -1475,6 +1482,12 @@ void process_transcript(Input in, Done done) {
                          low.find("negative") != std::string::npos;
     s_star_shortcut_pending = false;
     if (refused) {
+      // Restore the full STAR route if it was rebuilt (off-route IAF), else just
+      // revert the tracker idx (on-route IAF).
+      if (!s_star_shortcut_prev_route.empty()) {
+        s_route_fixes = s_star_shortcut_prev_route;
+        s_star_shortcut_prev_route.clear();
+      }
       if (s_star_shortcut_prev_idx >= 0)
         s_route_fix_idx = s_star_shortcut_prev_idx;
       logging::info("IFR STAR shortcut: pilot UNABLE -> reverting to STAR "
@@ -1488,6 +1501,7 @@ void process_transcript(Input in, Done done) {
       done(std::move(out));
       return;
     }
+    s_star_shortcut_prev_route.clear(); // accepted -> rebuild is permanent
     logging::info("IFR STAR shortcut: direct accepted (readback follows)");
   }
 
@@ -8743,6 +8757,65 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
 // settings::shortcut_always(). The pilot may refuse (UNABLE) -> revert to the STAR.
 // The candidate set is the expected approach's IAFs; the generic nearest-pick lives
 // in route_shortcut::pick_nearest so other STAR strategies can reuse it. [C. P. Potter]
+// Rebuild s_route_fixes for a "direct <IAF>" to an OFF-ROUTE IAF -- an approach
+// transition entry that is NOT on the filed STAR (e.g. TOLNA for LFLP R04-Z, whose
+// STAR enters at PIRUV). Keeps the fixes already passed (enroute + the STAR entry
+// like ROMAM), DROPS the STAR remainder (LSE/GOVNA/PIRUV) and splices in the IAF's
+// own approach transition (TOLNA -> ... -> FAF -> MAP) so the tracker targets the IAF
+// and stops nagging "expected <next STAR fix>" (user 2026-08-03). The full route is
+// saved to s_star_shortcut_prev_route so an UNABLE can restore it. [C. P. Potter]
+static void rebuild_route_direct_to_iaf(const xplane_context::XPlaneContext &ctx,
+                                        const std::string &iaf_ident) {
+  if (ctx.cifp_dir.empty() || s_assigned_dest_icao.empty() ||
+      s_assigned_approach_designator.empty() || iaf_ident.empty())
+    return;
+  s_star_shortcut_prev_route = s_route_fixes; // for UNABLE restore
+  const int keep = std::min(std::max(0, s_route_fix_idx),
+                            static_cast<int>(s_route_fixes.size()));
+  s_route_fixes.resize(keep);
+  s_route_fix_idx = keep; // the first spliced fix (the IAF) is now the next fix
+
+  auto ap = cifp_reader::approach_procedure_waypoints(
+      ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator, iaf_ident,
+      /*constrained_only=*/false);
+  for (size_t i = 0; i < ap.size(); ++i)
+    if (ap[i].is_map) { ap.resize(i + 1); break; } // drop missed-approach fixes
+
+  std::vector<std::string> idents;
+  for (const auto &wp : ap)
+    if (!wp.ident.empty())
+      idents.push_back(wp.ident);
+  const auto pos_map =
+      cifp_reader::lookup_fix_positions(ctx.cifp_dir, idents, s_assigned_dest_icao);
+  const auto dpos = xplane_context::airport_pos_for(s_assigned_dest_icao);
+  for (const auto &wp : ap) {
+    if (wp.ident.empty())
+      continue;
+    double lat = 0.0, lon = 0.0;
+    auto it = pos_map.find(wp.ident);
+    if (it != pos_map.end()) { lat = it->second.first; lon = it->second.second; }
+    if ((lat != 0.0 || lon != 0.0) && (dpos.first != 0.0 || dpos.second != 0.0) &&
+        traffic_geometry::distance_nm(lat, lon, dpos.first, dpos.second) > 300.0) {
+      lat = 0.0; lon = 0.0; // implausible mis-resolution -> drop coord
+    }
+    RouteFix rf;
+    rf.ident = wp.ident;
+    rf.lat = lat;
+    rf.lon = lon;
+    rf.alt = wp.alt;
+    rf.is_ceiling = wp.is_ceiling;
+    rf.is_floor = wp.is_floor;
+    rf.floor_ft = wp.floor_ft;
+    rf.speed_kt = wp.speed_kt;
+    rf.is_approach_proc = wp.is_approach_proc;
+    rf.is_map = wp.is_map;
+    s_route_fixes.push_back(rf);
+  }
+  logging::info("[route] direct-to-IAF rebuild: kept %d prefix fix(es), spliced %s "
+                "approach transition (%zu fixes), tracker -> idx %d",
+                keep, iaf_ident.c_str(), ap.size(), s_route_fix_idx);
+}
+
 static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
                                std::string *out_text,
                                bool *out_requires_readback) {
@@ -8843,13 +8916,20 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
     return false;
   }
 
-  // Issue the direct. Jump the route tracker to the IAF when it is on the route
-  // (save the previous idx so an UNABLE can restore the STAR routing).
+  // Issue the direct. Jump the route tracker to the IAF.
+  // - ON the route (STAR-terminus IAF): just advance the idx (idx-revert restores).
+  // - OFF the route (alternate transition IAF like TOLNA, not on the filed STAR):
+  //   REBUILD the route via that IAF -- drop the STAR remainder + splice the IAF's
+  //   approach transition -- so the tracker targets the IAF instead of the stale next
+  //   STAR fix (which produced a false "confirm routing, expected ... to LSE" nag;
+  //   real vol LFLU->LFLP 2026-08-03). The full route is saved for UNABLE restore.
   s_star_shortcut_prev_idx = s_route_fix_idx;
-  if (pick.route_idx >= 0) {
+  s_star_shortcut_prev_route.clear();
+  if (pick.route_idx >= 0)
     s_route_fix_idx = pick.route_idx;
-    s_pending_route_direct = "ATC direct: " + pick.ident;
-  }
+  else
+    rebuild_route_direct_to_iaf(ctx, pick.ident);
+  s_pending_route_direct = "ATC direct: " + pick.ident;
   s_star_shortcut_pending = true;
 
   const std::string &cs = atc_state_machine::session_callsign();
