@@ -8762,6 +8762,17 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
     for (const auto &rf : s_route_fixes)
       if (rf.ident == id && rf.alt.feet > 0)
         return (rf.is_floor && !rf.is_ceiling) ? 0 : rf.alt.feet;
+    // Off-route IAF (an approach-transition entry NOT on the filed STAR/route, e.g.
+    // TOLNA for LFLP R04-Z when the FPL flies the ROMA3P->PIRUV entry): take the
+    // first constrained fix of ITS OWN approach transition as the crossing-altitude
+    // proxy, so the 3-degree descent gate is NOT bypassed. Without this cross_alt=0
+    // disabled the gate ("descent 0.0 deg") and a too-steep direct was offered on a
+    // high/compressed profile (user 2026-08-03). [C. P. Potter]
+    auto proc = cifp_reader::approach_procedure_waypoints(
+        ctx.cifp_dir, dest, s_assigned_approach_designator, id);
+    for (const auto &w : proc)
+      if (w.alt.feet > 0)
+        return (w.is_floor && !w.is_ceiling) ? 0 : w.alt.feet;
     return 0;
   };
 
