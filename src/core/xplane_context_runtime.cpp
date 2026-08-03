@@ -476,6 +476,34 @@ std::string nearest_taxiway_phrase(const std::string &icao,
   return "via " + name;
 }
 
+// Keep the runway in service unless its along-axis TAILWIND exceeds the limit.
+// Prevents the active runway oscillating between the two ends of one runway on
+// light/variable wind, or when wind_speed jitters across the calm (3 kt) threshold
+// so alternate frames take the calm branch (deterministic lower-numbered end) vs the
+// wind branch (wind-favoured end) -- the real LFLU 01<->19 announcement storm
+// (2026-08-03). Applied to EVERY candidate return path so no branch can bypass it.
+static std::string apply_runway_hysteresis(const std::string &candidate,
+                                           const std::string &current_runway,
+                                           const std::vector<RunwayInfo> &runways,
+                                           float wind_dir, float wind_speed) {
+  constexpr float kMaxTailwindKt = 7.0f;
+  if (current_runway.empty() || candidate == current_runway)
+    return candidate;
+  for (const auto &rwy : runways)
+    for (const auto *end : {&rwy.end1, &rwy.end2}) {
+      if (end->number != current_runway)
+        continue;
+      // Along-axis component: +headwind from the front, -tailwind from behind.
+      const float axis =
+          std::fmod(wind_dir - end->heading_deg + 540.0f, 360.0f) - 180.0f;
+      const float tailwind =
+          -wind_speed * std::cos(axis * static_cast<float>(kDeg2Rad));
+      return (tailwind <= kMaxTailwindKt) ? current_runway // within limit -> stay
+                                          : candidate;     // too much tailwind -> switch
+    }
+  return candidate; // current runway no longer exists -> take the candidate
+}
+
 static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
                                         float wind_dir, float wind_speed,
                                         const std::string &cifp_dir,
@@ -512,14 +540,13 @@ static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
            rwy.length_m > best->length_m))
         best = &rwy;
     }
+    // Deterministic default: lower-numbered end; CIFP preferred-departure end wins.
+    std::string cand = (best->end1.number < best->end2.number) ? best->end1.number
+                                                               : best->end2.number;
     if (!cifp_dir.empty() && !icao.empty()) {
       std::string pref =
           cifp_reader::preferred_departure_runway(cifp_dir, icao);
       if (!pref.empty()) {
-        if (best->end1.number == pref)
-          return best->end1.number;
-        if (best->end2.number == pref)
-          return best->end2.number;
         // CIFP may use "22L" for physical runway "22" (parallel suffix on
         // airports where apt.dat omits the parallel designator).
         std::string pref_base = pref;
@@ -528,15 +555,16 @@ static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
           if (last == 'L' || last == 'R' || last == 'C')
             pref_base.pop_back();
         }
-        if (best->end1.number == pref_base)
-          return best->end1.number;
-        if (best->end2.number == pref_base)
-          return best->end2.number;
+        if (best->end1.number == pref || best->end1.number == pref_base)
+          cand = best->end1.number;
+        else if (best->end2.number == pref || best->end2.number == pref_base)
+          cand = best->end2.number;
       }
     }
-    if (best->end1.number < best->end2.number)
-      return best->end1.number;
-    return best->end2.number;
+    // Hysteresis so a wind_speed jitter across the 3 kt line can't flip us between
+    // this calm-branch pick and the wind-branch pick each frame.
+    return apply_runway_hysteresis(cand, current_runway, runways, wind_dir,
+                                   wind_speed);
   }
 
   // Wind-based: find runway end with largest headwind component
@@ -580,32 +608,11 @@ static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
     }
   }
 
-  // Keep the runway-in-use unless its TAILWIND exceeds the limit. The only
-  // criterion is the along-axis wind component on the CURRENT runway: 7 kt is the
-  // max tailwind (from behind) tolerated on the runway in service. A light /
-  // variable wind never flips the active runway (user 2026-07-26, LFLP wind
-  // 003/05: RWY 22 tailwind is only 4 kt, so 22 stays). The old rule keyed on the
-  // head-vs-tail DIFFERENCE (~2x the component), which crossed the threshold for a
-  // near-axis light wind and flipped 22 <-> 04.
-  if (!current_runway.empty() && best_end != current_runway) {
-    constexpr float kMaxTailwindKt = 7.0f;
-    for (const auto &rwy : runways) {
-      if (any_paved && !is_paved(rwy.surface_code))
-        continue;
-      for (const auto *end : {&rwy.end1, &rwy.end2}) {
-        if (end->number != current_runway)
-          continue;
-        // Along-axis component: +headwind from the front, -tailwind from behind.
-        const float axis =
-            std::fmod(wind_dir - end->heading_deg + 540.0f, 360.0f) - 180.0f;
-        const float tailwind =
-            -wind_speed * std::cos(axis * static_cast<float>(kDeg2Rad));
-        if (tailwind <= kMaxTailwindKt)
-          return current_runway; // within limit -> stay in service
-      }
-    }
-  }
-  return best_end;
+  // Keep the runway-in-use unless its TAILWIND exceeds the limit (7 kt): a light /
+  // variable wind never flips the active runway (user 2026-07-26, LFLP wind 003/05:
+  // RWY 22 tailwind is only 4 kt, so 22 stays). Same helper as the calm branch.
+  return apply_runway_hysteresis(best_end, current_runway, runways, wind_dir,
+                                 wind_speed);
 }
 
 static std::string xplane_system_path() {
