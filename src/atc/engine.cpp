@@ -7712,11 +7712,33 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
     // Chambery) AND enroute sub-sectors / cross-border delegation (Milan
     // sub-CTAs, LFFF->LSAS) via the unified resolver. The atc.dat CTR picker
     // below is the fallback when no openair sector resolves a frequency.
+    // Never resolve an ENROUTE sector to the DESTINATION's own approach frequency:
+    // atc.dat names Chambery's approach TRACON "LYON" (facility LFLB) at 121.205 --
+    // the SAME as the airport+.json Chambery Approach freq -- so a "LYON" enroute
+    // sector resolved to LFLB@121.205 ("Lyon Approach 121.205"), which put the pilot
+    // on Chambery's freq early and made the real Lyon->Chambery arrival handoff go
+    // SILENT (already on freq). Avoiding the dest approach freq here makes the enroute
+    // resolver pick the true Lyon ACC (LFLL@120.230) and leaves 121.205 for the
+    // arrival handoff to speak as a distinct Chambery handoff (user 2026-08-03).
+    // [C. P. Potter]
+    std::uint32_t avoid_khz = 0;
+    if (!s_assigned_dest_icao.empty()) {
+      std::string an;
+      float af = 0.0f;
+      if (airport_overrides::controller(s_assigned_dest_icao, "approach", &an,
+                                        &af) &&
+          af > 100.0f)
+        avoid_khz = static_cast<std::uint32_t>(std::lround(af * 1000.0));
+    }
     std::string lbl;
     float f = 0.0f;
-    if (resolve_sector_controller(enc, /*terminal=*/false, &lbl, &f)) {
+    if (resolve_sector_controller(enc, /*terminal=*/false, &lbl, &f, avoid_khz)) {
       new_label = lbl;
       new_mhz = f;
+      // Diagnostic: which openair sector produced this enroute controller.
+      logging::info("[acc] openair sector '%s' (class %d) -> %s %.3f MHz (avoid %u)",
+                    enc.name.c_str(), static_cast<int>(enc.ac_class),
+                    new_label.c_str(), new_mhz, avoid_khz);
     }
   }
   if (new_mhz <= 0.0f) {
