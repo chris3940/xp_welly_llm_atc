@@ -686,6 +686,18 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
       // appended to the startup-approved readback. Empty when the pilot is
       // already on Ground or Delivery (clearance was issued on Ground directly).
       {"ifr_ground_handoff", [&]() -> std::string {
+        // AFIS departure field (airport+.json "info" role): the ACC that delivered
+        // the clearance (Lyon) does NOT work the taxi -- per EUROCONTROL an ATC unit
+        // may not instruct aircraft on the ground at an AFIS aerodrome; the pilot
+        // handles ground with the AFIS (Valence Information) + self-announce, then
+        // calls the ACC AIRBORNE ("once airborne, call the freq in your clearance").
+        // So end with "report airborne", NOT "report when ready to taxi". [C.P.Potter]
+        {
+          std::string n;
+          float f = 0.0f;
+          if (airport_overrides::controller(ctx.nearest_airport_id, "info", &n, &f))
+            return ", report airborne";
+        }
         if (ctx.tower_only) return ", report when ready to taxi";
         // Already on Ground or Delivery — no freq handoff needed, but still
         // tell the pilot to report when ready to taxi.
