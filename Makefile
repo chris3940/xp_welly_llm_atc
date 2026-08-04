@@ -47,7 +47,7 @@ LINT_EXCLUDE := $(LINT_EXCLUDE_WIN) src/audio/audio_input_coreaudio.cpp
 endif
 LINT_SOURCES := $(filter-out $(LINT_EXCLUDE),$(wildcard src/main.cpp src/*/*.cpp))
 
-.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl test test-unit test-scenarios test-afis ci-remote win-artifact skunkcrafts
+.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl test test-unit test-scenarios test-afis test-stars ci-remote win-artifact skunkcrafts
 
 .DEFAULT_GOAL := help
 
@@ -293,6 +293,10 @@ test-scenarios-ifr: repl
 # REAL Custom Data (airport+.json / airspace.txt+overlay / atc.dat / CIFP) and asserts
 # the AFIS departure + STAR-shortcut outputs. NOT part of `make test` -- it needs the
 # user's local X-Plane data, so it is a local-validation target, not CI.
+test-stars: ifr-repl
+	@echo "=== Running STAR tracker regression (real CIFP) ==="
+	@./testscripts/ifr_real/star_tracker_regression.sh
+
 test-afis: ifr-repl
 	@echo "=== Running AFIS real-data scenario (LFLU->LFLP) ==="
 	@./testscripts/ifr_real/afis_lflu_lflp.sh
