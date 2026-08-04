@@ -9710,14 +9710,14 @@ static void init_route_fixes(const xplane_context::XPlaneContext &ctx) {
     for (const auto &wp : arr)
       if (!wp.ident.empty())
         idents.push_back(wp.ident);
-    const auto pos_map = cifp_reader::lookup_fix_positions(
-        ctx.cifp_dir, idents, s_assigned_dest_icao);
-    // Destination position for the implausibility guard below: a CIFP STAR/approach
-    // fix is always in the destination terminal area, so a resolved coord far from
-    // the dest is a mis-resolution (duplicate-ident collision).
+    // Destination position: used BOTH to disambiguate duplicate-ident homonyms in
+    // lookup_fix_positions (nearest-to-dest wins -- CBY = CHAMBERY VOR near LSGG, not
+    // the Sydney racecourse fix) AND for the implausibility guard below.
     const auto dpos = s_assigned_dest_icao.empty()
                           ? std::pair<double, double>{0.0, 0.0}
                           : xplane_context::airport_pos_for(s_assigned_dest_icao);
+    const auto pos_map = cifp_reader::lookup_fix_positions(
+        ctx.cifp_dir, idents, s_assigned_dest_icao, dpos.first, dpos.second);
 
     for (const auto &wp : arr) {
       if (wp.ident.empty())

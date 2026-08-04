@@ -373,13 +373,18 @@ approach_transition_idents(const std::string &cifp_dir,
 
 // Looks up lat/lon for a list of fix idents from earth_fix.dat (one directory
 // above cifp_dir). When multiple entries share the same ident, the one whose
-// airport field matches preferred_icao is preferred; otherwise the first match
-// is returned.  Fixes not found in earth_fix.dat are absent from the result.
-// The scan reads the file once and fills all requested idents in one pass.
+// airport field matches preferred_icao is preferred; otherwise, when a destination
+// position (dest_lat/dest_lon) is given, the homonym GEOGRAPHICALLY NEAREST it is
+// chosen -- earth_fix.dat/earth_nav.dat carry cross-world homonyms (e.g. "CBY" is a
+// Sydney racecourse fix AND the CHAMBERY VOR near Geneva), so proximity disambiguates
+// which one the procedure means. With no dest position, the first match wins (legacy).
+// A VOR/NDB/DME (earth_nav.dat) is now always considered as a candidate, not only when
+// the ident is absent from earth_fix.dat. Fixes found nowhere are absent from the result.
 std::unordered_map<std::string, std::pair<double, double>>
 lookup_fix_positions(const std::string &cifp_dir,
                      const std::vector<std::string> &idents,
-                     const std::string &preferred_icao);
+                     const std::string &preferred_icao, double dest_lat = 0.0,
+                     double dest_lon = 0.0);
 
 } // namespace cifp_reader
 

@@ -1989,7 +1989,8 @@ std::string preferred_departure_runway(const std::string &cifp_dir,
 std::unordered_map<std::string, std::pair<double, double>>
 lookup_fix_positions(const std::string &cifp_dir,
                      const std::vector<std::string> &idents,
-                     const std::string &preferred_icao) {
+                     const std::string &preferred_icao, double dest_lat,
+                     double dest_lon) {
   if (cifp_dir.empty() || idents.empty())
     return {};
 
@@ -2011,14 +2012,21 @@ lookup_fix_positions(const std::string &cifp_dir,
   else
     navdata_dir += '/';
 
-  // Preferred (airport-specific) matches and enroute fallbacks.
+  const std::string country_pref =
+      preferred_icao.size() >= 2 ? preferred_icao.substr(0, 2) : "";
+  const bool have_dest = (dest_lat != 0.0 || dest_lon != 0.0);
+
+  // preferred: airport-specific hit (airport field == preferred_icao) -- always wins.
+  // cand: EVERY homonym (earth_fix.dat + earth_nav.dat) so proximity can disambiguate.
+  // country_hit: first candidate whose region/country matches the dest country prefix
+  // (legacy tie-breaker when no dest position is given).
   std::unordered_map<std::string, std::pair<double, double>> preferred;
-  std::unordered_map<std::string, std::pair<double, double>> fallback;
+  std::unordered_map<std::string, std::vector<std::pair<double, double>>> cand;
+  std::unordered_map<std::string, std::pair<double, double>> country_hit;
 
   std::ifstream fix_in(navdata_dir + "earth_fix.dat");
   if (!fix_in.good())
     return {};
-
   std::string line;
   while (std::getline(fix_in, line)) {
     if (line.empty()) continue;
@@ -2029,33 +2037,23 @@ lookup_fix_positions(const std::string &cifp_dir,
       continue;
     if (!wanted.count(ident))
       continue;
-    if (!preferred.count(ident) && airport == preferred_icao)
+    if (airport == preferred_icao)
       preferred[ident] = {lat, lon};
-    else if (!fallback.count(ident))
-      fallback[ident] = {lat, lon};
+    cand[ident].push_back({lat, lon});
+    if (!country_pref.empty() && region == country_pref && !country_hit.count(ident))
+      country_hit[ident] = {lat, lon};
   }
 
-  // Second pass: earth_nav.dat for VOR/NDB/DME not found in earth_fix.dat.
-  // Format: <type> <lat> <lon> <elev> <freq> <range> <var> <ident> <region> <country> <name...>
-  // Types 2=NDB, 3=VOR, 12=DME-standalone, 13=TACAN.
-  // Prefer entries whose country code matches the first 2 chars of preferred_icao (e.g. "LF" for LFMN).
-  const std::string country_pref =
-      preferred_icao.size() >= 2 ? preferred_icao.substr(0, 2) : "";
-
-  std::unordered_set<std::string> still_wanted;
-  for (const auto &id : idents)
-    if (!preferred.count(id) && !fallback.count(id))
-      still_wanted.insert(id);
-
-  if (!still_wanted.empty()) {
+  // earth_nav.dat: a VOR/NDB/DME is now ALWAYS a candidate (not only when the ident is
+  // absent from earth_fix.dat) -- e.g. CBY is the CHAMBERY VOR here, while earth_fix.dat
+  // only has a same-named Sydney racecourse fix. Types 2=NDB 3=VOR 12=DME 13=TACAN.
+  {
     std::ifstream nav_in(navdata_dir + "earth_nav.dat");
     if (nav_in.good()) {
-      std::unordered_map<std::string, std::pair<double, double>> nav_preferred;
-      std::unordered_map<std::string, std::pair<double, double>> nav_fallback;
-      std::string line;
-      while (std::getline(nav_in, line)) {
-        if (line.empty()) continue;
-        std::istringstream ss(line);
+      std::string nline;
+      while (std::getline(nav_in, nline)) {
+        if (nline.empty()) continue;
+        std::istringstream ss(nline);
         int type;
         if (!(ss >> type)) continue;
         if (type != 2 && type != 3 && type != 12 && type != 13) continue;
@@ -2063,36 +2061,46 @@ lookup_fix_positions(const std::string &cifp_dir,
         int elev, freq, range;
         double var;
         std::string ident, region, country;
-        if (!(ss >> lat >> lon >> elev >> freq >> range >> var >> ident >> region >> country))
+        if (!(ss >> lat >> lon >> elev >> freq >> range >> var >> ident >> region >>
+              country))
           continue;
-        if (!still_wanted.count(ident)) continue;
-        if (!country_pref.empty() && country == country_pref) {
-          if (!nav_preferred.count(ident))
-            nav_preferred[ident] = {lat, lon};
-        } else {
-          if (!nav_fallback.count(ident))
-            nav_fallback[ident] = {lat, lon};
-        }
-      }
-      for (const auto &id : still_wanted) {
-        auto it = nav_preferred.find(id);
-        if (it != nav_preferred.end()) { fallback[id] = it->second; continue; }
-        auto it2 = nav_fallback.find(id);
-        if (it2 != nav_fallback.end()) fallback[id] = it2->second;
+        if (!wanted.count(ident)) continue;
+        cand[ident].push_back({lat, lon});
+        if (!country_pref.empty() && country == country_pref &&
+            !country_hit.count(ident))
+          country_hit[ident] = {lat, lon};
       }
     }
   }
 
+  auto approx_nm2 = [](double la, double lo, double lb, double ob) {
+    const double dlat = la - lb;
+    const double dlon = (lo - ob) * std::cos(la * M_PI / 180.0);
+    return dlat * dlat + dlon * dlon; // squared, monotone in real distance
+  };
+
   std::unordered_map<std::string, std::pair<double, double>> result;
   for (const auto &id : idents) {
-    auto it = preferred.find(id);
-    if (it != preferred.end()) {
-      result[id] = it->second;
+    // 1) airport-specific hit always wins.
+    auto pit = preferred.find(id);
+    if (pit != preferred.end()) { result[id] = pit->second; continue; }
+    auto cit = cand.find(id);
+    if (cit == cand.end() || cit->second.empty()) continue;
+    // 2) nearest homonym to the destination when a position is known.
+    if (have_dest) {
+      const auto &cs = cit->second;
+      size_t best = 0;
+      double bestd = approx_nm2(cs[0].first, cs[0].second, dest_lat, dest_lon);
+      for (size_t i = 1; i < cs.size(); ++i) {
+        const double d = approx_nm2(cs[i].first, cs[i].second, dest_lat, dest_lon);
+        if (d < bestd) { bestd = d; best = i; }
+      }
+      result[id] = cs[best];
       continue;
     }
-    auto it2 = fallback.find(id);
-    if (it2 != fallback.end())
-      result[id] = it2->second;
+    // 3) legacy: dest country match, else the first candidate.
+    auto chit = country_hit.find(id);
+    result[id] = (chit != country_hit.end()) ? chit->second : cit->second.front();
   }
   return result;
 }
