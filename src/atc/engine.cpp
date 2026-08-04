@@ -9190,8 +9190,7 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
       // "within 2 fixes" test fired APPROACH at COLLO -- 4 fixes early (LFLP
       // 2026-07-16). Only the SEQUENCE distinguishes them. The tracker is kept
       // reliable through wide/direct flying by the resync in poll_route_tracker.
-      enter_approach = (iaf_eta_s <= 90.0 && iaf_route_idx_local >= 0 &&
-                        s_route_fix_idx >= iaf_route_idx_local - 2);
+      enter_approach = (iaf_eta_s <= 90.0 && iaf_route_idx_local >= 0);
     } else if (inside_tma && on_destination_terminal(ctx)) {
       // Legacy TMA fallback (used when the IAF eta is unresolvable, e.g. a short
       // flight where the route tracker jumped past the IAF): enter APPROACH on TMA
@@ -9900,49 +9899,13 @@ std::string poll_route_tracker(const xplane_context::XPlaneContext &ctx) {
   if (s_route_tracker_tick < 1.0f) return {};
   s_route_tracker_tick = 0.0f;
 
-  // RESYNC (user pb2, LFLP 2026-07-16): if the aircraft flew WIDE of the current
-  // fix (never entered its 1.5 NM capture zone) and then rejoined the STAR at a
-  // LATER fix, jump the tracker forward to whatever route fix it is now flying over
-  // (within ~2 NM) -- do not stay frozen on the skipped fix. The tracker froze at
-  // PINOT after a post-SALEV divergence, so the whole ARRIVAL->APPROACH gate (which
-  // reads s_route_fix_idx) stalled and Chambery never cleared the approach. Scan
-  // from the current index forward and take the FURTHEST fix within capture so all
-  // skipped fixes are passed at once.
-  {
-    int resync_idx = -1;
-    for (int i = s_route_fix_idx; i < static_cast<int>(s_route_fixes.size()); ++i) {
-      const auto &fi = s_route_fixes[i];
-      if (fi.lat == 0.0 && fi.lon == 0.0)
-        continue;
-      // Do NOT let a geographically-clustered APPROACH fix hijack the resync while
-      // still on the STAR: on the LFLP RNAV, LP403 sits ~2 NM from COLLO, so the
-      // resync jumped the tracker PAST the IAF (PIRUV) -- which broke the STAR
-      // descent (targeted LP402 5000 instead of the FL090 step) AND the approach-
-      // clearance anchor (LFLP 2026-07-16 regression). Approach-proc fixes only
-      // become resync targets once the approach is actually cleared.
-      if (fi.is_approach_proc && !s_approach_cleared_issued)
-        continue;
-      if (traffic_geometry::distance_nm(ctx.latitude, ctx.longitude, fi.lat,
-                                        fi.lon) <= 2.0)
-        resync_idx = i; // keep the furthest fix currently within capture
-    }
-    if (resync_idx > s_route_fix_idx) {
-      const auto &rf = s_route_fixes[resync_idx];
-      const int skipped = resync_idx - s_route_fix_idx;
-      const int nxt = resync_idx + 1;
-      std::string ni = (nxt < static_cast<int>(s_route_fixes.size()))
-                           ? s_route_fixes[nxt].ident
-                           : "end of route";
-      char rbuf[176];
-      std::snprintf(rbuf, sizeof(rbuf),
-                    "Track: resync to %s (skipped %d), next: %s",
-                    rf.ident.c_str(), skipped, ni.c_str());
-      logging::info("[route] %s", rbuf);
-      s_route_fix_idx = resync_idx + 1; // advance past the overflown fix
-      return rbuf;
-    }
-  }
-
+  // The tracker advances STRICTLY IN SEQUENCE (one fix at a time). There is no
+  // geographic "resync" to the nearest fix -- a jump ahead happens ONLY on an explicit
+  // ATC direct (which sets s_route_fix_idx directly). On a STAR flown normally every
+  // fix is overflown in order, so sequence + along-track passage is all we need. The
+  // old geographic RESYNC (take the furthest fix within 2 NM) mis-sequenced on a
+  // looping STAR: at COLLO the aircraft sits ~2 NM from PIRUV (4 fixes later on the
+  // loop) and it jumped straight there. Removed. [C. P. Potter, user rule 2026-08-04]
   const auto &fix = s_route_fixes[s_route_fix_idx];
 
   // Skip fixes whose position is unknown.
@@ -9954,46 +9917,45 @@ std::string poll_route_tracker(const xplane_context::XPlaneContext &ctx) {
   const float dist = static_cast<float>(traffic_geometry::distance_nm(
       ctx.latitude, ctx.longitude, fix.lat, fix.lon));
 
-  if (dist > 1.5f) {
-    // The fix is within a few NM but never entered the 1.5 NM capture zone and is
-    // now clearly BEHIND the aircraft (bearing >100 deg off the nose) -- it was
-    // overflown wide. Advance so the tracker (and check_course) move on instead
-    // of forever flagging "off course" to a fix behind us (LFMN ABDI8R 2026-07-13:
-    // deviated wide of ABDIL, tracker stuck, repeated "confirm direct ABDIL").
-    //
-    // UPPER DISTANCE CAP (kNearBypass) is essential: a fix that is FAR ahead on a
-    // CURVED path (e.g. the FAF at 10 NM before the final turn) has a wide
-    // bearing-off-nose yet is NOT bypassed -- the aircraft simply hasn't turned
-    // toward it. Without the cap, heading-vs-bearing wrongly "bypassed" FP04Z at
-    // 10.1 NM (brg 98 vs hdg 221) and fired the Tower handoff 10 NM early
-    // (LIMF->LFLP 2026-07-14). You can't overfly a fix 10 NM away.
-    constexpr float kNearBypass = 4.0f;
-    const double brg = traffic_geometry::bearing_deg(ctx.latitude, ctx.longitude,
-                                                     fix.lat, fix.lon);
-    double behind = std::fabs(brg - static_cast<double>(ctx.heading_true));
-    if (behind > 180.0) behind = 360.0 - behind;
-    if (behind > 100.0 && dist < kNearBypass) {
-      logging::info("[route] bypassed %s (%.1f NM, brg %.0f behind hdg %.0f) -- advancing",
-                    fix.ident.c_str(), dist, brg,
-                    static_cast<double>(ctx.heading_true));
-      s_route_fix_idx++;
-    }
-    return {};
+  const int next_idx = s_route_fix_idx + 1;
+  const RouteFix *next =
+      (next_idx < static_cast<int>(s_route_fixes.size())) ? &s_route_fixes[next_idx]
+                                                          : nullptr;
+  const char *next_ident = next ? next->ident.c_str() : "end of route";
+
+  // Capture: inside the 1.5 NM zone of the current fix -> advance.
+  if (dist <= 1.5f) {
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "Track: near %s (%.1f NM), next: %s",
+                  fix.ident.c_str(), dist, next_ident);
+    logging::info("[route] %s", buf);
+    s_route_fix_idx++;
+    return buf;
   }
 
-  // Entered 1.5 NM zone around this fix — log and advance.
-  const int next_idx = s_route_fix_idx + 1;
-  std::string next_ident = "end of route";
-  if (next_idx < static_cast<int>(s_route_fixes.size()))
-    next_ident = s_route_fixes[next_idx].ident;
-
-  char buf[160];
-  std::snprintf(buf, sizeof(buf), "Track: near %s (%.1f NM), next: %s",
-                fix.ident.c_str(), dist, next_ident.c_str());
-
-  logging::info("[route] %s", buf);
-  s_route_fix_idx++;
-  return buf;
+  // Along-track passage (replaces both the geographic RESYNC and the heading-based
+  // bypass): advance when the aircraft is PAST this fix ALONG THE LEG to the next fix,
+  // regardless of how far WIDE it flew. dot((acft-fix),(next-fix)) > 0 means the acft
+  // has crossed the abeam line at the fix, heading toward the next one. This clears a
+  // fix the pilot overflew wide (no freeze) while NEVER passing a fix still AHEAD on a
+  // curve (the FAF 10 NM before the turn projects BEHIND -> not passed), and NEVER
+  // jumping across the loop (PIRUV is not the NEXT fix from COLLO). No distance cap is
+  // needed: the dot product is a sound "past this fix" test at any range, so a tracker
+  // lagging several fixes behind (aircraft flew wide of them all) catches up one fix
+  // per tick. [C. P. Potter]
+  if (next && (next->lat != 0.0 || next->lon != 0.0)) {
+    const double coslat = std::cos(fix.lat * M_PI / 180.0);
+    const double legx = (next->lon - fix.lon) * coslat;
+    const double legy = next->lat - fix.lat;
+    const double acx = (ctx.longitude - fix.lon) * coslat;
+    const double acy = ctx.latitude - fix.lat;
+    if (legx * acx + legy * acy > 0.0) {
+      logging::info("[route] passed %s (%.1f NM wide) along-track -> advancing, next: %s",
+                    fix.ident.c_str(), dist, next_ident);
+      s_route_fix_idx++;
+    }
+  }
+  return {};
 }
 
 // ── poll_approach ─────────────────────────────────────────────────────────
@@ -10693,7 +10655,6 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         // LOWI R08-Z 2026-08-02). The FAF "vectors to final" case is separate. [CPP]
         const bool reversal = approach_needs_reversal_vector(ctx);
         if (reversal && !s_vec_expect_issued && !s_sector_checkin_pending &&
-            s_route_fix_idx >= iaf_idx - 2 &&
             routed_distance_to_fix_idx(ctx, iaf_idx) > 5.0) {
           s_vec_expect_issued = true;
           const std::string ph = approach_clearance_phrase(ctx);
@@ -10704,8 +10665,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           rb(false);
           return true;
         }
-        if (!reversal && eta <= 180.0 && s_route_fix_idx >= iaf_idx - 2 &&
-            !s_sector_checkin_pending) {
+        if (!reversal && eta <= 180.0 && !s_sector_checkin_pending) {
           const std::string phrase = approach_clearance_phrase(ctx);
           if (!phrase.empty()) {
             s_approach_cleared_issued = true;

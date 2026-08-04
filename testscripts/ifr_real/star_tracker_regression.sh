@@ -79,6 +79,37 @@ run_star LFLB ROMA3P R04-Z 11000  ROMAM LSE GOVNA PIRUV
 run_star LOWI NANI2A R08-Z 13000  NANIT RTT
 run_star LFMN ABDI8R R04LZ 11000  ABDIL GIROL AMFOU TIPIK MUS
 
+# "Pilot did NOT overfly a fix" (flew WIDE): the along-track advance must catch the
+# tracker up fix-by-fix WITHOUT freezing and WITHOUT jumping across the loop to PIRUV.
+# Aircraft placed ~2 NM past COLLO along COLLO->LUVOB, ~3 NM laterally wide, while the
+# tracker still lags upstream. Expect: passes upstream fixes -> lands on LUVOB (idx 4),
+# never on PIRUV (the geographically-close but sequence-far loop end).
+echo "=== SALE3P WIDE (pilot overflies no fix): along-track catch-up, no loop jump ==="
+widept=$(FIXFILE="$(dirname "$CIFP")/earth_fix.dat" python3 - <<'PY'
+import math, os
+fx={}
+for ln in open(os.environ["FIXFILE"]):
+    p=ln.split()
+    if len(p)>=3 and p[2] in ("COLLO","LUVOB") and p[2] not in fx:
+        fx[p[2]]=(float(p[0]),float(p[1]))
+cl,lu=fx["COLLO"],fx["LUVOB"]; coslat=math.cos(math.radians(cl[0]))
+legy=lu[0]-cl[0]; legx=(lu[1]-cl[1])*coslat; L=math.hypot(legx,legy)
+uy,ux=legy/L,legx/L; py,px=ux,-uy
+step=2/60.0; off=3/60.0
+lat=cl[0]+uy*step+py*off; lon=cl[1]+(ux*step+px*off)/coslat
+print(f"{lat:.5f} {lon:.5f}")
+PY
+)
+read WLAT WLON <<<"$widept"
+out="$(printf 'set cifp_dir %s\nset dest LFLB\nset alt 8000\nset on_ground 0\nset gs 220\ngoto COLLO\narrival LFLB SALE3P R04-Z\nset lat %s\nset lon %s\nset heading 60\nroute\npoll 5\nroute\nquit\n' "$CIFP" "$WLAT" "$WLON" | "$REPL" 2>&1)"
+finalidx=$(grep -oE "route \(idx=[0-9]+" <<<"$out" | tail -1 | grep -oE "[0-9]+")
+if grep -qE "passed COLLO .* along-track" <<<"$out" && \
+   ! grep -qE "route \(idx=[0-9]+[^)]*PIRUV\[\*\]" <<<"$out"; then
+  echo "  PASS  wide flying caught up past COLLO (final idx=$finalidx), no jump to PIRUV"
+else
+  echo "  FAIL  wide-flying catch-up"; fails=$((fails+1))
+fi
+
 echo
 if (( fails == 0 )); then echo "STAR tracker regression: ALL PASS"; exit 0
 else echo "STAR tracker regression: $fails FAILURE(S)"; exit 1; fi
