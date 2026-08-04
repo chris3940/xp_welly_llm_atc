@@ -74,10 +74,14 @@ poll 5
 set state IFR/ARRIVAL
 goto LSE
 poll 5
-poll 5
+route
 quit' | '$REPL'" 2>&1)"
   want   "#4 shortcut rebuilds the route to the IAF" "direct-to-IAF rebuild"
   want   "#4 shortcut offers a direct to an IAF"     "direct (TOLNA|COLLO|PIRUV), when able|direct (TOLNA|COLLO|PIRUV)"
+  # The direct-to IAF itself MUST be the current route target [*] (it was dropped
+  # because approach_procedure_waypoints skips the IF path-term). Guards the TOLNA-
+  # missing bug (user 2026-08-04).
+  want   "#4 the direct-to IAF is the route target"  "route \(idx=0.*(TOLNA|COLLO|PIRUV)\[\*\]"
 else
   echo "  SKIP  #4 shortcut (no OFP at $OFP)"
 fi

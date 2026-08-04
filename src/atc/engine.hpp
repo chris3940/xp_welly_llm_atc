@@ -297,6 +297,11 @@ std::string assigned_approach_spoken(const xplane_context::XPlaneContext &ctx);
 // LFMN 2026-07-13). Empty until a route table is built. Ordered nearest-first.
 std::vector<std::string> upcoming_route_fix_idents();
 
+// DEBUG (atc_ifr_repl 'route' command): the FULL route table with the tracker index,
+// each fix marked [*] if it is the current target (idx). Lets a test verify exactly
+// which fixes are in the plugin after a STAR shortcut rebuild.
+std::vector<std::string> route_fixes_all_debug(int *out_idx);
+
 // Most recent ATC-assigned altitude in feet MSL, or 0 when none is active.
 // Precedence: approach initial FL (once Approach has issued a target) >
 // en-route cleared altitude (covers cruise + step-ups / step-downs) >

@@ -8804,12 +8804,30 @@ static void rebuild_route_direct_to_iaf(const xplane_context::XPlaneContext &ctx
     if (ap[i].is_map) { ap.resize(i + 1); break; } // drop missed-approach fixes
 
   std::vector<std::string> idents;
+  idents.push_back(iaf_ident); // the IAF itself (see prepend below)
   for (const auto &wp : ap)
     if (!wp.ident.empty())
       idents.push_back(wp.ident);
   const auto pos_map =
       cifp_reader::lookup_fix_positions(ctx.cifp_dir, idents, s_assigned_dest_icao);
   const auto dpos = xplane_context::airport_pos_for(s_assigned_dest_icao);
+
+  // PREPEND the IAF itself as the current target. approach_procedure_waypoints SKIPS
+  // the "IF" path-term fix (the IAF entry, normally already on the STAR) -- but for a
+  // direct to an OFF-route IAF the IAF is NOT on the STAR, so without this the route
+  // would start at the SECOND fix (LP404), the tracker would target LP404 and TOLNA --
+  // the fix the pilot was cleared direct to -- would be missing entirely (user
+  // 2026-08-04: route was "LP404 IP04Z FP04Z RW04", no TOLNA). Skip only if the
+  // transition already lists the IAF first (defensive). [C. P. Potter]
+  if (ap.empty() || ap.front().ident != iaf_ident) {
+    RouteFix iaf;
+    iaf.ident = iaf_ident;
+    auto ip = pos_map.find(iaf_ident);
+    if (ip != pos_map.end()) { iaf.lat = ip->second.first; iaf.lon = ip->second.second; }
+    iaf.is_approach_proc = true;
+    s_route_fixes.push_back(iaf);
+  }
+
   for (const auto &wp : ap) {
     if (wp.ident.empty())
       continue;
@@ -9331,6 +9349,21 @@ std::vector<std::string> upcoming_route_fix_idents() {
     const std::string &id = s_route_fixes[i].ident;
     if (!id.empty())
       out.push_back(id);
+  }
+  return out;
+}
+
+std::vector<std::string> route_fixes_all_debug(int *out_idx) {
+  if (out_idx)
+    *out_idx = s_route_fix_idx;
+  std::vector<std::string> out;
+  for (int i = 0; i < static_cast<int>(s_route_fixes.size()); ++i) {
+    std::string s = s_route_fixes[i].ident;
+    if (i == s_route_fix_idx)
+      s += "[*]"; // current tracker target
+    if (s_route_fixes[i].is_approach_proc)
+      s += "(app)";
+    out.push_back(s);
   }
   return out;
 }

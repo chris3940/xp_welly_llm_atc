@@ -689,6 +689,14 @@ int run(xplane_context::XPlaneContext ctx, std::string callsign) {
       cmd_enc();
     else if (cmd == "track")
       cmd_track(rest);
+    else if (cmd == "route") {
+      int idx = 0;
+      const auto all = engine::route_fixes_all_debug(&idx);
+      std::printf("route (idx=%d, %zu fixes): ", idx, all.size());
+      for (const auto &id : all)
+        std::printf("%s ", id.c_str());
+      std::printf("\n");
+    }
     else if (cmd == "state")
       cmd_state(callsign);
     else if (cmd == "reset")
