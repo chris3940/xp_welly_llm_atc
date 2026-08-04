@@ -68,6 +68,9 @@ void reset();
 void training_jump_enroute(int cleared_alt_ft); // IFR_ENROUTE_CRUISE, cleared FL in feet
 void training_jump_arrival();                   // IFR_ARRIVAL (on the STAR, descending, under ACC)
 void training_jump_approach();                  // IFR_APPROACH_CONTACT (pilot calls in)
+// TEST-ONLY: force dest/STAR/approach + build the route (any arrival, no OFP needed).
+void training_set_arrival(const std::string &dest, const std::string &star,
+                          const std::string &approach);
 void training_jump_predep();                    // IFR_PREDEP_CLEARANCE (ground, pre-startup)
 
 // Frequency (MHz) the pilot should tune after the most recent training jump

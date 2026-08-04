@@ -1016,6 +1016,33 @@ void training_jump_arrival() {
                 s_current_controller_label.c_str());
 }
 
+void training_set_arrival(const std::string &dest, const std::string &star,
+                          const std::string &approach) {
+  // TEST-ONLY (atc_ifr_repl 'arrival' command): force a specific dest/STAR/approach
+  // and build the route table, so ANY arrival (e.g. SALE3P + R04-Z) can be exercised
+  // without a matching OFP. With no OFP loaded the route is the STAR + approach only
+  // (init_route_fixes step 1 -- navlog -- is empty), giving a clean test route. The
+  // caller sets lat/lon/alt/state. [C. P. Potter]
+  s_assigned_dest_icao           = dest;
+  s_assigned_star_name           = star;
+  s_assigned_approach_designator = approach;
+  s_enroute_descent_issued          = true;
+  s_enroute_approach_handoff_issued = false;
+  s_approach_cleared_issued         = false;
+  s_star_shortcut_offered  = false;
+  s_star_shortcut_pending  = false;
+  s_star_shortcut_prev_idx = -1;
+  s_star_shortcut_prev_route.clear();
+  s_no_star_direct_iaf.clear();
+  s_route_fixes.clear();
+  s_route_fix_idx = 0;
+  init_route_fixes(xplane_context::get());
+  atc_state_machine::set_session_callsign(settings::pilot_callsign());
+  atc_state_machine::set_state(atc_state_machine::ATCState::IFR_ARRIVAL);
+  logging::info("training_set_arrival: dest=%s STAR=%s approach=%s (%zu route fixes)",
+                dest.c_str(), star.c_str(), approach.c_str(), s_route_fixes.size());
+}
+
 void training_jump_predep() {
   // Pre-departure clearance is on Delivery (or Ground if the field has no
   // Delivery frequency) -- surface it for the "Switch COM to X" popup.
@@ -9165,7 +9192,15 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
       // reliable through wide/direct flying by the resync in poll_route_tracker.
       enter_approach = (iaf_eta_s <= 90.0 && iaf_route_idx_local >= 0 &&
                         s_route_fix_idx >= iaf_route_idx_local - 2);
-    } else if (inside_tma) {
+    } else if (inside_tma && on_destination_terminal(ctx)) {
+      // Legacy TMA fallback (used when the IAF eta is unresolvable, e.g. a short
+      // flight where the route tracker jumped past the IAF): enter APPROACH on TMA
+      // entry -- but ONLY the DESTINATION's terminal TMA. Without on_destination_
+      // terminal this fired inside the DEPARTURE TMA on a short flight (LFLU->LFLP:
+      // inside LYON TMA SECTOR 4 at 45.07N, right after take-off -> premature
+      // "contact Chambery Approach" while still in Lyon's airspace, and the early
+      // IFR_APPROACH_CONTACT transition also robbed the STAR shortcut of its
+      // IFR_ARRIVAL window; user 2026-08-04). [C. P. Potter]
       enter_approach = true;
     } else if (s_arrival_timer > 20.0f) {
       auto ofp = simbrief_ofp::get();

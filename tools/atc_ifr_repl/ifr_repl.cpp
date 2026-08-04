@@ -689,6 +689,18 @@ int run(xplane_context::XPlaneContext ctx, std::string callsign) {
       cmd_enc();
     else if (cmd == "track")
       cmd_track(rest);
+    else if (cmd == "arrival") {
+      // arrival <dest> <STAR> <approach>  -- force an arrival + build the route.
+      auto [dest, r1] = split_first(rest);
+      auto [star, appr] = split_first(r1);
+      if (dest.empty() || star.empty() || appr.empty())
+        std::fprintf(stderr, "Usage: arrival <dest> <STAR> <approach>\n");
+      else {
+        engine::training_set_arrival(dest, star, appr);
+        std::printf("arrival set: dest=%s STAR=%s approach=%s\n",
+                    dest.c_str(), star.c_str(), appr.c_str());
+      }
+    }
     else if (cmd == "route") {
       int idx = 0;
       const auto all = engine::route_fixes_all_debug(&idx);
