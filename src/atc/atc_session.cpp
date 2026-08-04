@@ -1941,10 +1941,17 @@ void update() {
   // machinery takes over. Runs BEFORE check_auto_correction so it wins the frame.
   // [C. P. Potter]
   {
+    using AS = atc_state_machine::ATCState;
+    const AS gs = atc_state_machine::get_state();
+    // Any pre-departure ground-IFR state (the AFIS taxi handler may leave IFR_CLEARED,
+    // and older paths TOWER_CONTACT/GROUND_CONTACT/TAXI_CLEARED) -- all advance to
+    // IFR_DEPARTURE_CLEARED on lift-off at an AFIS field.
+    const bool ground_ifr =
+        gs == AS::IFR_CLEARED || gs == AS::IFR_PREDEP_CLEARANCE ||
+        gs == AS::TOWER_CONTACT || gs == AS::GROUND_CONTACT ||
+        gs == AS::TAXI_CLEARED;
     const auto &cx = xplane_context::get();
-    if (!cx.on_ground &&
-        atc_state_machine::get_state() ==
-            atc_state_machine::ATCState::IFR_CLEARED) {
+    if (!cx.on_ground && ground_ifr) {
       std::string n;
       float f = 0.0f;
       if (airport_overrides::controller(cx.nearest_airport_id, "info", &n, &f)) {

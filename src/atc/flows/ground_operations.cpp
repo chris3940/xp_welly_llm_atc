@@ -1004,8 +1004,15 @@ bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
         "{callsign}, " + info_name + ", runway " + rwy +
             " in use, QNH {qnh}, no reported traffic.",
         vars);
-    resp.next_state = ATCState::TOWER_CONTACT;
-    internal::transition_to(ATCState::TOWER_CONTACT, "afis_taxi_info");
+    // STAY in IFR_CLEARED -- an AFIS field has NO Tower, and the airborne-departure
+    // safety net (atc_session) advances IFR_CLEARED -> IFR_DEPARTURE_CLEARED on lift-
+    // off. Transitioning to TOWER_CONTACT here broke that: on take-off the state was
+    // TOWER_CONTACT (safety net only fires from IFR_CLEARED), the airborne check-in was
+    // mis-handled ("contact Approach"), then the unicom flow reverted TOWER_CONTACT ->
+    // IDLE and answered "Traffic, ... on frequency" (real vol LFLU 2026-08-04). The
+    // AFIS ground handlers all accept IFR_CLEARED, so the flow continues normally.
+    // [C. P. Potter]
+    resp.next_state = ATCState::IFR_CLEARED;
     return true;
   case PI::REPORT_HOLDING_SHORT:
     // Pilot reports holding short (before departure) -> AFIS INFO, never a takeoff
