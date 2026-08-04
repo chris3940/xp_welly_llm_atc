@@ -8620,6 +8620,12 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
   return true;
 }
 
+// Defined further down (after build_approach_handoff); called here in DESCENT so the
+// STAR shortcut can be offered BEFORE the aircraft enters the STAR.
+static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
+                               std::string *out_text,
+                               bool *out_requires_readback);
+
 bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
                   std::string *out_text,
                   bool *out_requires_readback) {
@@ -8648,6 +8654,14 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
 
   // Connector-STAR "direct <IAF>" (FMS discontinuity at the filed-STAR terminus).
   if (poll_connector_direct(ctx, out_text, out_requires_readback))
+    return true;
+
+  // STAR direct-to-IAF shortcut -- fire in DESCENT, i.e. BEFORE the aircraft enters
+  // the STAR (user rule 2026-08-04: an ATC direct that cuts into the STAR at a later
+  // IAF is issued before the STAR, not mid-STAR where nothing is worthwhile). One-shot
+  // (s_star_shortcut_offered); poll_arrival still calls it too, so a short flight
+  // already IN IFR_ARRIVAL at the 1st STAR fix (still climbing across it) is covered.
+  if (poll_star_shortcut(ctx, out_text, out_requires_readback))
     return true;
 
   // DirectMonitor (descent course): extend course enforcement into DESCENT (was
@@ -8957,8 +8971,19 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
     return -1;
   };
 
+  // The STAR's natural terminus IAF (the join fix, e.g. PIRUV) is where the STAR
+  // already delivers you -- a "direct" to it is not a shortcut, it is the normal
+  // arrival. Exclude it as a candidate; only an EARLIER on-STAR IAF (COLLO) or an
+  // off-STAR alternate that genuinely shortcuts is offered (user 2026-08-04). [CPP]
+  const std::string terminus_ident =
+      (join_idx >= 0 && join_idx < static_cast<int>(s_route_fixes.size()))
+          ? s_route_fixes[join_idx].ident
+          : std::string();
+
   std::vector<route_shortcut::Candidate> cands;
   for (const auto &id : iaf_idents) {
+    if (!terminus_ident.empty() && id == terminus_ident)
+      continue; // natural STAR terminus -> never a shortcut target
     auto it = iaf_pos.find(id);
     if (it == iaf_pos.end())
       continue;
