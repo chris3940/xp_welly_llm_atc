@@ -5539,20 +5539,24 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   const bool via_is_step_down =
       descend_via_level_ft > 0 &&
       (prior_cleared_via <= 0 || descend_via_level_ft < prior_cleared_via);
-  // "Descend via" only when it is an actual DESCENT (aircraft ABOVE the transfer
-  // level). On a SHORT flight the aircraft is still CLIMBING toward the STAR entry
-  // when the arrival clearance fires (LFLU->LFLP: cleared at ~5000 ft, transfer level
-  // FL090 above it) -- there "descend via ... FL090" is a contradiction; it is a CLIMB
-  // to the STAR entry level, then the STAR descends from there. Split the two so the
-  // verb matches (real vol 2026-08-05: "descend via to FL90" spoken at 5100 ft climb).
-  // [C. P. Potter]
+  // "Descend via ... TO (transfer level)" ONLY when it is an actual DESCENT -- aircraft
+  // ABOVE the transfer level. When still CLIMBING below it (short flight, cleared at
+  // ~5000 ft with the transfer level FL090 above), do NOT cap the climb at the transfer
+  // level: that level is where the aircraft must be near the TERMINAL, and by flown
+  // distance the constraint that needs it (e.g. GOVNA FL090) is many NM ahead -- the
+  // aircraft has room to reach its en-route level and descend later. So the arrival
+  // clearance is LATERAL only ("cleared via ... expect ...") and the en-route cleared
+  // level is kept; the terminal descent comes from the walker / descend-to-enter at the
+  // right flown-distance TOD near the terminal (user 2026-08-05: FL90 was capping FL110
+  // at the STAR entry, far too early). [C. P. Potter]
   const float pa_via = ctx.pressure_alt_ft;
   const bool use_descend_via =
       via_is_step_down && pa_via > static_cast<float>(descend_via_level_ft) + 200.0f;
-  const bool climb_to_entry =
+  // Below the transfer level while climbing -> lateral "cleared via", climb NOT capped.
+  const bool climb_lateral_via =
       via_is_step_down && pa_via <= static_cast<float>(descend_via_level_ft) + 200.0f;
-  if (use_descend_via || climb_to_entry)
-    star_alt_ft = descend_via_level_ft; // the cleared level either way
+  if (use_descend_via)
+    star_alt_ft = descend_via_level_ft; // the cleared descent level (descent case only)
 
   if (!star_name.empty())
     star_phrase = (use_descend_via ? ", descend via " : ", cleared via ") +
@@ -5594,8 +5598,8 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   // vanishes (alpha-11 regression: "cleared via ABDI8R" with no "descend FL120").
   const int prior_cleared = s_enroute_cleared_alt_ft > 0 ? s_enroute_cleared_alt_ft
                                                          : ctx.ifr_cruise_alt_ft;
-  const bool emit_alt =
-      star_alt_ft > 0 && (prior_cleared <= 0 || star_alt_ft < prior_cleared);
+  const bool emit_alt = !climb_lateral_via && star_alt_ft > 0 &&
+                        (prior_cleared <= 0 || star_alt_ft < prior_cleared);
 
   // Record the cleared altitude so current_cleared_alt_ft() (and EVERY downstream
   // altitude gate -- descend-to-enter, poll_altitude_compliance, the CIFP crossing
@@ -5627,13 +5631,12 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
 
   if (out_text) {
     char buf[240];
-    // STAR arrival clearance with a cleared level. Two forms depending on whether the
-    // level is below (descent) or above (climb to the STAR entry) the aircraft:
-    //   descend: "DESCEND VIA (STAR) ARRIVAL TO (level)"  [ICAO Doc 4444 16th ed. -- the
-    //            "TO" is part of the standard phrase, verified IFATCA/Doc 4444]
-    //   climb  : "CLIMB (level), CLEARED VIA (STAR) ARRIVAL"  -- still climbing to the
-    //            STAR entry; the STAR descends from there (short-flight case).
-    if (use_descend_via || climb_to_entry) {
+    // "DESCEND VIA (STAR) ARRIVAL TO (level)" [ICAO Doc 4444 16th ed. -- the "TO" is part
+    // of the standard phrase, verified IFATCA/Doc 4444]. Only the DESCENT case emits a
+    // level here; the still-climbing case (climb_lateral_via) is a LATERAL "cleared via"
+    // and falls through to the routing-only path below (no altitude -> the climb is not
+    // capped, the terminal descent comes later near the terminal).
+    if (use_descend_via) {
       const int tl_dv = compute_tl_ft(
           ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000, ctx.qnh_hpa);
       char alt_str[32];
@@ -5644,15 +5647,10 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
       else
         std::snprintf(alt_str, sizeof(alt_str), "%d feet, QNH %d", star_alt_ft,
                       ctx.qnh_hpa);
-      if (use_descend_via)
-        std::snprintf(buf, sizeof(buf), "%s%s to %s%s.", callsign.c_str(),
-                      star_phrase.c_str(), alt_str, approach_phrase.c_str());
-      else // climb to the STAR entry level, then cleared laterally via the STAR
-        std::snprintf(buf, sizeof(buf), "%s, climb %s%s%s.", callsign.c_str(),
-                      alt_str, star_phrase.c_str(), approach_phrase.c_str());
+      std::snprintf(buf, sizeof(buf), "%s%s to %s%s.", callsign.c_str(),
+                    star_phrase.c_str(), alt_str, approach_phrase.c_str());
       *out_text = buf;
-      logging::info("IFR en-route: %s -> %s, STAR=%s, rwy=%s",
-                    use_descend_via ? "descend-via" : "climb-to-entry",
+      logging::info("IFR en-route: descend-via -> %s, STAR=%s, rwy=%s",
                     format_alt(star_alt_ft, ctx.transition_alt_ft, ctx.qnh_hpa).c_str(),
                     star_name.c_str(),
                     dest_runway.empty() ? "(none)" : dest_runway.c_str());
