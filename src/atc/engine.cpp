@@ -407,6 +407,10 @@ static cifp_reader::FafFix s_approach_faf;                   // FAF from CIFP + 
 static bool s_star_shortcut_offered  = false; // one-shot: the roll happened this arrival
 static bool s_star_shortcut_pending  = false; // direct issued, awaiting accept/refuse
 static int  s_star_shortcut_prev_idx = -1;    // route idx before the jump (UNABLE restore)
+static std::string s_star_shortcut_iaf;       // IAF a STAR shortcut directed to; guards the
+                                              // approach-check-in init_route_fixes from
+                                              // reverting the rebuilt route to the default
+                                              // transition (real vol 2026-08-05) [C.P.Potter]
 // --- Vector-to-intercept (radar vectors to final) --------------------------
 // Bypass-IAF radar vectoring: when the arrival needs a large turn/reversal to join
 // the final approach course (LOWI R08-Z: direct ELMEM heading ~270, final 082 ->
@@ -704,6 +708,7 @@ void reset() {
   s_star_shortcut_pending = false;
   s_star_shortcut_prev_idx = -1;
   s_star_shortcut_prev_route.clear();
+  s_star_shortcut_iaf.clear();
   s_approach_faf = {};
   s_vec_plan = {};
   s_vec_step = -1;
@@ -882,6 +887,7 @@ void training_jump_approach() {
   s_star_shortcut_pending = false;
   s_star_shortcut_prev_idx = -1;
   s_star_shortcut_prev_route.clear();
+  s_star_shortcut_iaf.clear();
   s_approach_faf = {};
   s_vec_plan = {};
   s_vec_step = -1;
@@ -955,6 +961,7 @@ void training_jump_arrival() {
   s_star_shortcut_pending = false;
   s_star_shortcut_prev_idx = -1;
   s_star_shortcut_prev_route.clear();
+  s_star_shortcut_iaf.clear();
   s_approach_faf              = {};
   s_last_cleared_route_idx    = -1;
   s_faf_route_idx             = -1;
@@ -1033,6 +1040,7 @@ void training_set_arrival(const std::string &dest, const std::string &star,
   s_star_shortcut_pending  = false;
   s_star_shortcut_prev_idx = -1;
   s_star_shortcut_prev_route.clear();
+  s_star_shortcut_iaf.clear();
   s_no_star_direct_iaf.clear();
   s_route_fixes.clear();
   s_route_fix_idx = 0;
@@ -1517,6 +1525,8 @@ void process_transcript(Input in, Done done) {
       }
       if (s_star_shortcut_prev_idx >= 0)
         s_route_fix_idx = s_star_shortcut_prev_idx;
+      s_star_shortcut_iaf.clear(); // refused -> route reverts to the STAR; let the
+                                   // approach check-in rebuild normally again
       logging::info("IFR STAR shortcut: pilot UNABLE -> reverting to STAR "
                     "(tracker idx %d)",
                     s_star_shortcut_prev_idx);
@@ -2735,8 +2745,15 @@ void process_transcript(Input in, Done done) {
     // transmission OR one at a time, each clears independently (LFLP 2026-07-20).
     atc_state_machine::arm_readback(buf);
 
-    // Build route fix list now that STAR + approach waypoints are complete.
-    init_route_fixes(ctx);
+    // Build route fix list now that STAR + approach waypoints are complete -- UNLESS a
+    // STAR shortcut already rebuilt the route to a direct-IAF transition (e.g. direct
+    // TOLNA). Re-initialising here rebuilds the FULL STAR via the DEFAULT approach
+    // transition (PIRUV/LP403), reverting the shortcut and desyncing what ATC said
+    // ("direct TOLNA") from what the plugin tracks (real vol 2026-08-05). The shortcut
+    // rebuild already spliced the complete approach transition, so the route is ready.
+    // [C. P. Potter]
+    if (s_star_shortcut_iaf.empty())
+      init_route_fixes(ctx);
     if (!s_approach_faf.ident.empty()) {
       for (int i = 0; i < static_cast<int>(s_route_fixes.size()); ++i) {
         if (s_route_fixes[i].ident == s_approach_faf.ident) {
@@ -9157,6 +9174,11 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
     s_route_fix_idx = pick.route_idx;
   else
     rebuild_route_direct_to_iaf(ctx, pick.ident);
+  // Persist the directed IAF so the terminal-approach check-in (init_route_fixes) does
+  // NOT rebuild via the default transition and revert this direct (real vol 2026-08-05:
+  // "direct TOLNA" issued, then the Chambery check-in silently reverted the route to the
+  // PIRUV/LP403 transition). [C. P. Potter]
+  s_star_shortcut_iaf = pick.ident;
   s_pending_route_direct = "ATC direct: " + pick.ident;
   s_star_shortcut_pending = true;
 
