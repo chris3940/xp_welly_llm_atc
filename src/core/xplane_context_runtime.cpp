@@ -8,6 +8,7 @@
  * (at your option) any later version.
  */
 
+#include "atc/atc_state_machine.hpp"
 #include "core/xplane_context.hpp"
 #include "data/airport_overrides.hpp"
 #include "data/airspace_db.hpp"
@@ -1875,7 +1876,17 @@ void update() {
                                                  ctx.wind_direction_deg,
                                                  ctx.wind_speed_kt)
                  .empty();
-        if (ctx.on_ground && ctx.groundspeed_kts < 8.0f && !has_departure_config) {
+        // Once ATC has assigned/locked a departure runway (IFR clearance, or a
+        // tower/AFIS runway-in-use), that end is authoritative -- taxiing near the
+        // OTHER threshold must NOT flip active_runway. Without this guard the
+        // nearest-threshold override (no hysteresis, ignores wind) fought the
+        // wind/hysteresis selection every time the aircraft crossed the 400 m
+        // radius while manoeuvring on the ground, producing the LFLU 01<->19
+        // "runway in use is now..." announcement storm (real vol 2026-08-04:
+        // wind steady 190-230/15 yet the runway ping-ponged). The override still
+        // provides wrong-end protection BEFORE any runway is assigned. [C. P. Potter]
+        if (ctx.on_ground && ctx.groundspeed_kts < 8.0f && !has_departure_config &&
+            atc_state_machine::assigned_runway().empty()) {
           static constexpr double kThresholdRadiusM = 400.0;
           bool any_paved_rwy = false;
           for (const auto &rwy : ctx.runways)
