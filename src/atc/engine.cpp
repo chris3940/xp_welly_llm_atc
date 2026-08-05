@@ -6451,11 +6451,22 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
   const bool in_approach =
       st == AS::IFR_APPROACH_CONTACT || st == AS::IFR_APPROACH_DESCENT ||
       st == AS::IFR_APPROACH_TOWER || st == AS::IFR_LANDING_CLEARED;
+  // The published approach vertical profile is the PILOT's to fly on "cleared approach":
+  // ATC gives ONE descent to the PLATFORM (the 1st approach fix / initial approach
+  // altitude) and NEVER a step-down for a LATER approach fix (real vol 2026-08-05:
+  // "descend 6500" for LP403 then "descend 5000" for LP402, 12 s apart). So the ALTITUDE
+  // of approach-proc fixes BEYOND the first is not an ATC step-down; speed stays (ATC does
+  // assign approach speeds). [C. P. Potter]
+  int first_app_idx = -1;
+  for (int i = 0; i < static_cast<int>(s_route_fixes.size()); ++i)
+    if (s_route_fixes[i].is_approach_proc) { first_app_idx = i; break; }
   for (int i = std::max(0, s_route_fix_idx);
        i < static_cast<int>(s_route_fixes.size()); ++i) {
     const auto &f = s_route_fixes[i];
     if (f.is_approach_proc && !in_approach)
       continue; // APP fix but still on the STAR -> not yet enforceable
+    const bool app_beyond_platform =
+        f.is_approach_proc && first_app_idx >= 0 && i > first_app_idx;
     const bool has_alt = (f.alt.feet > 0) || (f.floor_ft > 0);
     const bool has_spd = (f.speed_kt > 0);
     if (!has_alt && !has_spd)
@@ -6474,7 +6485,10 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
                           : 120.0;
     c.eta_sec = c.dist_nm / gs * 3600.0;
     c.near    = (c.eta_sec <= lead_seconds);
-    // Altitude bust: the aircraft will not satisfy the fix's altitude band.
+    // Altitude bust: the aircraft will not satisfy the fix's altitude band. Suppressed
+    // for approach-proc fixes BEYOND the platform -- the pilot flies those published
+    // altitudes (no ATC step-down); only the platform (1st approach fix) is ATC-issued.
+    if (!app_beyond_platform) {
     if (f.floor_ft > 0) { // block "B": must be within [floor, ceiling]
       if (pa > static_cast<float>(f.alt.feet) + 200.0f) {
         // ABOVE the block ceiling (descent case) -> target the CEILING, i.e. the
@@ -6501,6 +6515,7 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
         c.alt_bust = true; c.alt_target_ft = f.alt.feet; c.alt_is_fl = f.alt.is_fl;
       }
     }
+    } // end !app_beyond_platform (altitude of later approach fixes = pilot-flown)
     // Speed bust: faster than the fix's cap (5 kt hysteresis).
     if (has_spd && ctx.indicated_airspeed_kts > static_cast<float>(f.speed_kt) + 5.0f) {
       c.spd_bust = true; c.spd_target_kt = f.speed_kt;
