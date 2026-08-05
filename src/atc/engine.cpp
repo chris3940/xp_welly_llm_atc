@@ -1471,7 +1471,7 @@ static bool transcript_is_readback_like(const std::string &transcript) {
     if (t.find(ci) != std::string::npos)
       return false;
   for (const char *k : {"direct", "confirm", "heading", "turn left", "turn right",
-                        "vectors", "knots", "reduce speed", "wilco", "roger"})
+                        "vectors", "knots", "reduce speed", "wilco", "roger", "qnh"})
     if (t.find(k) != std::string::npos)
       return true;
   return false;
@@ -1819,12 +1819,17 @@ void process_transcript(Input in, Done done) {
   // handler emit the response.
   bool sector_checkin_just_fired = false;
   // A course-correction READBACK ("confirm direct SALEV", "direct PIRUV") on the
-  // current frequency must NOT be mistaken for a sector check-in -- the bare "radar
-  // contact" ack is wrong for a readback (LFLP 2026-07-16). Skip the check-in
-  // treatment for readback-like transmissions; normal processing handles them.
+  // current frequency must NOT be answered with the bare "radar contact" check-in ack
+  // (LFLP 2026-07-16). BUT the pending flag must still CLEAR on the pilot's first call
+  // on the new freq, else a later readback gets captured: the Chambery check-in
+  // "... direct GOVNA" reads as readback-like (has "direct") so the block was skipped
+  // and the flag never cleared; the NEXT call -- the "descend to 6500, QNH" readback --
+  // then hit the block and was swallowed as "radar contact", so the 6500 readback was
+  // never satisfied and the approach readback was rejected "negative, 6500, readback"
+  // (real vol 2026-08-05). Fix: clear the flag on any first call on the new freq;
+  // give the bare ack ONLY when the call is not itself a readback. [C. P. Potter]
   const bool readback_like = transcript_is_readback_like(in.transcript);
-  if (s_sector_checkin_pending && s_pending_handoff_freq_mhz > 0.0f &&
-      !readback_like) {
+  if (s_sector_checkin_pending && s_pending_handoff_freq_mhz > 0.0f) {
     const float active = ctx.active_com == 2 ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
     if (std::fabs(active - s_pending_handoff_freq_mhz) < 0.005f) {
       s_sector_checkin_pending = false;
@@ -1853,7 +1858,10 @@ void process_transcript(Input in, Done done) {
       const bool defer_to_richer_handler =
           ck_state == AS::IFR_APPROACH_CONTACT ||
           ck_state == AS::IFR_APPROACH_TOWER;
-      if (!defer_to_richer_handler) {
+      // The flag is already cleared above; only EMIT the bare check-in ack when this
+      // call is not itself a readback -- a readback falls through to normal readback
+      // processing so its clearance item is actually satisfied. [C. P. Potter]
+      if (!defer_to_richer_handler && !readback_like) {
         const std::string &cs_ref_ck = atc_state_machine::session_callsign();
         const std::string &cs_ck =
             cs_ref_ck.empty() ? in.pilot_callsign : cs_ref_ck;
@@ -5475,8 +5483,62 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   // The suppression applies only to the spoken text; logging always includes QNH.
   const bool qnh_omit = s_qnh_stated;
 
+  // "DESCEND VIA (STAR) TO (level)" [ICAO Doc 4444 (since 2016) / EUROCONTROL
+  // AMC1 SERA.14001]: the phrase that AUTHORISES the pilot to descend on the STAR's
+  // published vertical profile (complying with every crossing restriction) down to a
+  // cleared level. A bare "cleared via (STAR)" is LATERAL ONLY -- the pilot must HOLD
+  // his last level. That is exactly what stranded LFLU->LFLP: "cleared via ROMAM3P
+  // arrival" with no level -> held FL110 -> busted GOVNA's FL090 -> stayed up in
+  // Geneva's airspace instead of dropping under it into Chambery (real vol 2026-08-04).
+  // The current (ACC) controller clears down to the DESTINATION terminal-TMA transfer
+  // level -- just under that TMA's ceiling (Chambery tops FL095 -> FL090) -- which also
+  // satisfies the STAR ceiling there; the terminal unit re-clears lower at its check-in
+  // (2-step). NOTE: "descend via ... TO (level)" MUST carry a level -- without one the
+  // pilot may not descend (ICAO). [C. P. Potter]
+  int descend_via_level_ft = 0;
+  if (!star_name.empty() && openair_db::ready()) {
+    // Destination position: apt.dat cache in-sim; fall back to the OFP's last navlog
+    // fix (the destination) so the engine resolves it headless too (the SDK-free
+    // airport_pos_for stub returns {0,0} in atc_ifr_repl).
+    double dlat = 0.0, dlon = 0.0;
+    if (!ofp.destination_icao.empty()) {
+      const auto dpos = xplane_context::airport_pos_for(ofp.destination_icao);
+      dlat = dpos.first;
+      dlon = dpos.second;
+    }
+    if (dlat == 0.0 && dlon == 0.0 && !ofp.navlog.empty()) {
+      dlat = ofp.navlog.back().lat;
+      dlon = ofp.navlog.back().lon;
+    }
+    if (dlat != 0.0 || dlon != 0.0) {
+      const int dest_ceil = openair_db::terminal_tma_ceiling(dlat, dlon);
+      if (dest_ceil > 1000)
+        descend_via_level_ft = ((dest_ceil - 100) / 1000) * 1000;
+    }
+  }
+  const int prior_cleared_via = s_enroute_cleared_alt_ft > 0
+                                    ? s_enroute_cleared_alt_ft
+                                    : ctx.ifr_cruise_alt_ft;
+  const bool via_is_step_down =
+      descend_via_level_ft > 0 &&
+      (prior_cleared_via <= 0 || descend_via_level_ft < prior_cleared_via);
+  // "Descend via" only when it is an actual DESCENT (aircraft ABOVE the transfer
+  // level). On a SHORT flight the aircraft is still CLIMBING toward the STAR entry
+  // when the arrival clearance fires (LFLU->LFLP: cleared at ~5000 ft, transfer level
+  // FL090 above it) -- there "descend via ... FL090" is a contradiction; it is a CLIMB
+  // to the STAR entry level, then the STAR descends from there. Split the two so the
+  // verb matches (real vol 2026-08-05: "descend via to FL90" spoken at 5100 ft climb).
+  // [C. P. Potter]
+  const float pa_via = ctx.pressure_alt_ft;
+  const bool use_descend_via =
+      via_is_step_down && pa_via > static_cast<float>(descend_via_level_ft) + 200.0f;
+  const bool climb_to_entry =
+      via_is_step_down && pa_via <= static_cast<float>(descend_via_level_ft) + 200.0f;
+  if (use_descend_via || climb_to_entry)
+    star_alt_ft = descend_via_level_ft; // the cleared level either way
+
   if (!star_name.empty())
-    star_phrase = ", cleared via " +
+    star_phrase = (use_descend_via ? ", descend via " : ", cleared via ") +
                   spoken_procedure_name(star_name, star_entry_fix) + " arrival";
   else if (!direct_iaf.empty()) {
     int current_cleared_dc = s_enroute_cleared_alt_ft > 0 ? s_enroute_cleared_alt_ft
@@ -5548,6 +5610,37 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
 
   if (out_text) {
     char buf[240];
+    // STAR arrival clearance with a cleared level. Two forms depending on whether the
+    // level is below (descent) or above (climb to the STAR entry) the aircraft:
+    //   descend: "DESCEND VIA (STAR) ARRIVAL TO (level)"  [ICAO Doc 4444 16th ed. -- the
+    //            "TO" is part of the standard phrase, verified IFATCA/Doc 4444]
+    //   climb  : "CLIMB (level), CLEARED VIA (STAR) ARRIVAL"  -- still climbing to the
+    //            STAR entry; the STAR descends from there (short-flight case).
+    if (use_descend_via || climb_to_entry) {
+      const int tl_dv = compute_tl_ft(
+          ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000, ctx.qnh_hpa);
+      char alt_str[32];
+      if (star_alt_ft >= tl_dv)
+        std::snprintf(alt_str, sizeof(alt_str), "flight level %d", star_alt_ft / 100);
+      else if (qnh_omit)
+        std::snprintf(alt_str, sizeof(alt_str), "%d feet", star_alt_ft);
+      else
+        std::snprintf(alt_str, sizeof(alt_str), "%d feet, QNH %d", star_alt_ft,
+                      ctx.qnh_hpa);
+      if (use_descend_via)
+        std::snprintf(buf, sizeof(buf), "%s%s to %s%s.", callsign.c_str(),
+                      star_phrase.c_str(), alt_str, approach_phrase.c_str());
+      else // climb to the STAR entry level, then cleared laterally via the STAR
+        std::snprintf(buf, sizeof(buf), "%s, climb %s%s%s.", callsign.c_str(),
+                      alt_str, star_phrase.c_str(), approach_phrase.c_str());
+      *out_text = buf;
+      logging::info("IFR en-route: %s -> %s, STAR=%s, rwy=%s",
+                    use_descend_via ? "descend-via" : "climb-to-entry",
+                    format_alt(star_alt_ft, ctx.transition_alt_ft, ctx.qnh_hpa).c_str(),
+                    star_name.c_str(),
+                    dest_runway.empty() ? "(none)" : dest_runway.c_str());
+      return true;
+    }
     // emit_alt was decided above (against the PRIOR cleared level). When false,
     // navlog step-downs already had us below the STAR entry altitude, so give
     // routing + approach info only.
@@ -6366,10 +6459,20 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
     c.near    = (c.eta_sec <= lead_seconds);
     // Altitude bust: the aircraft will not satisfy the fix's altitude band.
     if (f.floor_ft > 0) { // block "B": must be within [floor, ceiling]
-      if (pa > static_cast<float>(f.alt.feet) + 200.0f ||
-          pa < static_cast<float>(f.floor_ft) - 200.0f) {
+      if (pa > static_cast<float>(f.alt.feet) + 200.0f) {
+        // ABOVE the block ceiling (descent case) -> target the CEILING, i.e. the
+        // MINIMAL descent that satisfies the block. Targeting the floor instead
+        // over-descends AND drops the target below the inner-TMA transfer floor,
+        // so poll_profile_crossing suppresses the step-down and the fix is blown:
+        // LFLP GOVNA (B FL090/6500) flown at FL110, no descent ever issued, into
+        // Geneva's zones still high (real vol 2026-08-04). [C. P. Potter]
         c.alt_bust = true;
-        c.alt_target_ft = f.floor_ft; // descend to (or climb to) the block floor
+        c.alt_target_ft = f.alt.feet; // block ceiling (e.g. FL090)
+        c.alt_is_fl = f.alt.is_fl;
+      } else if (pa < static_cast<float>(f.floor_ft) - 200.0f) {
+        // BELOW the block floor (climb case) -> climb to the floor.
+        c.alt_bust = true;
+        c.alt_target_ft = f.floor_ft;
         c.alt_is_fl = (f.floor_ft >= compute_tl_ft(ta, ctx.qnh_hpa));
       }
     } else if (f.is_floor) { // at-or-above: bust only if BELOW
