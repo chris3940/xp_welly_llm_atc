@@ -171,18 +171,24 @@ static std::string current_tower_label() {
   // "Valence Information". [C. P. Potter]
   {
     const auto &cxa = xplane_context::get();
-    if (cxa.on_ground) {
-      std::string info_n, del_n;
-      float info_f = 0.0f, del_f = 0.0f;
-      const std::string &icao = cxa.nearest_airport_id;
-      if (airport_overrides::controller(icao, "info", &info_n, &info_f)) {
-        const float acom =
-            cxa.active_com == 2 ? cxa.com2_freq_mhz : cxa.com1_freq_mhz;
-        if (airport_overrides::controller(icao, "delivery", &del_n, &del_f) &&
-            del_f > 100.0f && std::fabs(acom - del_f) < 0.02f)
-          return del_n; // on the ACC freq -> clearance controller (e.g. Lyon Control)
-        return info_n;  // AFIS field -> Valence Information
-      }
+    std::string info_n, del_n;
+    float info_f = 0.0f, del_f = 0.0f;
+    const std::string &icao = cxa.nearest_airport_id;
+    if (airport_overrides::controller(icao, "info", &info_n, &info_f)) {
+      const float acom =
+          cxa.active_com == 2 ? cxa.com2_freq_mhz : cxa.com1_freq_mhz;
+      // On the overlying ACC's "delivery" freq -> that controller (e.g. Lyon
+      // Control) -- on the ground OR just after departure while still near the AFIS
+      // field. Covering the airborne window matters: when the pilot switches to
+      // Lyon 125.155 BEFORE poll_departure_handoff fires, the speaker was
+      // mislabelled "<airport> ATC" = Valence, so VALENCE appeared to answer on
+      // LYON's frequency (LFLU->LFLP 2026-08-04). [C. P. Potter]
+      if (airport_overrides::controller(icao, "delivery", &del_n, &del_f) &&
+          del_f > 100.0f && std::fabs(acom - del_f) < 0.02f)
+        return del_n; // on the ACC freq -> clearance controller (e.g. Lyon Control)
+      // AFIS "information" is a GROUND service -> keep that label ground-only.
+      if (cxa.on_ground)
+        return info_n; // AFIS field -> Valence Information
     }
   }
   // For IFR airborne states: use the pending departure label stored when the

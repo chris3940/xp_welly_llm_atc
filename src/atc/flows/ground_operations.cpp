@@ -1033,8 +1033,31 @@ bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
                             "afis_departure_info");
     return true;
   default:
-    return false;
+    break;
   }
+  // AFIS self-announce (backtrack / line-up / rolling / taking off): NOT a clearable
+  // intent -- Information only acknowledges with traffic info, never "garbled" nor a
+  // takeoff clearance. These classify as UNKNOWN, so match the raw transcript. Scoped
+  // to an AFIS field on the ground pre-departure (this whole function), so there is no
+  // towered-field risk. Real vol LFLU 2026-08-05: "backtrack ... align and take off"
+  // and "taking off runway 1" were answered "garbled, say again". [C. P. Potter]
+  {
+    std::string lt = msg.raw_transcript;
+    for (char &c : lt)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char *kw : {"backtrack", "back track", "line up", "lining up",
+                           "line-up", "taking off", "take off", "rolling",
+                           "departing"})
+      if (lt.find(kw) != std::string::npos) {
+        resp.text = atc_templates::fill(
+            "{callsign}, " + info_name + ", runway " + rwy +
+                ", no reported traffic.",
+            vars);
+        resp.next_state = internal::get_state_ref();
+        return true;
+      }
+  }
+  return false;
 }
 
 bool handle_frequency_hint(const PilotMessage &msg, const XPlaneContext &ctx,

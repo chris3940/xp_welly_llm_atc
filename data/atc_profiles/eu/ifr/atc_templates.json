@@ -177,10 +177,17 @@
         "next_state": "IFR/RADAR_CONTACT",
         "requires_readback": false
       },
+      "_comment_INITIAL_CALL_CENTER": "Airborne report / check-in with the enroute ACC (Center) -- same as INITIAL_CALL_APPROACH. Without this the report-airborne 'passing 3000, direct ROMAM' fell through to _INVALID, which RE-ISSUED a takeoff clearance to an already-AIRBORNE aircraft at an AFIS field (Valence, LFLU->LFLP 2026-08-04).",
+      "INITIAL_CALL_CENTER": {
+        "response": "{callsign}, radar contact.",
+        "next_state": "IFR/RADAR_CONTACT",
+        "requires_readback": false
+      },
+      "_comment_INVALID": "NEVER re-issue a takeoff clearance here: the aircraft has already been cleared for takeoff (or, at an AFIS field, is airborne with no takeoff clearance at all). An unrecognized transmission gets 'say again', not a takeoff clearance.",
       "_INVALID": {
-        "response": "{callsign}, runway {runway}, cleared for takeoff, acknowledge.",
+        "response": "{callsign}, say again.",
         "next_state": "IFR/DEPARTURE_CLEARED",
-        "requires_readback": true
+        "requires_readback": false
       }
     },
 
