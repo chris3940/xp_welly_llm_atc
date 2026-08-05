@@ -9014,6 +9014,39 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
                                : simbrief_ofp::get().destination_icao;
   if (dest.empty()) return false;
 
+  // Position window around the 1st STAR fix (the STAR entry): only roll -- and thus
+  // CONSUME the one-shot -- when the geometry is meaningful, from kBeforeNm before the
+  // entry to kAfterNm after it. This unifies the DESCENT (approaching the STAR) and
+  // ARRIVAL (just entered) phases: whichever reaches here inside the window fires the
+  // single offer. Outside the window it returns WITHOUT arming, so an early far-out /
+  // still-climbing frame can't burn the one-shot on a "no worthwhile" evaluation and
+  // leave nothing for the ARRIVAL phase -- the offer then never came even with SHORTCUTS
+  // ALWAYS on (real vol 2026-08-05, LFLU->LFLP ROMA3P). [C. P. Potter]
+  {
+    constexpr double kBeforeNm = 15.0, kAfterNm = 7.0;
+    // STAR entry = FIRST waypoint of the ASSIGNED STAR (keyed on s_assigned_star_name,
+    // NOT the filed OFP) so it is robust to a runway-change STAR reassignment (assigned
+    // STAR != filed STAR) and testable via the REPL 'arrival' command. Its position +
+    // route index come from the route table -- the entry fix is on the route.
+    auto entry_wps =
+        cifp_reader::star_waypoints(ctx.cifp_dir, dest, s_assigned_star_name, false);
+    if (!entry_wps.empty()) {
+      const std::string &entry_id = entry_wps.front().ident;
+      int entry_idx = -1;
+      for (int i = 0; i < static_cast<int>(s_route_fixes.size()); ++i)
+        if (s_route_fixes[i].ident == entry_id) { entry_idx = i; break; }
+      if (entry_idx >= 0 && (s_route_fixes[entry_idx].lat != 0.0 ||
+                             s_route_fixes[entry_idx].lon != 0.0)) {
+        const double d_entry = traffic_geometry::distance_nm(
+            ctx.latitude, ctx.longitude, s_route_fixes[entry_idx].lat,
+            s_route_fixes[entry_idx].lon);
+        const bool past_entry = (s_route_fix_idx > entry_idx);
+        if (d_entry > (past_entry ? kAfterNm : kBeforeNm))
+          return false; // outside [-15; +7] NM of the STAR entry -> stay armed
+      }
+    }
+  }
+
   // The roll happens exactly once per arrival, regardless of outcome.
   s_star_shortcut_offered = true;
   const bool always = settings::shortcut_always();
@@ -9162,6 +9195,14 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
     return false;
   }
 
+  // STAR direct-to-IAF shortcut -- BEFORE the approach-handoff early-return below, so it
+  // still has its [-15; +7] NM window just after the STAR entry even once the arrival
+  // handoff has been issued. Its own position window keeps it near the STAR entry (far
+  // from the IAF), so it never competes with the reversal vector-to-intercept further in.
+  // [C. P. Potter]
+  if (poll_star_shortcut(ctx, out_text, out_requires_readback))
+    return true;
+
   if (s_enroute_approach_handoff_issued)
     return false;
 
@@ -9183,11 +9224,6 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
   // R08-Z). One-shot, large-turn-gated -> no-op for normal arrivals. Runs here in
   // case the approach phase has not been entered yet at ~12 NM from the IAF.
   if (poll_vector_to_intercept(ctx, dt, out_text, out_requires_readback))
-    return true;
-
-  // STAR direct-to-IAF shortcut (nearest IAF, one-shot, 20% / 100%). Runs after
-  // the vector/connector directs so it never competes with a reversal vectoring.
-  if (poll_star_shortcut(ctx, out_text, out_requires_readback))
     return true;
 
   s_arrival_timer += dt;
