@@ -1748,7 +1748,11 @@ static void submit_recording_to_stt() {
         "as filed", "cleared as filed",
         // Delivery-phase opening call: "request IFR clearance" garbled to "request
         // high factorance" (user 2026-07-26) -- anchor the request + the phrase.
-        "IFR clearance", "request IFR clearance", "startup approved", nullptr};
+        "IFR clearance", "request IFR clearance", "startup approved",
+        // Departure clearance ends with "report airborne" -- without the anchor the
+        // read-back garbled to "reporter born" (user 2026-08-05, LFLU). Anchor both the
+        // instruction phrase and the pilot's spoken form.
+        "report airborne", "reporting airborne", nullptr};
     for (int i = 0; kCoreVocab[i]; ++i)
       add(kCoreVocab[i]);
     // Join comma-separated for the mistral context_bias[] path.
