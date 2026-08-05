@@ -133,3 +133,31 @@ TEST_CASE("multi-clearance: both items read back in one transmission",
   atc_state_machine::process(readback("descend 6500 feet, runway 04"), ctx, 10.0);
   REQUIRE_FALSE(atc_state_machine::is_readback_pending());
 }
+
+TEST_CASE("readback: spelled/spaced squawk accepted (no false 'negative, squawk')",
+          "[multi_clearance]") {
+  // Real vol 2026-08-05: a full-clearance readback with the squawk SPELLED ("six zero
+  // two zero") among other numbers was rejected "negative, squawk 6020, readback" even
+  // though correct -- normalise turned it into "60 20" (compact_digit_spaces only merges
+  // PAIRS), which the old \bsquawk\s*(\d{4})\b regex missed. extract_squawk now accepts 4
+  // digits with any/no separators.
+  auto no_squawk_mismatch = [](const std::string &rb) {
+    for (const auto &m : readback_verifier::check("squawk 6020.", rb))
+      if (m.field == "squawk")
+        return false;
+    return true;
+  };
+  REQUIRE(no_squawk_mismatch("squawk six zero two zero")); // spelled (the real case)
+  REQUIRE(no_squawk_mismatch("squawk 6 0 2 0"));           // spaced digits
+  REQUIRE(no_squawk_mismatch("squawk 60 20"));             // paired (post-normalise)
+  REQUIRE(no_squawk_mismatch("squawk six-zero-two-zero")); // hyphenated
+  REQUIRE(no_squawk_mismatch("squawk 6020"));              // compact
+  REQUIRE(no_squawk_mismatch(                              // multi-item (real transcript)
+      "runway 01, direct ROMAM, climb 5000 feet, squawk six zero two zero, QNH 1017"));
+  // Negative control: a WRONG squawk IS still flagged.
+  bool wrong_flagged = false;
+  for (const auto &m : readback_verifier::check("squawk 6020.", "squawk 6 0 2 1"))
+    if (m.field == "squawk")
+      wrong_flagged = true;
+  REQUIRE(wrong_flagged);
+}

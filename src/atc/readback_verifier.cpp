@@ -204,12 +204,19 @@ static std::string extract_freq(const std::string &norm) {
 // carries the spelled squawk -- outputs the words, which the compact regex missed,
 // causing a false "readback incorrect" loop (user 2026-07-26).
 static std::string extract_squawk(const std::string &norm) {
-  static const std::regex kRe(R"(\bsquawk\s*(\d{4})\b)",
-                               std::regex_constants::icase);
+  // 4 digits after "squawk" with ANY (or no) separators between them. normalise turns
+  // "squawk six zero two zero" into "squawk 60 20" -- compact_digit_spaces only merges
+  // PAIRS, so it is NOT the contiguous "6020" the old \d{4} regex needed, and the words
+  // are already digits so the spelled regex below missed it too -> stated=(missing) and a
+  // spurious "negative, squawk 6020, readback" on an otherwise-correct readback (real vol
+  // 2026-08-05). This form subsumes "6020", "6 0 2 0", "60 20", "6-0-2-0". [C. P. Potter]
+  static const std::regex kRe(
+      R"(\bsquawk[\s,:.-]*(\d)[\s,:.-]*(\d)[\s,:.-]*(\d)[\s,:.-]*(\d)\b)",
+      std::regex_constants::icase);
   std::smatch m;
   if (std::regex_search(norm, m, kRe))
-    return m[1].str();
-  // Spelled: "squawk" followed by exactly 4 digit-words (separated by space/comma/hyphen).
+    return m[1].str() + m[2].str() + m[3].str() + m[4].str();
+  // Spelled fallback (un-normalised input): "squawk" + exactly 4 digit-words.
   static const std::regex kSp(
       R"(\bsquawk\s+((?:zero|one|two|three|four|five|six|seven|eight|nine|niner)(?:[\s,-]+(?:zero|one|two|three|four|five|six|seven|eight|nine|niner)){3}))",
       std::regex_constants::icase);
