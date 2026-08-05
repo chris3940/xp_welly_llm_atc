@@ -28,6 +28,7 @@
 #include "core/logging.hpp"
 #include "data/airspace_db.hpp"
 #include "data/airport_overrides.hpp"
+#include "data/simbrief_ofp.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/cifp_reader.hpp"
 #include "persistence/settings.hpp"
@@ -974,9 +975,19 @@ bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
   using PI = intent_parser::PilotIntent;
   std::string info_name;
   float info_freq = 0.0f;
-  if (!airport_overrides::controller(ctx.nearest_airport_id, "info", &info_name,
-                                     &info_freq))
-    return false; // not an AFIS field
+  // The departure AFIS field is the OFP ORIGIN, not the drifting nearest_airport_id: a
+  // ULM base co-located with the field (XLF00AM "Base ULM" sits on the LFLU runway) wins
+  // the geometric-nearest EVEN ON THE RUNWAY, so the AFIS flow keyed on nearest broke and
+  // answered "unable" (real vol 2026-08-05, pilot stationary on the LFLU runway). The
+  // runway comes from the pilot/assigned clearance and QNH is position-based, so only this
+  // controller lookup needs pinning to the origin. [C. P. Potter]
+  const std::string &origin = simbrief_ofp::get().origin_icao;
+  if (origin.empty() ||
+      !airport_overrides::controller(origin, "info", &info_name, &info_freq)) {
+    if (!airport_overrides::controller(ctx.nearest_airport_id, "info", &info_name,
+                                       &info_freq))
+      return false; // neither the origin nor the nearest is an AFIS field
+  }
   if (!ctx.on_ground)
     return false;
   // Only the ground, pre-departure IFR states (the pilot already has the ACC
@@ -1045,9 +1056,9 @@ bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
     std::string lt = msg.raw_transcript;
     for (char &c : lt)
       c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    for (const char *kw : {"backtrack", "back track", "line up", "lining up",
-                           "line-up", "taking off", "take off", "rolling",
-                           "departing"})
+    for (const char *kw : {"backtrack", "back track", "track back", "line up",
+                           "lining up", "line-up", "taking off", "take off",
+                           "rolling", "departing"})
       if (lt.find(kw) != std::string::npos) {
         resp.text = atc_templates::fill(
             "{callsign}, " + info_name + ", runway " + rwy +
