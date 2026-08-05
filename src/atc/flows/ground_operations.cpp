@@ -1058,7 +1058,7 @@ bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
       c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     for (const char *kw : {"backtrack", "back track", "track back", "line up",
                            "lining up", "line-up", "taking off", "take off",
-                           "rolling", "departing"})
+                           "rolling", "departing", "ready", "taxi"})
       if (lt.find(kw) != std::string::npos) {
         resp.text = atc_templates::fill(
             "{callsign}, " + info_name + ", runway " + rwy +
@@ -1068,7 +1068,15 @@ bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
         return true;
       }
   }
-  return false;
+  // At an AFIS (Information) field there is NO clearance to grant or deny, so Information
+  // must NEVER answer "unable" (that comes from a downstream precondition rejection when
+  // the transmission falls through). Anything not otherwise recognised -- heavily garbled
+  // STT, an unexpected readback -- gets a benign "say again" from Information (real vol
+  // 2026-08-05: a garbled "ready to taxi" classified READBACK was answered "unable"; on
+  // Information that is wrong -- it is not a request). [C. P. Potter]
+  resp.text = atc_templates::fill("{callsign}, " + info_name + ", say again.", vars);
+  resp.next_state = internal::get_state_ref();
+  return true;
 }
 
 bool handle_frequency_hint(const PilotMessage &msg, const XPlaneContext &ctx,
