@@ -1708,6 +1708,40 @@ std::vector<StarWaypoint> approach_procedure_waypoints(
   return result;
 }
 
+// ── approach_iaf_fix ──────────────────────────────────────────────────────
+// The IAF's OWN constraint, from the IF (Initial Fix) leg that
+// approach_procedure_waypoints() skips at "if (path_term == \"IF\") continue;".
+StarEntryFix approach_iaf_fix(const std::string &cifp_dir, const std::string &icao,
+                              const std::string &approach_designator,
+                              const std::string &iaf_ident) {
+  StarEntryFix out;
+  if (cifp_dir.empty() || icao.empty() || approach_designator.empty() ||
+      iaf_ident.empty())
+    return out;
+
+  std::ifstream in(make_cifp_path(cifp_dir, icao));
+  if (!in.good())
+    return out;
+
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.size() < 6 || line.compare(0, 6, "APPCH:") != 0) continue;
+    auto f = split_csv(line);
+    if (f.size() < 24) continue;
+    if (trim(f[1]) != "A") continue;                 // named transition record
+    if (trim(f[2]) != approach_designator) continue; // this approach
+    if (trim(f[3]) != iaf_ident) continue;           // this IAF's transition
+    if (trim(f[11]) != "IF") continue;               // the Initial Fix leg
+    if (trim(f[4]) != iaf_ident) continue;           // the IAF fix itself
+    const std::string alt_desc = trim(f[22]);
+    out.ident      = iaf_ident;
+    out.alt        = parse_alt(f[23]);
+    out.is_ceiling = (alt_desc == "-" || alt_desc == "B");
+    return out;
+  }
+  return out;
+}
+
 // ── approach_transition_idents ────────────────────────────────────────────
 
 std::vector<std::string>

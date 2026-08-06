@@ -284,6 +284,16 @@ StarEntryFix star_entry_fix(const std::string &cifp_dir,
                              const std::string &icao,
                              const std::string &star_name);
 
+// The IAF's OWN crossing constraint, read from the IF (Initial Fix) leg of a
+// named approach transition -- the leg approach_procedure_waypoints() deliberately
+// skips.  e.g. LFLP R04-Z, iaf "TOLNA": the IF leg carries "at or below FL080".
+// Returns an empty StarEntryFix (ident="") when there is no such IF leg;
+// alt.feet == 0 means the IF leg has no altitude constraint.
+StarEntryFix approach_iaf_fix(const std::string &cifp_dir,
+                              const std::string &icao,
+                              const std::string &approach_designator,
+                              const std::string &iaf_ident);
+
 // Finds the STAR name whose entry fix (lowest sequence number) matches
 // entry_fix_ident.  Used when the SimBrief OFP does not supply a STAR name
 // but the navlog's first STAR fix is known.

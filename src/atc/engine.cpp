@@ -5955,6 +5955,22 @@ static bool resolve_sector_controller(const openair_db::AirspaceEntry &enc,
   }
 }
 
+// Controller fragment of an openair volume name: strip the class + sector suffix so
+// "CHAMBERY TMA SECTOR 2", "CHAMBERY CTR" and "CHAMBERY TMA SECTOR 3" all reduce to
+// "CHAMBERY". Tests whether two volumes belong to the same controlling unit.
+static std::string controller_fragment(std::string n) {
+  for (const char *kw : {" TMA", " CTA", " CTR", " FIR", " UIR", " SECTOR", " SEC"}) {
+    auto p = n.find(kw);
+    if (p != std::string::npos) {
+      n = n.substr(0, p);
+      break;
+    }
+  }
+  while (!n.empty() && n.back() == ' ')
+    n.pop_back();
+  return n;
+}
+
 // Option B (LFLP 2026-07-15): only the TERMINAL controller -- the unit that owns
 // the destination's approach -- may issue the approach clearance, never an outer
 // TMA (Geneva has no authority over the LFLP RNAV choice). The terminal TMA is the
@@ -5989,16 +6005,43 @@ static bool on_destination_terminal(const xplane_context::XPlaneContext &ctx) {
   // but the dest probe at 3000 ft resolved a different Chambery volume, and
   // resolve_tma_controller couldn't map "... CTR" -> the clearance never fired).
   // Still blocks Geneva ("GENEVA" != "CHAMBERY") so Option B holds.
-  auto frag = [](std::string n) {
-    for (const char *kw : {" TMA", " CTA", " CTR", " FIR", " UIR", " SECTOR", " SEC"}) {
-      auto p = n.find(kw);
-      if (p != std::string::npos) { n = n.substr(0, p); break; }
-    }
-    while (!n.empty() && n.back() == ' ')
-      n.pop_back();
-    return n;
-  };
-  return frag(acft_tma.name) == frag(dest_tma.name);
+  return controller_fragment(acft_tma.name) == controller_fragment(dest_tma.name);
+}
+
+// "Look below" trigger for the descend-into-terminal-TMA step. True when the terminal
+// TMA directly UNDER the aircraft belongs to the destination's approach controller --
+// even though the aircraft's ENCLOSING volume is still a different (overlying) ACC.
+// Over LFLP via Chambery the aircraft sits in LYON TMA SECTOR 10 (FL095-115) while
+// CHAMBERY TMA SECTOR 2 (1000-FL095) is already beneath it (from ~1 NM past PENAR);
+// on_destination_terminal (which keys on the ENCLOSING volume) stays "LYON" until the
+// aircraft finally enters Chambery's own shelf ~11 NM later (over TOLNA), firing the
+// step-down + Approach handoff far too late. This probes the volume BELOW instead, so
+// Lyon descends the aircraft into Chambery's TMA right after PENAR. For the Nice/Cannes
+// stacked case on_destination_terminal already fires (enclosing == NICE), so this is
+// purely additive -- no LFMN / SALEV3P regression. [C. P. Potter]
+static bool dest_terminal_tma_below(const xplane_context::XPlaneContext &ctx) {
+  if (!openair_db::ready() || s_assigned_dest_icao.empty())
+    return false;
+  const auto dpos = xplane_context::airport_pos_for(s_assigned_dest_icao);
+  if (dpos.first == 0.0 && dpos.second == 0.0)
+    return false;
+  // Destination approach-controller fragment (same probe as on_destination_terminal).
+  const int dceil = openair_db::terminal_tma_ceiling(dpos.first, dpos.second);
+  const int dprobe = (dceil > 1500) ? dceil - 500 : 3000;
+  const openair_db::AirspaceEntry dest_tma =
+      openair_db::find_enclosing(dpos.first, dpos.second, dprobe);
+  if (dest_tma.name.empty())
+    return false;
+  // Terminal TMA directly under the AIRCRAFT -- only meaningful while ABOVE its ceiling
+  // (below/inside it, on_destination_terminal already owns the case).
+  const int aceil = openair_db::terminal_tma_ceiling(ctx.latitude, ctx.longitude);
+  if (aceil <= 1000 || static_cast<int>(openair_alt(ctx)) <= aceil)
+    return false;
+  const openair_db::AirspaceEntry below =
+      openair_db::find_enclosing(ctx.latitude, ctx.longitude, aceil - 500);
+  if (below.name.empty())
+    return false;
+  return controller_fragment(below.name) == controller_fragment(dest_tma.name);
 }
 
 // ICAO Doc 4444 / EUROCONTROL coordination: a controller may descend an aircraft
@@ -8102,14 +8145,38 @@ static bool poll_descend_to_enter_tma(const xplane_context::XPlaneContext &ctx,
   // "descend into it" clearance -- the stepped descent keeps the aircraft ABOVE
   // the enroute TMA. Geometry-based dest check (works for a field under a
   // differently-named TMA). [[project_stepped_descent]]
-  if (!s_assigned_dest_icao.empty() && !on_destination_terminal(ctx))
+  // Fire when the aircraft is over the destination's terminal area -- EITHER the
+  // ENCLOSING volume is that controller (on_destination_terminal; the Nice stacked
+  // case) OR the dest terminal TMA has appeared directly BELOW while still under an
+  // overlying ACC (dest_terminal_tma_below; the Lyon-over-Chambery case, so the
+  // step-down starts right after PENAR, not ~11 NM late once the aircraft finally
+  // enters Chambery's own shelf over TOLNA).
+  if (!s_assigned_dest_icao.empty() && !on_destination_terminal(ctx) &&
+      !dest_terminal_tma_below(ctx))
     return false;
   const int tma_ceil =
       openair_db::terminal_tma_ceiling(ctx.latitude, ctx.longitude);
   int target_ft = (tma_ceil > 1000) ? ((tma_ceil - 100) / 1000) * 1000 : 0;
+  // Caveat A ([[project_arrival_tma_stepdown_model]]): if the NEXT route fix carries an
+  // at-or-below (ceiling) constraint LOWER than the standard entry level, descend to
+  // meet it instead. The RNAV Z 04 IAF TOLNA is "at or below FL080", so entering over
+  // Chambery the target is FL080, not the FL090 just under the FL095 ceiling. The
+  // constraint only ever LOWERS the target (a fix minimum above the ceiling would be
+  // Caveat B -> defer, handled by the block-floor clamp below). [C. P. Potter]
+  std::string cross_fix; // set when the target is set BY a fix's at-or-below constraint
+  if (target_ft > 0 && s_route_fix_idx >= 0 &&
+      s_route_fix_idx < static_cast<int>(s_route_fixes.size())) {
+    const RouteFix &nf = s_route_fixes[s_route_fix_idx];
+    if (nf.is_ceiling && nf.alt.feet > 0 && nf.alt.feet < target_ft) {
+      target_ft = nf.alt.feet;
+      cross_fix = nf.ident; // -> "cross <fix> at or below <level>" (ICAO Doc 4444)
+    }
+  }
   const int block_floor = active_block_floor_ft();
-  if (block_floor > 0 && target_ft < block_floor)
+  if (block_floor > 0 && target_ft < block_floor) {
     target_ft = block_floor; // Caveat A/B: never below an active block floor
+    cross_fix.clear();       // no longer the fix-driven crossing -> plain "descend"
+  }
   const int cleared = engine::current_cleared_alt_ft();
   const bool fire = target_ft > 0 && target_ft < tma_ceil &&
                     static_cast<int>(ctx.altitude_ft_msl) > tma_ceil + 200 &&
@@ -8130,11 +8197,20 @@ static bool poll_descend_to_enter_tma(const xplane_context::XPlaneContext &ctx,
   const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
   const std::string clr =
       format_alt_clearance(target_ft, AltHint::Auto, ctx.qnh_hpa, ta);
-  *out_text = callsign + ", descend " + clr + ".";
+  // When the level is set by a fix's at-or-below constraint, use the ICAO Doc 4444 /
+  // EUROCONTROL crossing-restriction form "CROSS <fix> AT OR BELOW <level>" (the IAF's
+  // published restriction; on a direct-to-IAF it remains applicable while the bypassed
+  // STAR-fix restrictions are cancelled). Otherwise a plain "DESCEND <level>". [C.P.Potter]
+  if (!cross_fix.empty())
+    *out_text = callsign + ", cross " + cross_fix + " at or below " + clr + ".";
+  else
+    *out_text = callsign + ", descend " + clr + ".";
   if (out_requires_readback)
     *out_requires_readback = true;
-  logging::info("IFR descent: descend-to-enter terminal area, TMA ceil %d -> %s",
-                tma_ceil, clr.c_str());
+  const std::string log_suffix =
+      cross_fix.empty() ? std::string() : (" (cross " + cross_fix + ")");
+  logging::info("IFR descent: descend-to-enter terminal area, TMA ceil %d -> %s%s",
+                tma_ceil, clr.c_str(), log_suffix.c_str());
   return true;
 }
 
@@ -8999,6 +9075,16 @@ static void rebuild_route_direct_to_iaf(const xplane_context::XPlaneContext &ctx
     auto ip = pos_map.find(iaf_ident);
     if (ip != pos_map.end()) { iaf.lat = ip->second.first; iaf.lon = ip->second.second; }
     iaf.is_approach_proc = true;
+    // Carry the IAF's OWN crossing constraint (the IF leg approach_procedure_waypoints
+    // skips) so the descend-into-TMA Caveat A can clamp to it AND cite it -- e.g. R04-Z
+    // TOLNA "at or below FL080". Without this the spliced IAF had no altitude and the TMA
+    // descent stopped at the ceiling-derived FL090 (real vol 2026-08-06). [C. P. Potter]
+    const auto iaf_c = cifp_reader::approach_iaf_fix(
+        ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator, iaf_ident);
+    if (iaf_c.alt.feet > 0) {
+      iaf.alt = iaf_c.alt;
+      iaf.is_ceiling = iaf_c.is_ceiling;
+    }
     s_route_fixes.push_back(iaf);
   }
 
@@ -9053,11 +9139,18 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
   // leave nothing for the ARRIVAL phase -- the offer then never came even with SHORTCUTS
   // ALWAYS on (real vol 2026-08-05, LFLU->LFLP ROMA3P). [C. P. Potter]
   {
-    constexpr double kBeforeNm = 15.0, kAfterNm = 7.0;
-    // STAR entry = FIRST waypoint of the ASSIGNED STAR (keyed on s_assigned_star_name,
-    // NOT the filed OFP) so it is robust to a runway-change STAR reassignment (assigned
-    // STAR != filed STAR) and testable via the REPL 'arrival' command. Its position +
-    // route index come from the route table -- the entry fix is on the route.
+    // No direct-to-IAF BEFORE the STAR has STARTED. A "direct IAF" is a shortcut OF the
+    // STAR, so it only makes sense once the aircraft has reached/passed the STAR entry
+    // fix. The old [-15;+7] NM window had a "-15 NM before entry" slot that, on a short
+    // hop whose STAR entry sits ~10 NM off the departure (LFLU->LFLP: ROMAM ~12 NM from
+    // LFLU), fired a direct during the INITIAL CLIMB before the STAR was even begun (user
+    // 2026-08-05). Now gate solely on the tracker having advanced PAST the STAR entry --
+    // NO tight upper distance bound: the first STAR leg can be long (ROMAM->LSE ~38 NM),
+    // so a +7 NM cap would miss it; the downstream worthwhile-saved-NM guard already bounds
+    // the late side (a direct offers nothing once near the IAF). Stays armed (offer not
+    // burned) until past the entry. Entry = FIRST waypoint of the ASSIGNED STAR (keyed on
+    // s_assigned_star_name, robust to a runway-change reassignment; it is on the route).
+    // [C. P. Potter]
     auto entry_wps =
         cifp_reader::star_waypoints(ctx.cifp_dir, dest, s_assigned_star_name, false);
     if (!entry_wps.empty()) {
@@ -9065,15 +9158,8 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
       int entry_idx = -1;
       for (int i = 0; i < static_cast<int>(s_route_fixes.size()); ++i)
         if (s_route_fixes[i].ident == entry_id) { entry_idx = i; break; }
-      if (entry_idx >= 0 && (s_route_fixes[entry_idx].lat != 0.0 ||
-                             s_route_fixes[entry_idx].lon != 0.0)) {
-        const double d_entry = traffic_geometry::distance_nm(
-            ctx.latitude, ctx.longitude, s_route_fixes[entry_idx].lat,
-            s_route_fixes[entry_idx].lon);
-        const bool past_entry = (s_route_fix_idx > entry_idx);
-        if (d_entry > (past_entry ? kAfterNm : kBeforeNm))
-          return false; // outside [-15; +7] NM of the STAR entry -> stay armed
-      }
+      if (entry_idx >= 0 && s_route_fix_idx <= entry_idx)
+        return false; // STAR not started yet -> stay armed, no direct-to-IAF
     }
   }
 

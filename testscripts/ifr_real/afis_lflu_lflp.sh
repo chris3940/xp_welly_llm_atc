@@ -43,6 +43,7 @@ reject() { if grep -qiE -e "$2" <<<"$OUT"; then echo "  FAIL  $1"; echo "       
 
 echo "=== AFIS ground flow (LFLU) ==="
 run 'set airport LFLU
+set com 120.105
 set dest LFLP
 set runway 01
 set alt 520
@@ -60,9 +61,32 @@ want   "#5 taxi stays IFR/CLEARED (no bad revert)"  "Valence Information, runway
 want   "ready-for-departure answered by Information" "Valence Information, runway 01,.*no reported traffic"
 want   "ready-for-departure -> IFR/DEPARTURE_CLEARED" "-> IFR/DEPARTURE_CLEARED"
 
+# Regression guard (real vol 2026-08-05, CATASTROPHIC): the IFR clearance + its read-back
+# happen on the overlying ACC's CONTROL freq (Lyon 125.155), NOT on the AFIS freq. AFIS
+# ("Valence Information") must stay SILENT there -- otherwise the catch-all answered
+# "Valence Information, say again" to the clearance read-back and the departure could never
+# proceed. On the Control freq the AFIS ground flow must not fire at all.
+echo "=== AFIS stays SILENT on the ACC/Control freq (not its own freq) ==="
+run 'set airport LFLU
+set com 125.155
+set dest LFLP
+set runway 01
+set alt 520
+set on_ground 1
+set gs 0
+set state IFR/CLEARED
+say cleared to Annecy omnidirectional departure runway zero one then direct ROMAM initial climb five thousand feet squawk four seven one five QNH one zero one six November Romeo Charlie
+quit'
+reject "AFIS silent on Control freq (no say-again on the clearance readback)" "Valence Information"
+
 echo "=== STAR shortcut route rebuild (needs a saved OFP) ==="
 if [[ -f "$OFP" ]]; then
   # XP_ATC_SHORTCUT_ALWAYS forces the 20% roll to 100% for the test.
+  # The direct-to-IAF is only offered AFTER the STAR has started (past the entry fix ROMAM)
+  # -- no direct during the initial climb before the STAR (user 2026-08-05). So position
+  # the aircraft ~8 NM PAST ROMAM toward LSE (45.236,5.148); a real continuous flight fires
+  # the shortcut here. (Teleporting all the way to LSE, ~38 NM past, is where "direct" stops
+  # being worthwhile -- the first ROMA3P leg ROMAM->LSE is long.)
   OUT="$(XP_ATC_SHORTCUT_ALWAYS=1 bash -c "printf '%s' 'load_ofp $OFP
 set state IFR/RADAR_CONTACT
 set alt 12000
@@ -70,9 +94,10 @@ set on_ground 0
 set gs 250
 set vs 1000
 goto ROMAM
-poll 5
+poll 3
 set state IFR/ARRIVAL
-goto LSE
+set lat 45.236
+set lon 5.148
 poll 5
 route
 quit' | '$REPL'" 2>&1)"
@@ -80,8 +105,9 @@ quit' | '$REPL'" 2>&1)"
   want   "#4 shortcut offers a direct to an IAF"     "direct (TOLNA|COLLO|PIRUV), when able|direct (TOLNA|COLLO|PIRUV)"
   # The direct-to IAF itself MUST be the current route target [*] (it was dropped
   # because approach_procedure_waypoints skips the IF path-term). Guards the TOLNA-
-  # missing bug (user 2026-08-04).
-  want   "#4 the direct-to IAF is the route target"  "route \(idx=0.*(TOLNA|COLLO|PIRUV)\[\*\]"
+  # missing bug (user 2026-08-04). Firing PAST the entry keeps ROMAM as a flown prefix,
+  # so the IAF now sits at idx>=1 -- assert it is the [*] target, not a fixed index.
+  want   "#4 the direct-to IAF is the route target"  "(TOLNA|COLLO|PIRUV)\[\*\]\(app\)"
 else
   echo "  SKIP  #4 shortcut (no OFP at $OFP)"
 fi

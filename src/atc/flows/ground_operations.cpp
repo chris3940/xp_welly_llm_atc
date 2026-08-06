@@ -990,6 +990,21 @@ bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
   }
   if (!ctx.on_ground)
     return false;
+  // AFIS handles ONLY its OWN frequency. The IFR clearance + its read-back happen on the
+  // overlying ACC's CONTROL/delivery freq (Lyon 125.155), where Information must stay
+  // SILENT -- that traffic belongs to the ACC. Without this gate, resolving the field
+  // from the OFP origin made "Valence Information, say again" fire on the LYON CONTROL
+  // freq during the clearance read-back, blocking the whole departure (CATASTROPHIC, real
+  // vol 2026-08-05: pilot on Control, not AFIS). [C. P. Potter]
+  {
+    const float acom = (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
+    const float d = acom - info_freq;
+    // Gate only when the active COM is a REAL tuned freq (>100) that differs from the AFIS
+    // freq -> the pilot is on the ACC/Control, not AFIS. When acom is unset (0, e.g. the
+    // headless harness) don't gate.
+    if (info_freq > 100.0f && acom > 100.0f && (d > 0.02f || d < -0.02f))
+      return false; // pilot is on a different freq (the ACC/Control) -> not AFIS's turn
+  }
   // Only the ground, pre-departure IFR states (the pilot already has the ACC
   // clearance). Airborne states + arrival are handled elsewhere.
   const std::string s = atc_state_machine::state_name(internal::get_state_ref());
@@ -1046,12 +1061,14 @@ bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
   default:
     break;
   }
-  // AFIS self-announce (backtrack / line-up / rolling / taking off): NOT a clearable
-  // intent -- Information only acknowledges with traffic info, never "garbled" nor a
-  // takeoff clearance. These classify as UNKNOWN, so match the raw transcript. Scoped
-  // to an AFIS field on the ground pre-departure (this whole function), so there is no
-  // towered-field risk. Real vol LFLU 2026-08-05: "backtrack ... align and take off"
-  // and "taking off runway 1" were answered "garbled, say again". [C. P. Potter]
+  // AFIS self-announce (backtrack / line-up / rolling / taking off): match the raw
+  // transcript FIRST -- BEFORE the UNKNOWN guard below -- because a self-announce is often
+  // MIS-classified as a real intent. "backtrack runway One-Nine" scored READBACK 0.90
+  // (real vol 2026-08-06); without catching it here the READBACK fell through to the
+  // frequency guard, which answered "unable" on the INFO freq. At an AFIS field Information
+  // only acknowledges with traffic info -- never "unable" nor "garbled". Scoped to an AFIS
+  // field on the ground pre-departure (this whole function), no towered-field risk.
+  // [C. P. Potter]
   {
     std::string lt = msg.raw_transcript;
     for (char &c : lt)
@@ -1068,6 +1085,14 @@ bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
         return true;
       }
   }
+  // Past the self-announce keywords, ONLY an unrecognised (UNKNOWN) transmission gets the
+  // benign "say again" below. A READBACK / INITIAL_CALL / etc. falls through to normal
+  // handling. The clearance read-back happens on the ACC (Lyon) freq, which the freq gate
+  // at the top already keeps this function OFF -- so this guard + that gate together stop
+  // the CATASTROPHIC "Valence Information, say again" on the clearance read-back (real vol
+  // 2026-08-05). [C. P. Potter]
+  if (msg.intent != PI::UNKNOWN)
+    return false;
   // At an AFIS (Information) field there is NO clearance to grant or deny, so Information
   // must NEVER answer "unable" (that comes from a downstream precondition rejection when
   // the transmission falls through). Anything not otherwise recognised -- heavily garbled
