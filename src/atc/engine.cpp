@@ -164,6 +164,10 @@ static int  s_pilot_requested_fl_ft   = 0;
 static bool s_cruise_stepup_issued = false;
 // Set when ATC issues the pre-TOD "advise when ready to descend" prompt.
 static bool s_enroute_descent_prompt_issued = false;
+// s_enroute_timer value at which to RE-ASK "advise when ready" after a decline or no
+// reply (-1 = none); s_descent_prompt_count caps the total ASK prompts. [C. P. Potter]
+static float s_descent_reprompt_at   = -1.0f;
+static int   s_descent_prompt_count  = 0;
 // Set when the Approach frequency handoff ("contact Approach on X.XXX") is issued.
 static bool s_enroute_approach_handoff_issued = false;
 // Controller label of the last ARRIVAL-phase frequency handoff (Stage A of the
@@ -533,6 +537,13 @@ static bool s_approach_has_visual_final = false; // MDA approach: offset final, 
 
 // IFR SID climb management (IFR_RADAR_CONTACT state).
 static bool s_sid_direct_issued = false;
+// One-shot for the SID direct-to ROLL (separate from _issued): step1 now fires
+// immediately on radar contact (<10 NM) while the direct is gated >=10 NM, so the roll
+// is DEFERRED to the 10 NM crossing (Phase 1b) -- rolled once there, fire or not.
+// Without this the roll was burned at step1 where far_enough was always false -> the
+// SID direct could structurally never fire (and it ignored SHORTCUTS ALWAYS; user
+// 2026-08-07, LFLP->LFMN ROMA2A). [C. P. Potter]
+static bool s_sid_direct_rolled = false;
 static bool s_sid_step1_issued = false;
 static bool s_sid_cruise_issued = false;
 static bool s_sid_radar_handoff_issued = false;
@@ -570,6 +581,17 @@ static bool s_sid_step2_issued = false;
 // makes each higher climb come from the higher controller AFTER its handoff, not
 // from the departure Approach directly (user 2026-07-24).
 static int  s_sid_pending_climb_ft = 0;
+// FIRST-radar-check-in ack merge (user 2026-08-06/07): the bare "radar contact"
+// template ack is DEFERRED so poll_sid_climb's imminent step1 prepends it -> ONE call
+// "radar contact, climb flight level N" instead of two ~5 s apart. Hits SID and
+// omnidirectional departures alike (single step1 code path). Later handoff check-ins
+// already merge via s_sid_pending_climb_ft above. The suppressed ack TEXT is kept so a
+// state-INDEPENDENT 6 s fallback (top of poll_profile_enforcement -- runs in every
+// airborne IFR phase, unlike poll_sid_climb) can replay it verbatim: a check-in is
+// NEVER left unanswered ([[feedback_sector_checkin_ack]]). [C. P. Potter]
+static bool        s_checkin_merge_pending = false;
+static float       s_checkin_merge_sec = 0.0f;
+static std::string s_checkin_merge_text;
 // Seconds the aircraft has dwelt AT the second step (FL140) since reaching it. The
 // cruise clearance / FIR handoff is withheld until this passes a short grace, so the
 // aircraft actually LEVELS at FL140 instead of being re-cleared on the way up
@@ -636,6 +658,8 @@ void reset() {
   s_enroute_direct_delay_sec = 0.0f;
   s_enroute_descent_issued = false;
   s_enroute_descent_prompt_issued = false;
+  s_descent_reprompt_at = -1.0f;
+  s_descent_prompt_count = 0;
   s_pilot_requested_descent = false;
   s_pilot_requested_fl_ft   = 0;
   s_enroute_approach_handoff_issued = false;
@@ -662,11 +686,15 @@ void reset() {
   s_navlog_alt_step_idx = 0;
   s_route_step_idx = 0;
   s_sid_direct_issued = false;
+  s_sid_direct_rolled = false;
   s_sid_step1_issued = false;
   s_sid_cruise_issued = false;
   s_sid_step2_issued = false;
   s_sid_step2_alt_ft = 0;
   s_sid_pending_climb_ft = 0;
+  s_checkin_merge_pending = false;
+  s_checkin_merge_sec = 0.0f;
+  s_checkin_merge_text.clear();
   s_sid_step2_dwell_sec = 0.0f;
   s_sid_radar_handoff_issued = false;
   s_sid_was_in_tma = false;
@@ -752,6 +780,8 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_enroute_cleared_alt_ft = cleared_alt_ft > 0 ? cleared_alt_ft : 0;
   s_enroute_descent_issued = false;
   s_enroute_descent_prompt_issued = false;
+  s_descent_reprompt_at = -1.0f;
+  s_descent_prompt_count = 0;
   s_pilot_requested_descent = false;
   s_pilot_requested_fl_ft   = 0;
   s_enroute_approach_handoff_issued = false;
@@ -1287,6 +1317,30 @@ static Output run_state_machine(const intent_parser::PilotMessage &msg,
   if (settings::debug_logging())
     logging::debug("ATC response text: %s",
                    atc_resp.text.empty() ? "(silent)" : atc_resp.text.c_str());
+  // FIRST radar check-in: DEFER the bare "radar contact" template ack so the imminent
+  // step1 climb merges it into ONE call ("radar contact, climb flight level 110" --
+  // was two calls ~5 s apart on SID and omni departures alike, user 2026-08-06/07).
+  // Only the BARE ack (a template already carrying a climb/descend stays untouched),
+  // only when step1 is still pending and the state is now RADAR_CONTACT (so
+  // poll_sid_climb runs next frame). The suppressed text is replayed verbatim by the
+  // 6 s state-independent fallback if no climb comes -- never a silent check-in.
+  // [C. P. Potter]
+  if ((msg.intent == intent_parser::PilotIntent::INITIAL_CALL_CENTER ||
+       msg.intent == intent_parser::PilotIntent::INITIAL_CALL_APPROACH) &&
+      atc_state_machine::get_state() ==
+          atc_state_machine::ATCState::IFR_RADAR_CONTACT &&
+      !s_sid_step1_issued && !s_checkin_merge_pending &&
+      atc_resp.text.find("radar contact") != std::string::npos &&
+      atc_resp.text.find("climb") == std::string::npos &&
+      atc_resp.text.find("descend") == std::string::npos) {
+    s_checkin_merge_pending = true;
+    s_checkin_merge_sec = 0.0f;
+    s_checkin_merge_text = atc_resp.text;
+    logging::info("First check-in ack deferred to merge with the step1 climb");
+    Output out_defer;
+    out_defer.parsed = msg;
+    return out_defer; // silent this turn; merged (or 6 s fallback) speaks shortly
+  }
   // A landed intent (rule parser or LM both produce non-UNKNOWN) means
   // the pilot was understood — even if the state machine subsequently
   // rejected the request via _INVALID/phase guard. Break the streak so
@@ -2189,6 +2243,35 @@ void process_transcript(Input in, Done done) {
     }
     done(Output{});
     return;
+  }
+
+  // IFR descent ASK declined: after ATC's "advise when ready to descend", the pilot says
+  // "not ready" / "standby" / "unable". Acknowledge and re-ASK in 2 min (poll_enroute's
+  // authoritative TOD clearance still fires regardless, so the descent is never late).
+  // Scoped to the pending-ASK window so a general "unable" elsewhere is untouched.
+  // [C. P. Potter]
+  if (s_enroute_descent_prompt_issued && !s_enroute_descent_issued &&
+      atc_state_machine::get_state() ==
+          atc_state_machine::ATCState::IFR_ENROUTE_CRUISE) {
+    std::string lt = in.transcript;
+    for (char &c : lt)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const bool declined = parsed.intent == PI::UNABLE ||
+                          lt.find("not ready") != std::string::npos ||
+                          lt.find("stand by") != std::string::npos ||
+                          lt.find("standby") != std::string::npos;
+    if (declined) {
+      s_descent_reprompt_at = s_enroute_timer + 120.0f;
+      if (s_descent_prompt_count < 1)
+        s_descent_prompt_count = 1;
+      const std::string &sc = atc_state_machine::session_callsign();
+      const std::string csd = sc.empty() ? settings::pilot_callsign() : sc;
+      Output out;
+      out.response_text = csd + ", roger, advise when ready.";
+      logging::info("IFR en-route: descent ASK declined -> re-ASK in 2 min");
+      done(std::move(out));
+      return;
+    }
   }
 
   // IFR en-route climb request: pilot asks for a higher FL.
@@ -4089,6 +4172,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
 
   if (atc_state_machine::get_state() != AS::IFR_RADAR_CONTACT) {
     s_sid_direct_issued = false;
+    s_sid_direct_rolled = false;
     s_sid_step1_issued = false;
     s_sid_cruise_issued = false;
     s_sid_step2_issued = false;
@@ -4756,15 +4840,26 @@ skip_tma_check:;
     // climber (TBM) reaches FL110 before 10 NM, so a distance-gated step1 was
     // skipped and the climb jumped straight to cruise, killing the hold + ladder
     // (user 2026-07-24). The direct-to shortcut still waits until >=10 NM.
-    const bool far_enough = dist_nm >= 10.0; // gates only the direct-to shortcut
+    // Minimum outbound distance before a SID direct-to may be OFFERED (step1 itself is
+    // never distance-gated). 15 NM per user 2026-08-07 (was 10). FUTURE: per-departure
+    // override in airport+.json ("direct_allowed_after": fix ident / NM / minutes).
+    constexpr double kSidDirectMinNm = 15.0;
+    const bool far_enough = dist_nm >= kSidDirectMinNm; // gates only the direct-to
     if (!s_sid_step1_issued) {
       // 20 % probability (only once >=10 NM out): fire the "direct <SID last fix>,
       // climb FL X" shortcut. 80 % of the time -- and always closer in -- issue a
       // plain "climb FL X" without the direct-to. Only gate if we actually have a
       // valid SID last fix to direct-to; otherwise always the plain climb.
       const bool have_last_fix = !ctx.ifr_sid_last_fix.empty();
+      // Honour SHORTCUTS ALWAYS (was a plain rand -- the UI switch silently did
+      // nothing here, user 2026-08-07). Roll only when the direct is offerable
+      // (>= kSidDirectMinNm); closer in, the roll stays ARMED for the deferred
+      // Phase 1b offer at that crossing.
       const bool fire_direct =
-          have_last_fix && far_enough && ((std::rand() % 5) == 0);
+          have_last_fix && far_enough &&
+          (settings::shortcut_always() || (std::rand() % 5) == 0);
+      if (have_last_fix && far_enough)
+        s_sid_direct_rolled = true; // roll consumed here (check-in was far out)
       s_sid_step1_issued = true;
       s_sid_direct_issued = fire_direct;
       if (fire_direct) {
@@ -4807,24 +4902,35 @@ skip_tma_check:;
         }
         logging::info("IFR SID climb: skipping step1 FL%d (already at %.0f ft)",
                       step1_fl, ctx.altitude_ft_msl);
+        // No climb to merge -> replay the deferred check-in ack immediately (verbatim),
+        // never leave the check-in unanswered.
+        if (s_checkin_merge_pending && out_text && !s_checkin_merge_text.empty()) {
+          *out_text = s_checkin_merge_text;
+          s_checkin_merge_pending = false;
+          return true;
+        }
         return false;
       }
       if (out_text) {
         const std::string &last_fix = ctx.ifr_sid_last_fix;
-        char buf[128];
+        char buf[160];
+        // Merged first-check-in ack: prepend "radar contact, " when the template ack
+        // was deferred -- ONE call "radar contact, climb flight level N".
+        const char *rc = s_checkin_merge_pending ? "radar contact, " : "";
         // Only speak "direct FIX" when the 20% probability gate above
         // (fire_direct) actually fired. Without this second check the
         // clearance always said "direct FIX, climb FL X" while only the
         // internal s_sid_direct_issued flag respected the gate.
         if (s_sid_direct_issued && !last_fix.empty()) {
           std::snprintf(buf, sizeof(buf),
-                        "%s, direct %s, climb flight level %d.",
-                        callsign.c_str(), last_fix.c_str(), step1_fl);
+                        "%s, %sdirect %s, climb flight level %d.",
+                        callsign.c_str(), rc, last_fix.c_str(), step1_fl);
         } else {
-          std::snprintf(buf, sizeof(buf), "%s, climb flight level %d.",
-                        callsign.c_str(), step1_fl);
+          std::snprintf(buf, sizeof(buf), "%s, %sclimb flight level %d.",
+                        callsign.c_str(), rc, step1_fl);
         }
         *out_text = buf;
+        s_checkin_merge_pending = false; // ack merged into this climb
       }
       s_enroute_cleared_alt_ft = s_sid_step1_alt_ft; // step1 is now the cleared level
       // Log matches what the pilot actually heard: only say "direct FIX"
@@ -4838,6 +4944,44 @@ skip_tma_check:;
                         ? " direct"
                         : "");
       return true;
+    }
+
+    // ── Phase 1b: DEFERRED direct-to offer at the kSidDirectMinNm crossing ──
+    // step1 fires immediately on radar contact (close in) where the direct is not
+    // offerable, so the roll happens HERE, once, when the aircraft passes
+    // kSidDirectMinNm (15 NM) outbound -- matching the pilot's expectation that
+    // the direct comes a bit later along the SID (user 2026-08-07). Honours
+    // SHORTCUTS ALWAYS.
+    // FUTURE (user 2026-08-07): make this gate configurable per departure in
+    // airport+.json ("direct_allowed_after": a fix ident / NM / minutes).
+    if (s_sid_step1_issued && !s_sid_direct_issued && !s_sid_direct_rolled &&
+        !ctx.ifr_sid_last_fix.empty() && far_enough) {
+      s_sid_direct_rolled = true; // one roll per departure, fire or not
+      if (settings::shortcut_always() || (std::rand() % 5) == 0) {
+        s_sid_direct_issued = true;
+        s_sid_direct_origin_lat = ctx.latitude;
+        s_sid_direct_origin_lon = ctx.longitude;
+        s_sid_direct_elapsed_sec = 0.0f;
+        const std::string &target = ctx.ifr_sid_last_fix;
+        // Advance the route tracker to the direct fix (same as the step1 direct).
+        for (int ri = s_route_fix_idx;
+             ri < static_cast<int>(s_route_fixes.size()); ++ri) {
+          if (s_route_fixes[ri].ident == target) {
+            s_route_fix_idx = ri;
+            s_pending_route_direct = "ATC direct: " + target;
+            logging::info("[route] ATC direct: %s (idx=%d, SID deferred)",
+                          target.c_str(), ri);
+            break;
+          }
+        }
+        s_sid_deviation_cooldown_sec = defaults.sid_deviation_cooldown_sec;
+        if (out_text)
+          *out_text = callsign + ", direct " + target + ", when able.";
+        logging::info("IFR SID climb: deferred direct %s (%.0f NM crossing%s)",
+                      target.c_str(), kSidDirectMinNm,
+                      settings::shortcut_always() ? ", forced" : "");
+        return true;
+      }
     }
   }
 
@@ -6897,6 +7041,22 @@ bool poll_profile_enforcement(const xplane_context::XPlaneContext &ctx, float dt
     *out_requires_readback = false;
   if (!airborne_ifr)
     return false;
+  // Deferred first-check-in ack fallback: if the step1 merge has not spoken within
+  // 6 s, replay the suppressed "radar contact" ack VERBATIM. Lives here (every
+  // airborne IFR phase) -- NOT in poll_sid_climb (RADAR_CONTACT-only, resets its
+  // statics elsewhere) -- so a state bounce can never silence a check-in
+  // ([[feedback_sector_checkin_ack]]). [C. P. Potter]
+  if (s_checkin_merge_pending) {
+    s_checkin_merge_sec += dt;
+    if (s_checkin_merge_sec >= 6.0f) {
+      s_checkin_merge_pending = false;
+      if (out_text && !s_checkin_merge_text.empty()) {
+        *out_text = s_checkin_merge_text;
+        logging::info("Deferred check-in ack: 6 s fallback -> replay bare ack");
+        return true;
+      }
+    }
+  }
 
   // Tower-handoff priority near the FAF: once the approach is cleared and the
   // aircraft is within ~2 NM of the FAF (Tower not yet contacted), stop issuing
@@ -6967,6 +7127,8 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     s_enroute_descent_issued = false;
     s_pilot_requested_descent = false;
     s_enroute_descent_prompt_issued = false;
+    s_descent_reprompt_at = -1.0f;
+    s_descent_prompt_count = 0;
     s_enroute_approach_handoff_issued = false;
     s_enroute_app_check_sec = 0.0f;
     s_enroute_deviation_cooldown_sec = 0.0f;
@@ -7390,7 +7552,9 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
             ctx, static_cast<int>(s_route_fixes.size()) - 1);
         worth_it = total > 1.0 && (routed_to_fix - direct_to_fix) >= 0.05 * total;
       }
-      if (worth_it && (std::rand() % 5) == 0) {
+      // Honour SHORTCUTS ALWAYS (was a plain rand -- the UI switch silently did
+      // nothing on the en-route direct, user 2026-08-07).
+      if (worth_it && (settings::shortcut_always() || (std::rand() % 5) == 0)) {
         // Jump the route tracker to the direct-to fix so routed_distance_to_fix_idx
         // (TOD / ETA / handoff gates) shortens to the direct leg + remaining legs.
         s_route_fix_idx = fix_idx;
@@ -7555,6 +7719,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     double dist_nm = 1e9;
     float alert_nm = 25.0f; // fallback when groundspeed unavailable
     float tod_alt_component = 0.0f; // hoisted for pre-TOD gate
+    float tod_spd_component = 0.0f; // hoisted: ASK->authoritative negotiation window
     {
       auto ofp = simbrief_ofp::get();
       if (ofp.valid && !ofp.navlog.empty()) {
@@ -7589,6 +7754,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
                               static_cast<float>(kDescentSlopeFtPerNm);
         tod_alt_component = alt_component;
         float spd_component = gs / 20.0f;
+        tod_spd_component = spd_component; // ASK->authoritative negotiation window
         alert_nm = std::max(15.0f, std::min(160.0f, alt_component + spd_component));
 
         if (se_valid && !se.star_name.empty()) {
@@ -7618,46 +7784,68 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
       }
     }
 
-    // Pre-TOD clearance: fire once, ~5 min before STAR entry.
-    // In IFR controlled airspace ATC gives the STAR + expected approach
-    // proactively before TOD — no "advise when ready" intermediate step.
-    // Suppressed while a sector-handoff readback is pending (pilot must
-    // acknowledge the frequency first) and when the cleared altitude is
-    // already within 3000 ft of the approach target (navlog steps covered
-    // the descent; forced clearance at 10 NM handles the final segment).
-    // tod_alt_component threshold: minimum 3 NM so the alert fires even when
-    // navlog step-downs already brought the aircraft to a low altitude
-    // (e.g. 4500 ft heading to an IAF at 2700 ft → only 6 NM of descent needed,
-    // which was previously below the 10 NM guard and suppressed the clearance).
-    if (!s_enroute_descent_prompt_issued &&
+    // ── Descent negotiation (ICAO Doc 4444 "advise when ready to descend") ──
+    // Palier 1 (ASK): at alert_nm (= the real TOD alt_component + a speed buffer,
+    //   ~2-3 min ahead) ATC ASKS "advise when ready to descend" -- it does NOT clear
+    //   yet. The buffer between alert_nm and the real TOD is the negotiation window.
+    // "ready": the pilot's REQUEST_DESCENT is handled earlier in this function
+    //   (s_pilot_requested_descent) -> clears immediately, any time.
+    // "not ready": arms a re-ASK +2 min (also handled intent-side with a "roger").
+    // Palier 2 (AUTHORITATIVE): at the real TOD (alt_component + 30% of the buffer) ATC
+    //   clears the descent REGARDLESS of pilot readiness, so it is never late -- this is
+    //   what guarantees a high-cruise descent (was: a proactive clearance at alert_nm).
+    // Suppressed while a sector-handoff readback is pending. tod_alt_component >= 3 NM so
+    // the ASK is skipped when navlog steps already brought the aircraft low. [C.P.Potter]
+    if (!s_enroute_descent_prompt_issued && !s_enroute_descent_issued &&
         dist_nm <= static_cast<double>(alert_nm) &&
         tod_alt_component >= 3.0f &&
         !atc_state_machine::is_readback_pending()) {
       s_enroute_descent_prompt_issued = true;
-      logging::info("IFR en-route: pre-TOD descent (%.1f NM to STAR entry, alert=%.0f NM)",
+      s_descent_prompt_count = 1;
+      s_descent_reprompt_at = s_enroute_timer + 120.0f; // re-ASK in 2 min if no reply
+      logging::info("IFR en-route: pre-TOD ASK 'advise when ready' (%.1f NM, alert=%.0f)",
                     dist_nm, alert_nm);
+      if (out_text)
+        *out_text = callsign + ", advise when ready to descend.";
+      return true;
+    }
+
+    // Re-ASK: 2 min after the prompt (or a decline), capped at 3 total, while still
+    // before the authoritative TOD (pilot said nothing / "not ready").
+    if (s_descent_reprompt_at >= 0.0f && s_descent_prompt_count > 0 &&
+        s_descent_prompt_count < 3 && !s_enroute_descent_issued &&
+        s_enroute_timer >= s_descent_reprompt_at && tod_alt_component >= 3.0f &&
+        !atc_state_machine::is_readback_pending()) {
+      s_descent_prompt_count++;
+      s_descent_reprompt_at = s_enroute_timer + 120.0f;
+      logging::info("IFR en-route: re-ASK 'advise when ready' (#%d)", s_descent_prompt_count);
+      if (out_text)
+        *out_text = callsign + ", advise when ready to descend.";
+      return true;
+    }
+
+    // Palier 2 -- AUTHORITATIVE at the real TOD (alt_component + 30% of the speed buffer):
+    // clear the descent regardless of pilot readiness so it is never late.
+    const double tod_authoritative_nm =
+        static_cast<double>(tod_alt_component) +
+        0.3 * static_cast<double>(tod_spd_component);
+    if (!s_enroute_descent_issued && tod_alt_component >= 3.0f &&
+        dist_nm <= tod_authoritative_nm) {
+      s_descent_reprompt_at = -1.0f;
+      logging::info("IFR en-route: authoritative descent at TOD (%.1f NM, prompts=%d)",
+                    dist_nm, s_descent_prompt_count);
       if (build_descent_clearance(ctx, callsign, defaults, out_text)) {
         rb(true);
         return true;
       }
-      // build_descent_clearance returned false (no CIFP/OFP data yet) —
-      // fall back to the advisory prompt so the pilot knows descent is coming.
-      if (out_text) {
-        char buf[120];
-        std::snprintf(buf, sizeof(buf), "%s, expect descent shortly.",
-                      callsign.c_str());
-        *out_text = buf;
-      }
-      return true;
     }
 
-    // Forced clearance when aircraft is very close to STAR entry (40% of alert
-    // distance, but at most 10 NM hard cutoff).  Fires regardless of whether the
-    // pre-TOD prompt was issued — navlog steps may have already stepped the aircraft
-    // down without ever setting s_enroute_descent_prompt_issued, so the prompt gate
-    // must not block the final approach clearance.
-    if (dist_nm <= static_cast<double>(std::min(alert_nm * 0.4f, 10.0f))) {
-      logging::info("IFR en-route: forced descent (%.1f NM, prompt_issued=%d)",
+    // Backstop when aircraft is very close to STAR entry (40% of alert distance, at most
+    // 10 NM). Covers navlog-stepped / no-TOD flights where the tiers above didn't fire.
+    if (!s_enroute_descent_issued &&
+        dist_nm <= static_cast<double>(std::min(alert_nm * 0.4f, 10.0f))) {
+      s_descent_reprompt_at = -1.0f;
+      logging::info("IFR en-route: backstop descent (%.1f NM, prompt_issued=%d)",
                     dist_nm, s_enroute_descent_prompt_issued ? 1 : 0);
       if (build_descent_clearance(ctx, callsign, defaults, out_text)) {
         rb(true);
@@ -8197,12 +8385,15 @@ static bool poll_descend_to_enter_tma(const xplane_context::XPlaneContext &ctx,
   const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
   const std::string clr =
       format_alt_clearance(target_ft, AltHint::Auto, ctx.qnh_hpa, ta);
-  // When the level is set by a fix's at-or-below constraint, use the ICAO Doc 4444 /
-  // EUROCONTROL crossing-restriction form "CROSS <fix> AT OR BELOW <level>" (the IAF's
-  // published restriction; on a direct-to-IAF it remains applicable while the bypassed
-  // STAR-fix restrictions are cancelled). Otherwise a plain "DESCEND <level>". [C.P.Potter]
+  // When the level is set by a fix's at-or-below constraint, combine the descent
+  // authorisation WITH the crossing restriction: "DESCEND TO CROSS <fix> AT OR BELOW
+  // <level>". A bare "cross <fix> at or below <level>" states the restriction but does
+  // not clearly authorise leaving the cruise level -- ICAO/EUROCONTROL: a level
+  // restriction is issued in conjunction with the level clearance (user 2026-08-06).
+  // Otherwise a plain "DESCEND <level>". [C. P. Potter]
   if (!cross_fix.empty())
-    *out_text = callsign + ", cross " + cross_fix + " at or below " + clr + ".";
+    *out_text =
+        callsign + ", descend to cross " + cross_fix + " at or below " + clr + ".";
   else
     *out_text = callsign + ", descend " + clr + ".";
   if (out_requires_readback)

@@ -980,6 +980,16 @@ static void submit_recording_to_stt() {
   // DataRef — anchors the short-form tail number the pilot uses in radio calls.
   if (!ctx_for_whisper.aircraft_tail_number.empty())
     airport_ctx += " " + ctx_for_whisper.aircraft_tail_number;
+  // Current controller the pilot ADDRESSES (e.g. "Lyon Control", "Chambery Approach").
+  // The en-route ACC/centre is NOT in the airport frequency DB, so without this the
+  // pilot's check-in call to it has no STT anchor and garbles ("Lyon Control" -> "View
+  // on control", real vol 2026-08-06). Added regardless of the airborne drift guard --
+  // it is the controller, not the (possibly drifting) nearest airport. [C. P. Potter]
+  {
+    const std::string &cur_ctrl = engine::current_controller_label();
+    if (!cur_ctrl.empty())
+      airport_ctx += " " + cur_ctrl;
+  }
   // Runway to anchor in the STT bias ("runway 22L", "R-NAV 22L", ... below).
   // Prefer the CIFP-assigned LANDING runway once an approach is cleared -- it
   // persists through landing + taxi-in, so "runway 22L" stays biased through
@@ -2136,7 +2146,7 @@ void update() {
           TranscriptKind::Tower,
           profile_text,
           freq_str,
-          engine::current_controller_label(),
+          current_tower_label(),
       });
       speak_response(profile_text, role_for_frequency(ctx_now), 1.0f);
       if (profile_rb)
@@ -2189,7 +2199,7 @@ void update() {
           TranscriptKind::Tower,
           starnet_text,
           freq_str,
-          engine::current_controller_label(),
+          current_tower_label(),
       });
       speak_response(starnet_text, role_for_frequency(ctx_now), 1.0f);
       if (starnet_rb)
@@ -2200,6 +2210,7 @@ void update() {
     // IFR descent phase: TMA/CTR boundary detection and Approach handoff.
     std::string descent_text;
     bool descent_rb = false;
+    std::string label_pre_descent = current_tower_label(); // before any handoff relabel
     if (engine::poll_descent(ctx_now, dt, &descent_text, &descent_rb) &&
         !descent_text.empty()) {
       float active_freq = (ctx_now.active_com == 1) ? ctx_now.com1_freq_mhz
@@ -2211,7 +2222,7 @@ void update() {
           TranscriptKind::Tower,
           descent_text,
           freq_str,
-          engine::current_controller_label(),
+          label_pre_descent,
       });
       auto role = role_for_frequency(ctx_now);
       speak_response(descent_text, role, 1.0f);
@@ -2224,6 +2235,7 @@ void update() {
     // Approach handoff (TMA/CTR boundary or 50 NM fallback).
     std::string arrival_text;
     bool arrival_rb = false;
+    std::string label_pre_arrival = current_tower_label(); // before any handoff relabel
     if (engine::poll_arrival(ctx_now, dt, &arrival_text, &arrival_rb) &&
         !arrival_text.empty()) {
       float active_freq = (ctx_now.active_com == 1) ? ctx_now.com1_freq_mhz
@@ -2235,7 +2247,7 @@ void update() {
           TranscriptKind::Tower,
           arrival_text,
           freq_str,
-          engine::current_controller_label(),
+          label_pre_arrival,
       });
       auto role = role_for_frequency(ctx_now);
       speak_response(arrival_text, role, 1.0f);
