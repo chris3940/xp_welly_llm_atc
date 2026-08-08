@@ -317,7 +317,9 @@ static float approach_gate_ceiling_ft(const xplane_context::XPlaneContext &ctx) 
 // standard-day flights are byte-identical; only non-standard QNH changes (and was
 // wrong before). *** Only for openair_db; airspace_db (atc.dat) is untouched.
 static int openair_alt(const xplane_context::XPlaneContext &ctx) {
-  const float ta = ctx.transition_alt_ft > 0.0f ? ctx.transition_alt_ft : 5000.0f;
+  const float ta = ctx.transition_alt_ft > 0
+                       ? static_cast<float>(ctx.transition_alt_ft)
+                       : 5000.0f;
   return static_cast<int>(ctx.altitude_ft_msl > ta ? ctx.pressure_alt_ft
                                                     : ctx.altitude_ft_msl);
 }

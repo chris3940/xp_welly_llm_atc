@@ -136,7 +136,7 @@ void read_num(const nlohmann::json &obj, const char *key, float &out) {
 
 } // namespace
 
-void init(std::string path) {
+void init(const std::string &path) {
   s_approaches.clear();
   s_runways.clear();
   s_dep_holds.clear();
@@ -164,7 +164,7 @@ void init(std::string path) {
 
   int n_appr = 0, n_rwy = 0;
   for (auto it = root.begin(); it != root.end(); ++it) {
-    const std::string key = it.key();
+    const std::string &key = it.key();
     if (key.empty() || key[0] == '_' || !it->is_object())
       continue; // skip _comment / _schema
     const std::string icao = upper(key);

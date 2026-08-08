@@ -2648,7 +2648,9 @@ static void draw_ifr_tab() {
       // FL-aware effective altitude: openair ceilings are flight levels written as
       // "MSL" feet, so above the transition altitude compare pressure altitude
       // (mirrors engine::openair_alt). No-op at QNH 1013.
-      const float ta = ctx.transition_alt_ft > 0.0f ? ctx.transition_alt_ft : 5000.0f;
+      const float ta = ctx.transition_alt_ft > 0
+                           ? static_cast<float>(ctx.transition_alt_ft)
+                           : 5000.0f;
       const int alt = static_cast<int>(ctx.altitude_ft_msl > ta
                                            ? ctx.pressure_alt_ft
                                            : ctx.altitude_ft_msl);

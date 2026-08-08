@@ -25,7 +25,7 @@ namespace airport_overrides {
 
 // Load and parse airport+.json. Empty path or missing file -> disabled (every
 // lookup returns empty). Runs on the caller thread (the file is tiny).
-void init(std::string path);
+void init(const std::string &path);
 void stop();
 bool ready();
 

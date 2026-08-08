@@ -541,6 +541,11 @@ static std::string select_active_runway(const std::vector<RunwayInfo> &runways,
            rwy.length_m > best->length_m))
         best = &rwy;
     }
+    // Unreachable (runways.empty() returned above, so the loop always assigns on
+    // its first pass), but the analyser cannot prove it through the container and
+    // the deref below would be fatal if the invariant ever changed.
+    if (!best)
+      return "";
     // Deterministic default: lower-numbered end; CIFP preferred-departure end wins.
     std::string cand = (best->end1.number < best->end2.number) ? best->end1.number
                                                                : best->end2.number;

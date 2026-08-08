@@ -157,6 +157,13 @@ static std::vector<Entry> load_file(const std::string &path) {
       cur.name = line + 3;
       if (cur.ac_class == AirspaceClass::OTHER) {
         const std::string &n = cur.name;
+        // The last branch assigns the same class as the "CTA" branch, but the two
+        // MUST stay separate and in this order: a delegation polygon whose name
+        // also carries a type word ("DELEGATED BY LIMM TO LJLA FIR/UIR") has to be
+        // classified by that word, so the FIR test has to run first. Merging the
+        // conditions to satisfy bugprone-branch-clone would silently reclassify
+        // such overlays as CTA. Suppressed rather than "fixed".
+        // NOLINTBEGIN(bugprone-branch-clone)
         if (n.find("CTR") != std::string::npos)
           cur.ac_class = AirspaceClass::CTR;
         else if (n.find("TMA") != std::string::npos)
@@ -165,14 +172,15 @@ static std::vector<Entry> load_file(const std::string &path) {
           cur.ac_class = AirspaceClass::CTA;
         else if (n.find("FIR") != std::string::npos)
           cur.ac_class = AirspaceClass::FIR;
+        // Cross-border delegation polygon (overlay): named by delegation marker,
+        // not by "CTA"/"FIR" type, and often "AC C" (ICAO class C). Index as an
+        // enroute CTA so find_enclosing returns it and resolve_sector_controller
+        // routes it to the delegated ACC.
         else if (n.find("DELEGATED") != std::string::npos ||
                  n.find("SKYGUIDE") != std::string::npos ||
                  n.find("MUAC") != std::string::npos)
-          // Cross-border delegation polygon (overlay): named by delegation
-          // marker, not by "CTA"/"FIR" type, and often "AC C" (ICAO class C).
-          // Index as an enroute CTA so find_enclosing returns it and
-          // resolve_sector_controller routes it to the delegated ACC.
           cur.ac_class = AirspaceClass::CTA;
+        // NOLINTEND(bugprone-branch-clone)
         active = is_indexed(cur.ac_class);
       }
       continue;
