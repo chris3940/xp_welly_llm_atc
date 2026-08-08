@@ -1312,6 +1312,38 @@ static bool try_traffic_dialog(const intent_parser::PilotMessage &msg,
   return true;
 }
 
+// Arms the first-check-in ack deferral: suppress a BARE "radar contact" so the
+// imminent SID step1 climb absorbs it into ONE call ("radar contact, climb flight
+// level 110") instead of two transmissions ~4 s apart. Returns true when armed, in
+// which case the caller MUST stay silent this turn -- the text is replayed by
+// poll_sid_climb (merged) or verbatim by the 6 s fallback in
+// poll_profile_enforcement, so a check-in is never left unanswered
+// ([[feedback_sector_checkin_ack]]).
+//
+// Shared by the TWO independent emitters of the bare ack -- the sector check-in
+// fast path (which returns before intent parsing) and the template path in
+// run_state_machine(). Arming only the template one left the real in-flight
+// emitter untouched and the merge never ran (LFLP->LFMN 2026-08-07). [C. P. Potter]
+static bool arm_checkin_ack_deferral(const std::string &ack_text) {
+  using AS = atc_state_machine::ATCState;
+  if (s_checkin_merge_pending || s_sid_step1_issued)
+    return false;
+  // Only when poll_sid_climb runs next frame -- it owns the merge.
+  if (atc_state_machine::get_state() != AS::IFR_RADAR_CONTACT)
+    return false;
+  // A bare ack only: an ack already carrying a level instruction must speak now.
+  if (ack_text.find("radar contact") == std::string::npos ||
+      ack_text.find("climb") != std::string::npos ||
+      ack_text.find("descend") != std::string::npos ||
+      ack_text.find("maintain") != std::string::npos)
+    return false;
+  s_checkin_merge_pending = true;
+  s_checkin_merge_sec = 0.0f;
+  s_checkin_merge_text = ack_text;
+  logging::info("First check-in ack deferred to merge with the step1 climb");
+  return true;
+}
+
 static Output run_state_machine(const intent_parser::PilotMessage &msg,
                                 const xplane_context::XPlaneContext &ctx_now,
                                 double now_secs) {
@@ -1319,26 +1351,11 @@ static Output run_state_machine(const intent_parser::PilotMessage &msg,
   if (settings::debug_logging())
     logging::debug("ATC response text: %s",
                    atc_resp.text.empty() ? "(silent)" : atc_resp.text.c_str());
-  // FIRST radar check-in: DEFER the bare "radar contact" template ack so the imminent
-  // step1 climb merges it into ONE call ("radar contact, climb flight level 110" --
-  // was two calls ~5 s apart on SID and omni departures alike, user 2026-08-06/07).
-  // Only the BARE ack (a template already carrying a climb/descend stays untouched),
-  // only when step1 is still pending and the state is now RADAR_CONTACT (so
-  // poll_sid_climb runs next frame). The suppressed text is replayed verbatim by the
-  // 6 s state-independent fallback if no climb comes -- never a silent check-in.
-  // [C. P. Potter]
+  // FIRST radar check-in on the TEMPLATE path: defer the bare "radar contact" so the
+  // imminent step1 climb merges it into ONE call. See arm_checkin_ack_deferral().
   if ((msg.intent == intent_parser::PilotIntent::INITIAL_CALL_CENTER ||
        msg.intent == intent_parser::PilotIntent::INITIAL_CALL_APPROACH) &&
-      atc_state_machine::get_state() ==
-          atc_state_machine::ATCState::IFR_RADAR_CONTACT &&
-      !s_sid_step1_issued && !s_checkin_merge_pending &&
-      atc_resp.text.find("radar contact") != std::string::npos &&
-      atc_resp.text.find("climb") == std::string::npos &&
-      atc_resp.text.find("descend") == std::string::npos) {
-    s_checkin_merge_pending = true;
-    s_checkin_merge_sec = 0.0f;
-    s_checkin_merge_text = atc_resp.text;
-    logging::info("First check-in ack deferred to merge with the step1 climb");
+      arm_checkin_ack_deferral(atc_resp.text)) {
     Output out_defer;
     out_defer.parsed = msg;
     return out_defer; // silent this turn; merged (or 6 s fallback) speaks shortly
@@ -2011,6 +2028,13 @@ void process_transcript(Input in, Done done) {
                       ack_buf, atc_state_machine::state_name(ck_state));
         Output out_ck;
         out_ck.response_text = ack_buf;
+        // Same ONE-call merge as the s_sid_pending_climb_ft branch above, for the
+        // FIRST check-in: there poll_sid_climb has never run (the state only became
+        // RADAR_CONTACT a few lines up), so nothing is queued and this ack would be
+        // spoken alone with step1 following ~4 s later as a second call. A re-state
+        // already carries a level instruction and must speak now. [C. P. Potter]
+        if (restate.empty() && arm_checkin_ack_deferral(out_ck.response_text))
+          out_ck.response_text.clear();
         done(std::move(out_ck));
         return;
       }
@@ -2026,6 +2050,32 @@ void process_transcript(Input in, Done done) {
   if (in.pre_classified_intent != intent_parser::PilotIntent::UNKNOWN) {
     parsed.intent     = in.pre_classified_intent;
     parsed.confidence = in.pre_classified_conf;
+  }
+
+  // Check-in intent + PENDING READBACK + clearance verbs = the pilot READING BACK, not
+  // checking in. "Descend via ABDIL 8R arrival ... expect RNAV Alpha approach 04L"
+  // rule-scored INITIAL_CALL_APPROACH 0.88 (facility word inside the EXPECT clause) and
+  // drew a spurious bare "radar contact" while the real readback stayed pending
+  // (LFLP->LFMN 2026-08-06; same family as the LOWI "direct ELMEM" LM case). Reroute to
+  // READBACK so the pending clearance clears properly. A genuine check-in with a stale
+  // readback ("Nice Approach, N111RC, flight level 110") carries none of these verbs and
+  // is untouched. Covers BOTH the rule and LM classification paths (runs after the LM
+  // override above). [C. P. Potter]
+  if ((parsed.intent == intent_parser::PilotIntent::INITIAL_CALL_APPROACH ||
+       parsed.intent == intent_parser::PilotIntent::INITIAL_CALL_CENTER) &&
+      atc_state_machine::is_readback_pending()) {
+    std::string lt_rb = in.transcript;
+    for (char &c : lt_rb)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (lt_rb.find("descend") != std::string::npos ||
+        lt_rb.find("climb") != std::string::npos ||
+        lt_rb.find("cleared") != std::string::npos ||
+        lt_rb.find("direct") != std::string::npos ||
+        lt_rb.find("expect") != std::string::npos ||
+        lt_rb.find("squawk") != std::string::npos) {
+      logging::info("Check-in intent with pending readback + clearance verbs -> READBACK");
+      parsed.intent = intent_parser::PilotIntent::READBACK;
+    }
   }
 
   // IFR "leaving frequency" guard (user 2026-07-28): an IFR flight NEVER self-leaves a
@@ -7798,10 +7848,17 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     //   what guarantees a high-cruise descent (was: a proactive clearance at alert_nm).
     // Suppressed while a sector-handoff readback is pending. tod_alt_component >= 3 NM so
     // the ASK is skipped when navlog steps already brought the aircraft low. [C.P.Potter]
+    // Readback gate is STALE-TOLERANT: hold the ASK only for a FRESH pending readback
+    // (<60 s, pilot about to answer). A LOST read-back ("STT: no transcript") otherwise
+    // starves the ASK for the silent 3x45 s timeout budget -- flight 8 (LFLP->LFMN
+    // 2026-08-06) reached the authoritative TOD with prompts=0 because the stuck FL290
+    // readback gated tier 1 the whole window. [C. P. Potter]
+    const bool rb_fresh =
+        atc_state_machine::is_readback_pending() &&
+        atc_state_machine::readback_pending_for_secs(ctx.now_secs) < 60.0;
     if (!s_enroute_descent_prompt_issued && !s_enroute_descent_issued &&
         dist_nm <= static_cast<double>(alert_nm) &&
-        tod_alt_component >= 3.0f &&
-        !atc_state_machine::is_readback_pending()) {
+        tod_alt_component >= 3.0f && !rb_fresh) {
       s_enroute_descent_prompt_issued = true;
       s_descent_prompt_count = 1;
       s_descent_reprompt_at = s_enroute_timer + 120.0f; // re-ASK in 2 min if no reply
@@ -7817,7 +7874,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     if (s_descent_reprompt_at >= 0.0f && s_descent_prompt_count > 0 &&
         s_descent_prompt_count < 3 && !s_enroute_descent_issued &&
         s_enroute_timer >= s_descent_reprompt_at && tod_alt_component >= 3.0f &&
-        !atc_state_machine::is_readback_pending()) {
+        !rb_fresh) {
       s_descent_prompt_count++;
       s_descent_reprompt_at = s_enroute_timer + 120.0f;
       logging::info("IFR en-route: re-ASK 'advise when ready' (#%d)", s_descent_prompt_count);
@@ -11395,17 +11452,42 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       // R22LZ has a DA + runway leg, but its curved final tripped the guess ->
       // bogus "report runway in sight"). Pilot-requested visual approaches are
       // a separate future feature.
-      // MDA/visual ONLY when the approach neither terminates at the runway NOR
-      // publishes a vertical angle. RNAV DA approaches (LFMD R35-Z = 3.5 deg,
-      // LFMN R04LA) end at a fix + missed-approach hold (no runway leg) yet carry
-      // a vertical angle -> they are DA/instrument -> "report established" (user
-      // 2026-07-22: RNAV 35 Z was wrongly read as MDA -> "report runway in sight").
+      // MDA/visual when the approach neither terminates at the runway NOR
+      // publishes a vertical angle (user 2026-07-22: LFMD RNAV 35 Z carries a
+      // 3.5 deg angle -> DA/instrument -> "report established", it was wrongly
+      // read as MDA). PLUS (user 2026-08-07, flight 8): an A/B/C VARIANT letter
+      // (ICAO Doc 8168 naming: Z/Y/X = duplicate straight-in procedures; A/B/C =
+      // circling / prescribed-track visual) is ALWAYS a visual final -- LFMN
+      // RNP A 04L ends at the MAP then a VISUAL (VPT) segment NOT in the CIFP,
+      // so its CIFP vertical angle (valid only down to the MAP) made the old
+      // rule call it DA/instrument -> spurious "report established". Doc 4444:
+      // visual/circling -> "REPORT FIELD (or RUNWAY) IN SIGHT". [C. P. Potter]
+      const std::string &adsg = s_assigned_approach_designator;
+      char variant = '\0';
+      if (!adsg.empty() && std::isalpha(static_cast<unsigned char>(adsg.back())) &&
+          adsg.size() >= 2) {
+        const char last = adsg.back();
+        const char prev = adsg[adsg.size() - 2];
+        // A trailing letter is the VARIANT when preceded by '-', a digit + another
+        // letter (runway L/C/R: "R04LA"), or a digit ("R35Z") -- but a lone L/C/R
+        // right after digits is the RUNWAY side, not a variant ("R04L").
+        const bool prev_is_rwy_letter = (prev == 'L' || prev == 'C' || prev == 'R') &&
+                                        adsg.size() >= 3 &&
+                                        std::isdigit(static_cast<unsigned char>(
+                                            adsg[adsg.size() - 3]));
+        if (prev == '-' || prev_is_rwy_letter ||
+            (std::isdigit(static_cast<unsigned char>(prev)) &&
+             !(last == 'L' || last == 'C' || last == 'R')))
+          variant = last;
+      }
+      const bool circling_variant = (variant == 'A' || variant == 'B' || variant == 'C');
       s_approach_has_visual_final =
-          !s_assigned_approach_designator.empty() &&
-          !cifp_reader::approach_terminates_at_runway(
-              ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator) &&
-          !cifp_reader::approach_has_vertical_guidance(
-              ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator);
+          circling_variant ||
+          (!adsg.empty() &&
+           !cifp_reader::approach_terminates_at_runway(
+               ctx.cifp_dir, s_assigned_dest_icao, adsg) &&
+           !cifp_reader::approach_has_vertical_guidance(
+               ctx.cifp_dir, s_assigned_dest_icao, adsg));
       logging::info("[approach] Tower: designator=%s rwy=%s visual-final(MDA)=%d",
                     s_assigned_approach_designator.c_str(),
                     s_assigned_landing_runway.c_str(),

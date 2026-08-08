@@ -107,6 +107,13 @@ ATCState get_state();
 const char *state_name(ATCState state);
 bool is_readback_pending();
 
+// Seconds the current readback has been pending (0.0 when none). Lets pollers
+// distinguish a FRESH readback (pilot about to answer -- hold proactive prompts)
+// from a STALE one (read-back lost, e.g. empty STT -- it must not starve other
+// logic while the silent 3x45 s timeout runs; flight LFLP->LFMN 2026-08-06 the
+// stuck FL290 readback suppressed the TOD "advise when ready" ASK entirely).
+double readback_pending_for_secs(double now_secs);
+
 // Arm the readback verifier for a proactive ATC clearance (e.g. sector
 // frequency handoff, STAR step-down, Tower handoff) that was issued by
 // a poll_* function rather than through the state machine template path.

@@ -703,6 +703,12 @@ ATCState get_state() { return g_state.state_; }
 
 bool is_readback_pending() { return g_state.readback_pending_; }
 
+double readback_pending_for_secs(double now_secs) {
+  if (!g_state.readback_pending_)
+    return 0.0;
+  return now_secs - g_state.readback_pending_since_secs_;
+}
+
 const std::string &last_clearance_text() {
   return g_state.last_clearance_text_;
 }

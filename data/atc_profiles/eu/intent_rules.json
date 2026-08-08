@@ -67,7 +67,9 @@
     { "_note": "Voxtral drops the past-tense 'd' from 'established' before an approach type (RNAV/ILS). Fix so 'establish rnav' and 'establish ils' still match the text_contains:'established' guard in INITIAL_CALL_TOWER.",
       "from": "establish rnav", "to": "established rnav" },
     { "_note": "Same 'd'-drop fix for ILS establishment report.",
-      "from": "establish ils", "to": "established ils" }
+      "from": "establish ils", "to": "established ils" },
+    { "_note": "Voxtral mishears 'direct' as 'director' in the direct-to readback ('Direct ROMAM, when able' -> 'Director Roman, when able', LFLP->LFMN 2026-08-07). 'Director' is not ATC vocabulary so the alias is safe; it also keeps the transcript log readable.",
+      "from": "director", "to": "direct" }
   ],
 
   "rules": [
@@ -186,6 +188,7 @@
     },
 
     {
+      "_note_direct_vector": "IFR direct-to and vector readbacks ('direct ROMAM, when able', 'confirm direct ELMEM', 'turn left 247') used to match NO rule -> UNKNOWN -> routed to the LM, which guessed a check-in or a frequency request; that mis-guess stranded a flight with no controller for 17 minutes (LFLP->LFMN 2026-08-07). 'direct' is guarded against service REQUESTS and against the report-airborne check-in ('passing 3000, direct ROMAM' carries a facility word and/or 'passing' -> stays INITIAL_CALL_CENTER). The turn guard keeps VFR pattern calls ('turning left downwind/base/final') out, since READBACK is evaluated before the position-report rules. [C. P. Potter]",
       "_note": "Readback covers wilco/roger, frequency-change ack, sign-off phrases, control-zone clearances, taxi/clearance instruction echoes, takeoff/landing readbacks, VFR cross-country approvals, and transmissions ending in a runway-number token. 'holding point'/'hold short' only match when paired with a readback-context word (qnh/via/information) to avoid shadowing REPORT_HOLDING_SHORT. Explicit 'request' phrases (request taxi, request startup, request clearance) are excluded so a runway-token suffix does not swallow a service request. 'when ready' catches the frequency-handoff readback pattern ('Ground on 121.735, when ready') even when Voxtral/Whisper drops the word 'contact'. The compound none guard exempts 'contact'-prefixed phrases so 'contact ground on 121.735 when ready for departure' still fires READBACK even if 'departure' is present.",
       "intent": "READBACK",
       "confidence": 0.90,
@@ -247,7 +250,18 @@
         { "ends_with": " right" },
         { "ends_with": " center" },
         { "ends_with_runway_token": true },
-        { "starts_with_vhf_freq": true }
+        { "starts_with_vhf_freq": true },
+        "when able",
+        "confirm direct",
+        { "any": ["direct"],
+          "none": ["request", "requesting", "would like", "passing",
+                   { "has_facility": "approach" }, { "has_facility": "departure" },
+                   { "has_facility": "tower" },    { "has_facility": "ground" },
+                   { "has_facility": "control" },  { "has_facility": "centre" },
+                   { "has_facility": "center" },   { "has_facility": "radar" },
+                   { "has_facility": "information" }] },
+        { "any": ["turn left", "turn right"],
+          "none": ["downwind", "base", "final", "crosswind", "upwind", "traffic"] }
       ]
     },
 
@@ -381,6 +395,7 @@
 
     {
       "_note": "Calls to Approach Control or Departure Control. 'Radar' is NOT in this list — in real ATC 'XYZ Radar' is an en-route ACC/Center providing radar service (Milan Radar = Milan ACC), not a destination Approach controller. Matching 'radar' here would fire a destination approach clearance whenever the pilot check-ins with any en-route Center whose callsign includes 'radar', which is a routine phraseology. 'radar' is handled by the INITIAL_CALL_CENTER rule below.",
+      "_note_readback_guard": "The descend-via/arrival READBACK carries the facility word inside its EXPECT clause ('descend via ABDIL 8R arrival ... expect RNAV Alpha approach runway 04L') and scored INITIAL_CALL_APPROACH 0.88 -> spurious bare 'radar contact' while the real readback stayed pending (LFLP->LFMN 2026-08-06). Clearance verbs below exclude those readbacks; the engine also reroutes a check-in intent with a pending readback + clearance verbs to READBACK.",
       "intent": "INITIAL_CALL_APPROACH",
       "confidence": 0.88,
       "any": [
@@ -393,7 +408,8 @@
         "on approach", "abandon approach", "cleared approach",
         "cleared for the approach",
         "after departure",
-        "cleared for departure"
+        "cleared for departure",
+        "descend via", "climb via", "cleared via", "expect"
       ]
     },
 

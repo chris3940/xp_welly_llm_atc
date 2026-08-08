@@ -478,7 +478,8 @@
     },
 
     "IFR/RADAR_CONTACT": {
-      "_comment": "Pilot checked in with Departure. ATC issues SID step climbs and direct-to shortcuts via poll_sid_climb().",
+      "_comment": "Pilot checked in with Departure. ATC issues SID step climbs and direct-to shortcuts via poll_sid_climb(); the SID-exit handoff to the enroute ACC also runs only in this state and advances to IFR/ENROUTE_CRUISE itself once the departure TMA is left.",
+      "_comment_selfloop": "LEAVING_FREQUENCY/REQUEST_FREQUENCY self-loop here -- same pattern as IFR/ENROUTE_CRUISE, IFR/DESCENT and IFR/ARRIVAL below. They used to jump to IFR/EN_ROUTE, which is the PRE-check-in holding state: no poll runs there (no SID handoff, no ACC sector change, no descent), so anything landing in it is stranded with zero ATC service for the rest of the flight. That is exactly what a misclassified call did on LFLP->LFMN 2026-08-07: 'direct ROMAM, when able' was garbled by STT to 'Director Roman...', scored UNKNOWN, the LM guessed REQUEST_FREQUENCY, and the aircraft lost every controller from FL110 to the end of the flight (no Lyon handoff, no descent). Only an explicit handoff may leave this state. [C. P. Potter]",
       "READBACK": {
         "response": "",
         "next_state": "IFR/RADAR_CONTACT",
@@ -486,12 +487,12 @@
       },
       "LEAVING_FREQUENCY": {
         "response": "",
-        "next_state": "IFR/EN_ROUTE",
+        "next_state": "IFR/RADAR_CONTACT",
         "requires_readback": false
       },
       "REQUEST_FREQUENCY": {
         "response": "",
-        "next_state": "IFR/EN_ROUTE",
+        "next_state": "IFR/RADAR_CONTACT",
         "requires_readback": false
       },
       "_INVALID": {

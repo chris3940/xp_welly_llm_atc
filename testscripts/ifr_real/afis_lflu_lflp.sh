@@ -112,6 +112,45 @@ else
   echo "  SKIP  #4 shortcut (no OFP at $OFP)"
 fi
 
+# Regression guard (real vol LFLP->LFMN 2026-08-07, CATASTROPHIC): the readback of a
+# direct-to offer matched NO rule -> UNKNOWN -> the LM was asked and guessed
+# REQUEST_FREQUENCY, which in IFR/RADAR_CONTACT used to jump to IFR/EN_ROUTE -- a
+# pre-check-in holding state where no poll runs. The aircraft lost every controller for
+# the rest of the flight (no Lyon handoff, no descent). Guarded on BOTH sides: the intent
+# must land on READBACK, and IFR/RADAR_CONTACT must not route into IFR/EN_ROUTE at all.
+echo "=== Direct-to / vector readbacks classify as READBACK (never UNKNOWN -> LM) ==="
+REPL_VFR="$REPO/build/atc_repl"
+intent() { printf 'say %s\n' "$1" | "$REPL_VFR" 2>&1 | grep -oE 'INTENT: [A-Z_]+' | head -1; }
+if [[ -x "$REPL_VFR" ]]; then
+  for phrase in \
+    "Direct ROMAM, when able, November Romeo Charlie" \
+    "Director Roman, when able, November, Roman Charlie." \
+    "Confirm direct ELMEM, November Romeo Charlie" \
+    "Turn left 247, November Romeo Charlie"; do
+    got="$(intent "$phrase")"
+    if [[ "$got" == "INTENT: READBACK" ]]; then echo "  PASS  readback: \"$phrase\""
+    else echo "  FAIL  readback: \"$phrase\" -> ${got:-none} (expected READBACK)"; fails=$((fails+1)); fi
+  done
+  # Non-regression: a genuine check-in carrying "direct" must STAY a check-in.
+  got="$(intent "Lyon Control, November Romeo Charlie, direct ROMAM, flight level 110")"
+  if [[ "$got" == "INTENT: INITIAL_CALL_CENTER" ]]; then echo "  PASS  check-in with 'direct' stays INITIAL_CALL_CENTER"
+  else echo "  FAIL  check-in with 'direct' -> ${got:-none} (expected INITIAL_CALL_CENTER)"; fails=$((fails+1)); fi
+else
+  echo "  SKIP  intent guards (build/atc_repl not built)"
+fi
+
+echo "=== IFR/RADAR_CONTACT is never a one-way door into IFR/EN_ROUTE ==="
+if python3 - "$REPO/data/atc_profiles/eu/ifr/atc_templates.json" <<'PY'
+import json, sys
+st = json.load(open(sys.argv[1]))['towered'].get('IFR/RADAR_CONTACT', {})
+bad = [k for k, v in st.items()
+       if isinstance(v, dict) and v.get('next_state') == 'IFR/EN_ROUTE']
+print('  offending intents:', bad) if bad else None
+sys.exit(1 if bad else 0)
+PY
+then echo "  PASS  no IFR/RADAR_CONTACT entry routes to the dead-end IFR/EN_ROUTE"
+else echo "  FAIL  IFR/RADAR_CONTACT still routes to IFR/EN_ROUTE"; fails=$((fails+1)); fi
+
 echo
 if [[ $fails -eq 0 ]]; then echo "AFIS scenario: ALL PASS"; exit 0
 else echo "AFIS scenario: $fails FAILURE(S)"; exit 1; fi
