@@ -43,6 +43,17 @@ struct CifpBindingAlt {
   CifpAlt alt;          // highest minimum altitude (0 feet = no constraint)
   std::string waypoint; // waypoint identifier where this constraint occurs
   std::string sid;      // SID procedure designator where this occurs
+  // Same, but restricted to INTERMEDIATE fixes -- the SID's exit fix excluded.
+  // A minimum at the exit fix is the level to reach when LEAVING the SID (an
+  // enroute climb target); a minimum at an intermediate fix is a real early
+  // departure FLOOR the aircraft must be at before crossing it. Keeping only
+  // the global maximum above collapses the two: LFLP ESAP2A publishes +FL130
+  // at LP620 (4.9 NM, a terrain floor) then +FL150 at the exit fix ESAPI, so
+  // `alt` reports FL150@ESAPI, the exit-fix rule zeroes it, and the FL130
+  // floor is lost entirely -- the aircraft gets cleared FL110 and busts LP620.
+  // (user 2026-08-10) [C. P. Potter]
+  CifpAlt floor_alt;
+  std::string floor_waypoint;
 };
 
 // Returns the initial climb altitude from the first SID waypoint for

@@ -1484,6 +1484,8 @@ void update() {
     ctx.ifr_sid_min_alt_ft = bind.alt.feet;
     ctx.ifr_sid_min_is_fl = bind.alt.is_fl;
     ctx.ifr_sid_min_waypoint = bind.waypoint;
+    ctx.ifr_sid_floor_alt_ft = bind.floor_alt.feet;
+    ctx.ifr_sid_floor_waypoint = bind.floor_waypoint;
     ctx.ifr_sid_last_fix = cifp_reader::sid_last_fix(
         ctx.cifp_dir, ctx.nearest_airport_id, ctx.ifr_cifp_sid);
   } else {
@@ -1491,6 +1493,8 @@ void update() {
     ctx.ifr_sid_min_alt_ft = 0;
     ctx.ifr_sid_min_is_fl = false;
     ctx.ifr_sid_min_waypoint.clear();
+    ctx.ifr_sid_floor_alt_ft = 0;
+    ctx.ifr_sid_floor_waypoint.clear();
     ctx.ifr_sid_last_fix.clear();
   }
 

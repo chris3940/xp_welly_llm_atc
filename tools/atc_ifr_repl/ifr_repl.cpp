@@ -333,6 +333,31 @@ void cmd_set(std::string &callsign, const std::string &rest) {
       ctx.height_agl_ft = std::stof(value);
     } else if (field == "ifr_sid") {
       ctx.ifr_cifp_sid = value; // ATC-assigned CIFP SID (empty = omni departure)
+      // Mirror what xplane_context_runtime does when the runway/SID changes:
+      // resolve the SID's published minima from the REAL CIFP. Without this the
+      // climb-floor logic (sid_climb_floor_ft) had no data headless and every
+      // SID looked unconstrained. Needs cifp_dir + airport + runway set first.
+      // [C. P. Potter]
+      if (!ctx.cifp_dir.empty() && !ctx.nearest_airport_id.empty() &&
+          !ctx.active_runway.empty()) {
+        auto bind = cifp_reader::sid_binding_altitude(
+            ctx.cifp_dir, ctx.nearest_airport_id, ctx.active_runway, value);
+        ctx.ifr_sid_min_alt_ft = bind.alt.feet;
+        ctx.ifr_sid_min_is_fl = bind.alt.is_fl;
+        ctx.ifr_sid_min_waypoint = bind.waypoint;
+        ctx.ifr_sid_floor_alt_ft = bind.floor_alt.feet;
+        ctx.ifr_sid_floor_waypoint = bind.floor_waypoint;
+        if (ctx.ifr_sid_last_fix.empty())
+          ctx.ifr_sid_last_fix =
+              cifp_reader::sid_last_fix(ctx.cifp_dir, ctx.nearest_airport_id,
+                                        value);
+        std::fprintf(stderr,
+                     "  [cifp] %s: min %d ft @%s, floor %d ft @%s, exit %s\n",
+                     value.c_str(), ctx.ifr_sid_min_alt_ft,
+                     ctx.ifr_sid_min_waypoint.c_str(), ctx.ifr_sid_floor_alt_ft,
+                     ctx.ifr_sid_floor_waypoint.c_str(),
+                     ctx.ifr_sid_last_fix.c_str());
+      }
     } else if (field == "ifr_sid_last_fix") {
       ctx.ifr_sid_last_fix = value;
     } else {

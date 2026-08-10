@@ -146,6 +146,12 @@ struct XPlaneContext {
   bool ifr_sid_min_is_fl = false; // true when the minimum is expressed as FL
   std::string
       ifr_sid_min_waypoint;     // waypoint at which the binding minimum occurs
+  // Highest minimum sitting at an INTERMEDIATE fix (exit fix excluded) -- the
+  // real early-climb FLOOR, as opposed to ifr_sid_min_alt_ft which is the
+  // highest minimum anywhere and is usually the exit fix's enroute target.
+  // See CifpBindingAlt::floor_alt. (user 2026-08-10) [C. P. Potter]
+  int ifr_sid_floor_alt_ft = 0;
+  std::string ifr_sid_floor_waypoint;
   std::string ifr_sid_last_fix; // last waypoint on the assigned SID (for
                                 // direct-to shortcut)
   int ifr_cruise_alt_ft =

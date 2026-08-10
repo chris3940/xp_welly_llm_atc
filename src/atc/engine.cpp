@@ -4202,6 +4202,12 @@ static bool sid_min_at_exit_fix(const xplane_context::XPlaneContext &ctx) {
 // the FL110 -> FL140 -> cruise ladder into a single "climb FL220". Returns 0 in
 // that case so the intermediate steps survive. (user 2026-07-27) [C. P. Potter]
 static int sid_climb_floor_ft(const xplane_context::XPlaneContext &ctx) {
+  // Prefer the INTERMEDIATE-fix floor when the reader resolved one. Falling
+  // back on ifr_sid_min_alt_ft keeps every pre-2026-08-10 context (the REPL
+  // fixtures, atc_repl scenarios) working unchanged: they set only the legacy
+  // field, so the old exit-fix test still decides there. [C. P. Potter]
+  if (ctx.ifr_sid_floor_alt_ft > 0)
+    return ctx.ifr_sid_floor_alt_ft;
   return sid_min_at_exit_fix(ctx) ? 0 : ctx.ifr_sid_min_alt_ft;
 }
 
@@ -4213,8 +4219,8 @@ static int sid_climb_floor_ft(const xplane_context::XPlaneContext &ctx) {
 static bool sid_step1_hold_active(const xplane_context::XPlaneContext &ctx) {
   if (s_sid_hold_release_nm <= 0.0f)
     return false;
-  if (ctx.ifr_sid_min_alt_ft > s_sid_step1_alt_ft && !sid_min_at_exit_fix(ctx))
-    return false; // SID's own minimum demands a higher climb -> do not hold
+  if (sid_climb_floor_ft(ctx) > s_sid_step1_alt_ft)
+    return false; // SID's own floor demands a higher climb -> do not hold
   if (s_departure_apt_lat == 0.0 && s_departure_apt_lon == 0.0)
     return false; // departure fix not captured -> cannot measure -> do not hold
   const double d = traffic_geometry::distance_nm(
@@ -4383,12 +4389,19 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
 
     // Never clear below the SID's published minimum crossing altitude -- UNLESS
     // that minimum sits at the SID's EXIT fix (an enroute-climb altitude, not an
-    // early departure floor; see sid_min_at_exit_fix). Otherwise a SID whose only
+    // early departure floor; see sid_climb_floor_ft). Otherwise a SID whose only
     // binding is at a high exit fix (LIMF KUKE1Z: KUKEV FL200) would force step1
     // straight to FL200 out of the 2000 ft level-off instead of the progressive
     // FL110 -> FL140 -> cruise ladder. (user 2026-07-27) [C. P. Potter]
-    if (sid_min_ft > step1 && !sid_min_at_exit_fix(ctx))
-      step1 = sid_min_ft;
+    //
+    // Uses the INTERMEDIATE-fix floor, which is what makes this raise fire on a
+    // SID carrying BOTH kinds of constraint. LFLP ESAP2A publishes +FL130 at
+    // LP620 (4.9 NM out, terrain) and +FL150 at the exit fix ESAPI: the old
+    // "highest minimum anywhere" reduction reported FL150@ESAPI, the exit-fix
+    // test then zeroed it, and step1 stayed FL110 -- cleared below LP620's floor
+    // and busted 4.9 NM later. (user 2026-08-10) [C. P. Potter]
+    if (sid_climb_floor_ft(ctx) > step1)
+      step1 = sid_climb_floor_ft(ctx);
 
     if (step1 >= cruise_ft) {
       // Cruise at/below step1 -> no hold, climb straight to cruise, no second step.

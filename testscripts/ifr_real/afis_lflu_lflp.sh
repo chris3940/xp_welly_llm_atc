@@ -180,6 +180,38 @@ want   "step2 withheld while the hold runs"                       "FL140 held by
 want   "new controller acks the check-in bare (no FL140)"         "radar contact\."
 want   "FL140 issued only after the hold releases"                "IFR SID climb: FL140 \(step2\)"
 
+# Regression guard (user 2026-08-10): the SID climb FLOOR is the minimum at the
+# EARLIEST constrained fix, exit fix excluded -- not the highest minimum anywhere.
+#   - LFLP ESAP2A/ODIK2A publish +FL130 at LP620/LP610 (4.9 / 7.1 NM, terrain) then
+#     +FL150 at the exit fix. The reader used to keep only the global maximum, so it
+#     reported FL150 at the exit fix, the exit-fix rule zeroed it, and step1 stayed
+#     FL110 -- cleared below LP620's floor and busted 4.9 NM later.
+#   - LIMF KUKE1Z is the counter-case: a STAIRCASE (+2000, +5000, +6000, +FL100,
+#     +FL190, +FL200 at the exit) meant to be climbed progressively. Its floor must
+#     stay MF702 +2000 so step1 keeps the generic FL110 and the ladder survives.
+#     Taking the maximum would clear FL190 straight out of the 2000 ft level-off.
+echo "=== SID climb floor = earliest constrained fix, not the highest (CIFP) ==="
+sid_floor() {
+  printf 'set cifp_dir %s\nset airport %s\nset runway %s\nset ifr_sid %s\nquit\n' \
+    "${XP_CIFP_DIR:-$HOME/X-Plane 12/Custom Data/CIFP}" "$1" "$2" "$3" \
+    | "$REPL" 2>&1 | grep -m1 '  \[cifp\]'
+}
+floor_is() { # <label> <icao> <rwy> <sid> <regex>
+  local got; got="$(sid_floor "$2" "$3" "$4")"
+  if grep -qE -e "$5" <<<"$got"; then echo "  PASS  $1"
+  else echo "  FAIL  $1"; echo "        expected /$5/ in: ${got:-<no output>}"; fails=$((fails+1)); fi
+}
+floor_is "ESAP2A floor = LP620 FL130 (not FL150 at the exit fix)" \
+         LFLP 22 ESAP2A "floor 13000 ft @LP620"
+floor_is "ODIK2A floor = LP610 FL130 (not FL150 at the exit fix)" \
+         LFLP 22 ODIK2A "floor 13000 ft @LP610"
+floor_is "VENA2A floor unchanged = LP610 FL130" \
+         LFLP 22 VENA2A "floor 13000 ft @LP610"
+floor_is "ROMA2A (west, unconstrained) keeps no floor" \
+         LFLP 22 ROMA2A "floor 0 ft @"
+floor_is "LIMF KUKE1Z staircase floor stays MF702 2000 ft (NOT FL190 at MATOG)" \
+         LIMF 36 KUKE1Z "floor 2000 ft @MF702"
+
 echo "=== Direct-to / vector readbacks classify as READBACK (never UNKNOWN -> LM) ==="
 REPL_VFR="$REPO/build/atc_repl"
 intent() { printf 'say %s\n' "$1" | "$REPL_VFR" 2>&1 | grep -oE 'INTENT: [A-Z_]+' | head -1; }

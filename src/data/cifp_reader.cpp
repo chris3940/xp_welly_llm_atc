@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -682,6 +683,20 @@ CifpBindingAlt sid_binding_altitude(const std::string &cifp_dir,
   std::string rwy_match = "RW" + active_runway;
   CifpBindingAlt best;
 
+  // One pass collects two things: every minimum constraint, and each SID's
+  // EXIT fix (the waypoint of its highest-sequence leg -- CIFP field 1). The
+  // exit fix cannot be known while scanning, and it may itself carry no
+  // constraint (LFLP VENA2A ends at VENAT, unconstrained), so the floor is
+  // resolved in a second pass over what was collected. [C. P. Potter]
+  struct MinCand {
+    int seq = 0;
+    CifpAlt alt;
+    std::string waypoint;
+    std::string sid;
+  };
+  std::vector<MinCand> cands;
+  std::map<std::string, std::pair<int, std::string>> exit_by_sid;
+
   std::string line;
   while (std::getline(in, line)) {
     if (line.size() < 4 || line.compare(0, 4, "SID:") != 0)
@@ -693,6 +708,24 @@ CifpBindingAlt sid_binding_altitude(const std::string &cifp_dir,
       continue;
     if (!sid_name.empty() && trim(f[2]) != sid_name)
       continue;
+
+    const std::string sid_id = trim(f[2]);
+    const std::string wp = trim(f[4]);
+    int seq = 0;
+    try {
+      seq = std::stoi(trim(f[1]));
+    } catch (...) {
+      seq = 0;
+    }
+    // Track the exit fix over ALL leg types, not just DF/TF: the last leg of a
+    // SID is whatever the procedure ends on.
+    if (!wp.empty()) {
+      auto &slot = exit_by_sid[sid_id];
+      if (seq >= slot.first) {
+        slot.first = seq;
+        slot.second = wp;
+      }
+    }
 
     std::string pterm = trim(f[11]);
     if (pterm != "DF" && pterm != "TF")
@@ -710,18 +743,55 @@ CifpBindingAlt sid_binding_altitude(const std::string &cifp_dir,
     if (candidate.feet <= 0)
       continue;
 
+    cands.push_back({seq, candidate, wp, sid_id});
     if (candidate.feet > best.alt.feet) {
       best.alt = candidate;
-      best.waypoint = trim(f[4]);
-      best.sid = trim(f[2]);
+      best.waypoint = wp;
+      best.sid = sid_id;
     }
+  }
+
+  // The floor is the minimum at the EARLIEST constrained fix (lowest sequence
+  // number), exit fix excluded -- NOT the highest minimum on the procedure.
+  // The first clearance is issued at radar contact, so the only constraint it
+  // must respect is the next one the aircraft will cross; later, higher minima
+  // belong to the following steps of the climb ladder.
+  //
+  // "Highest" was tried first and the data rejects it: LIMF KUKE1Z is a
+  // STAIRCASE (MF702 +2000, MF418 +5000, SIRLO +6000, RUFHO +FL100, MATOG
+  // +FL190, KUKEV +FL200) meant to be climbed progressively. Taking its maximum
+  // yields FL190 at MATOG and clears the aircraft there straight out of the
+  // 2000 ft level-off -- exactly the regression the exit-fix rule exists to
+  // prevent. Distance does not discriminate either (MATOG sits 11.4 NM out,
+  // LFLP LP620 4.9 NM). Sequence order does: KUKE1Z's first constraint is
+  // MF702 at 2000 ft, below any plausible step1, so the ladder survives, while
+  // ESAP2A's first constraint is LP620 at FL130 and correctly raises step1.
+  //
+  // KNOWN GAP: a mid-procedure minimum higher than step2 is still not honoured
+  // (KUKE1Z crosses MATOG +FL190 while cleared FL110). Fixing that needs a
+  // continuous per-fix floor tracked against the route, not a single static
+  // step. (user 2026-08-10) [C. P. Potter]
+  const MinCand *first = nullptr;
+  for (const auto &c : cands) {
+    auto it = exit_by_sid.find(c.sid);
+    if (it != exit_by_sid.end() && it->second.second == c.waypoint)
+      continue; // exit fix -> enroute climb target, not a departure floor
+    if (first == nullptr || c.seq < first->seq)
+      first = &c;
+  }
+  if (first != nullptr) {
+    best.floor_alt = first->alt;
+    best.floor_waypoint = first->waypoint;
   }
 
   if (best.alt.feet > 0) {
     logging::debug(
-        "[cifp] %s rwy %s binding min -> %d ft (is_fl=%d) at %s (%s)",
+        "[cifp] %s rwy %s binding min -> %d ft (is_fl=%d) at %s (%s); "
+        "intermediate floor -> %d ft at %s",
         icao.c_str(), active_runway.c_str(), best.alt.feet,
-        best.alt.is_fl ? 1 : 0, best.waypoint.c_str(), best.sid.c_str());
+        best.alt.is_fl ? 1 : 0, best.waypoint.c_str(), best.sid.c_str(),
+        best.floor_alt.feet,
+        best.floor_waypoint.empty() ? "-" : best.floor_waypoint.c_str());
   }
   {
     std::lock_guard<std::mutex> lk(g_alt_cache_mutex);
