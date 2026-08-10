@@ -171,6 +171,11 @@ void run_polls(float dt) {
   // -> descent -> arrival -> approach.
   std::string out;
   bool rb = false;
+  // The plugin runs this every frame (main.cpp). Without it the REPL's phase stays
+  // PARKED forever, and every poll that opens with a PARKED/TAXI guard -- most
+  // importantly poll_sid_climb -- returned false before doing anything, so the whole
+  // SID climb ladder was structurally untestable headless. [C. P. Potter]
+  flight_phase::update(ctx, dt);
   if (engine::poll_departure_handoff(ctx, dt, &out)) { emit("dep", out); out.clear(); }
   if (engine::poll_sid_climb(ctx, dt, &out))         { emit("sid", out); out.clear(); }
   if (engine::poll_profile_enforcement(ctx, dt, &out, &rb)) { emit("profile", out); out.clear(); }
@@ -233,6 +238,14 @@ void cmd_set(std::string &callsign, const std::string &rest) {
       ctx.vertical_speed_fpm = std::stof(value);
     } else if (field == "cruise") {
       ctx.ifr_cruise_alt_ft = static_cast<int>(std::stof(value));
+    } else if (field == "airport_lat") {
+      // Departure/nearest field position. The plugin fills these from apt.dat; the
+      // REPL cannot, and without them sid_step1_hold_active() bails out on its
+      // "departure fix not captured" guard, so the whole distance-based departure
+      // hold (Annecy FL110 / 30 NM) was silently inert headless. [C. P. Potter]
+      ctx.airport_lat = std::stod(value);
+    } else if (field == "airport_lon") {
+      ctx.airport_lon = std::stod(value);
     } else if (field == "cifp_dir") {
       ctx.cifp_dir = value;
     } else if (field == "dest") {
@@ -616,6 +629,9 @@ void cmd_help() {
       "  wind_kt <kt>       Wind speed\n"
       "  visibility <m>     Visibility in metres\n"
       "  airport <ICAO>     Nearest airport\n"
+      "  airport_lat <deg>  Field position (needed by the departure-hold distance)\n"
+      "  airport_lon <deg>\n"
+      "  cruise <ft>        Filed cruise altitude (drives the SID climb ladder)\n"
       "  com <MHz>          COM1 frequency\n"
       "  freq_type <TYPE>   APPROACH|TOWER|GROUND|DEPARTURE|UNICOM|DELIVERY\n"
       "  runway <id>        Active runway (e.g. 04L)\n"

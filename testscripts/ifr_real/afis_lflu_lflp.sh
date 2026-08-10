@@ -118,6 +118,68 @@ fi
 # pre-check-in holding state where no poll runs. The aircraft lost every controller for
 # the rest of the flight (no Lyon handoff, no descent). Guarded on BOTH sides: the intent
 # must land on READBACK, and IFR/RADAR_CONTACT must not route into IFR/EN_ROUTE at all.
+# Regression guard (real vol LFLP->LFMN 2026-08-08): the SID sector handoff must follow
+# the airspace LATERALLY and must NOT be gated on the departure altitude hold.
+#   - Phase 2.8 used to probe ONLY the volume stacked ABOVE (step1+1500). While the FL110
+#     hold runs the aircraft is LEVEL and leaves its sector SIDEWAYS, so that probe saw
+#     GENEVA TMA S9/S10 -- airspace never entered at FL110 -- and resolved Geneva Approach
+#     at 13.5 NM. The 30 NM hold was the patch that hid it by delaying the handoff.
+#   - The hold is an ALTITUDE constraint carried by the AIRCRAFT: the handoff happens on
+#     the boundary, the NEW controller acks with a bare "radar contact", and FL140 comes
+#     only once past the release distance. All controllers honour the level.
+# Needs airport_lat/lon (departure-hold distance) + cruise (climb ladder) + a flight phase,
+# all of which the REPL only grew on 2026-08-08.
+echo "=== SID sector handoff is LATERAL, and the FL110 hold survives it (LFLP) ==="
+dep='set airport LFLP
+set dest LFMN
+set cruise 19000
+set ifr_sid_last_fix ROMAM
+set airport_lat 45.9309
+set airport_lon 6.1055
+set runway 22
+set lat 45.9114
+set lon 6.0709
+set alt 3548
+set pa 3392
+set agl 2000
+set on_ground 0
+set gs 200
+set vs 1500
+set heading 220
+set com 118.200
+set freq_type TOWER
+set state IFR/DEPARTURE_CLEARED
+say November Romeo Charlie passing 3000 feet
+poll 5
+set com 121.205
+set freq_type APPROACH
+set lat 45.7729
+set lon 5.9200
+set alt 11769
+set pa 11010
+set agl 9000
+say Chambery Approach, November Romeo Charlie, flight level 110
+poll 5
+set lat 45.5591
+set lon 5.6770
+set alt 11767
+set pa 11005
+poll 5
+set com 120.230
+say Lyon Approach, November Romeo Charlie, flight level 110
+poll 5
+set lat 45.5065
+set lon 5.6170
+poll 5
+quit'
+run "$dep"
+reject "no spurious handoff to Geneva (the vertical-probe bug)" "contact Geneva"
+want   "handoff resolves LATERALLY from the aircraft's own volume" "sector handoff -> Lyon Approach.*lateral"
+want   "handoff to Lyon fires despite the 30 NM hold"             "contact Lyon Approach on 120.230"
+want   "step2 withheld while the hold runs"                       "FL140 held by the hold"
+want   "new controller acks the check-in bare (no FL140)"         "radar contact\."
+want   "FL140 issued only after the hold releases"                "IFR SID climb: FL140 \(step2\)"
+
 echo "=== Direct-to / vector readbacks classify as READBACK (never UNKNOWN -> LM) ==="
 REPL_VFR="$REPO/build/atc_repl"
 intent() { printf 'say %s\n' "$1" | "$REPL_VFR" 2>&1 | grep -oE 'INTENT: [A-Z_]+' | head -1; }

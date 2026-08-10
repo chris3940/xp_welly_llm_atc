@@ -575,6 +575,10 @@ static int s_sid_step1_alt_ft = 0; // computed once on first entry
 // only when genuinely below the cruise FL (user 2026-07-22).
 static int  s_sid_step2_alt_ft = 0;
 static bool s_sid_step2_issued = false;
+// Phase 2.8 fired once. Its own flag: the guard used to reuse !s_sid_step2_issued,
+// which no longer works now that the handoff may fire WITHOUT queueing step2 (the
+// FL110 hold is still running -- see Phase 2.8). [C. P. Potter]
+static bool s_sid_upper_handoff_issued = false;
 // Handoff-driven climb ladder: the level (feet) the NEXT controller will clear on
 // the pilot's check-in after a SID handoff. > 0 while a handoff has fired but the
 // pilot has not yet checked in on the new frequency; the sector-checkin ack reads
@@ -692,6 +696,7 @@ void reset() {
   s_sid_step1_issued = false;
   s_sid_cruise_issued = false;
   s_sid_step2_issued = false;
+  s_sid_upper_handoff_issued = false;
   s_sid_step2_alt_ft = 0;
   s_sid_pending_climb_ft = 0;
   s_checkin_merge_pending = false;
@@ -4228,6 +4233,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     s_sid_step1_issued = false;
     s_sid_cruise_issued = false;
     s_sid_step2_issued = false;
+    s_sid_upper_handoff_issued = false;
     s_sid_step2_alt_ft = 0;
     s_sid_pending_climb_ft = 0;
     s_sid_step2_dwell_sec = 0.0f;
@@ -4411,29 +4417,43 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
                   s_sid_hold_release_nm, sid_min_ft, cruise_ft);
   }
 
-  // ── Phase 2.8: post-hold handoff to the controller ABOVE the departure TMA ──
-  // AIRSPACE.TXT-DRIVEN (user 2026-07-24): after the step-1 hold, at step1 (just
-  // below the TMA ceiling), hand off to the controller of the volume STACKED ABOVE
-  // the departure TMA. The volume and its NAME come from openair (airspace.txt) via
+  // ── Phase 2.8: handoff to the next sector's controller during the SID climb ──
+  // AIRSPACE.TXT-DRIVEN (user 2026-07-24): hand off to the controller of the next
+  // enclosing volume. The volume and its NAME come from openair (airspace.txt) via
   // find_enclosing; resolve_sector_controller maps that name to the atc.dat
-  // FREQUENCY (openair carries no frequencies). The upper controller then clears
-  // step2 (FL140) on the pilot's check-in (s_sid_pending_climb_ft), not the departure
-  // APP. Fires only when a controller DISTINCT from the pilot's current one resolves;
-  // otherwise the fallback Phase 2a clears FL140 in-block so the climb never stalls.
+  // FREQUENCY (openair carries no frequencies). Fires only when a controller
+  // DISTINCT from the pilot's current one resolves; otherwise the fallback Phase 2a
+  // clears FL140 in-block so the climb never stalls.
+  //
+  // The transfer is LATERAL FIRST (user 2026-08-08). This used to probe ONLY the
+  // volume STACKED ABOVE (step1 + 1500) -- a purely VERTICAL model: "the aircraft
+  // climbs out of the departure TMA into the CTA above it". But while the step-1
+  // hold runs the aircraft is LEVEL and leaves its sector SIDEWAYS, and the volume
+  // above is then a stack it never enters. Measured on LFLP->LFMN 2026-08-08: the
+  // "above" probe at 12500 ft saw GENEVA TMA S8/S9/S10 out to 21.4 NM (airspace the
+  // aircraft never flies through at FL110), so it resolved the WRONG controller --
+  // and the 30 NM hold below was the patch that hid it by delaying the handoff until
+  // the geometry happened to line up. At the aircraft's OWN level the sequence is
+  // clean: CHAMBERY TMA S3 (its current controller) until 21.4 NM, then LYON TMA S10.
+  // So probe the aircraft's own volume first and keep the "above" probe as the
+  // fallback, which preserves the behaviour at fields whose transfer really is
+  // vertical. [[coding_airspace_txt_authoritative]]
+  //
+  // NOT gated on sid_step1_hold_active: the hold is an ALTITUDE constraint, not a
+  // reason to keep the aircraft on a sector it has left. When the handoff happens
+  // mid-hold, step2 is deliberately NOT queued -- the new controller acks the
+  // check-in with a bare "radar contact" and Phase 2a issues FL140 once the hold
+  // releases, so the level restriction is honoured across the controller change.
   const int sid2_cruise_fl_ph28 =
       round_to_fl(ctx.ifr_cruise_alt_ft > 0 ? ctx.ifr_cruise_alt_ft
                                             : s_sid_step1_alt_ft + 4000);
   const bool step2_usable_ph28 =
       s_sid_step2_alt_ft > 0 && s_sid_step2_alt_ft < sid2_cruise_fl_ph28 * 100 &&
       s_sid_step2_alt_ft >= sid_climb_floor_ft(ctx);
-  if (!s_sid_radar_handoff_issued && s_sid_initialized && s_sid_step1_issued &&
-      !s_sid_step2_issued && step2_usable_ph28 && s_sid_pending_climb_ft == 0 &&
-      !sid_step1_hold_active(ctx) && openair_db::ready() &&
+  if (!s_sid_radar_handoff_issued && !s_sid_upper_handoff_issued &&
+      s_sid_initialized && s_sid_step1_issued && !s_sid_step2_issued &&
+      step2_usable_ph28 && s_sid_pending_climb_ft == 0 && openair_db::ready() &&
       static_cast<int>(ctx.altitude_ft_msl) >= s_sid_step1_alt_ft - 500) {
-    // Volume just ABOVE the departure TMA at the aircraft's current position (the
-    // "high" CTA). step1 is the highest FL below the TMA ceiling, so +1500 clears it.
-    const openair_db::AirspaceEntry above = openair_db::find_enclosing(
-        ctx.latitude, ctx.longitude, s_sid_step1_alt_ft + 1500);
     const float active_com_freq_mhz =
         (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
     // Never resolve the handoff to the freq we're already on: two same-named
@@ -4441,11 +4461,38 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     // disambiguated by avoiding the current COM (verified atc.dat, 2026-07-24).
     const std::uint32_t avoid_khz =
         static_cast<std::uint32_t>(std::lround(active_com_freq_mhz * 1000.0));
+    // LATERAL: the volume the aircraft is actually IN. This is the authority --
+    // whoever owns that volume owns the aircraft.
+    const openair_db::AirspaceEntry lateral =
+        openair_db::find_enclosing(ctx.latitude, ctx.longitude, openair_alt(ctx));
+    const openair_db::AirspaceEntry above = openair_db::find_enclosing(
+        ctx.latitude, ctx.longitude, s_sid_step1_alt_ft + 1500);
     std::string lbl;
     float mhz = 0.0f;
-    if (resolve_sector_controller(above, /*terminal=*/true, &lbl, &mhz,
+    const openair_db::AirspaceEntry *src = nullptr;
+    if (resolve_sector_controller(lateral, /*terminal=*/true, &lbl, &mhz,
                                   avoid_khz) &&
         mhz >= 100.0f) {
+      src = &lateral;
+    } else if (resolve_sector_controller(above, /*terminal=*/true, &lbl, &mhz,
+                                         avoid_khz) &&
+               mhz >= 100.0f) {
+      // Fallback ONLY when the aircraft's own volume resolves to NOTHING (openair
+      // gap): a genuinely vertical transfer, climbing out of the departure TMA.
+      // It must NEVER be reached merely because the lateral probe returned the
+      // CURRENT controller -- that means the aircraft is still in its own sector and
+      // no handoff is due. Falling back there re-creates the very bug this replaces:
+      // measured LFLP 2026-08-08, the "above" probe hands to Geneva Approach at
+      // 13.5 NM, airspace the aircraft never enters at FL110.
+      src = &above;
+    }
+    logging::debug("[DBG] sid-handoff probe: lateral='%s' above='%s' -> %s %.3f (%s), com=%.3f",
+                   lateral.name.c_str(), above.name.c_str(), lbl.c_str(), mhz,
+                   src == nullptr        ? "none"
+                   : (src == &lateral)   ? "lateral"
+                                         : "above",
+                   active_com_freq_mhz);
+    if (src) {
       const bool distinct = std::fabs(mhz - active_com_freq_mhz) >= 0.010f;
       if (distinct) {
         const std::string &cs_ir = atc_state_machine::session_callsign();
@@ -4460,12 +4507,23 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
         s_pending_controller_label = lbl;
         s_pending_handoff_freq_mhz = mhz;
         s_sector_checkin_pending = true;
-        s_sid_pending_climb_ft = s_sid_step2_alt_ft; // FL140, cleared on check-in
-        s_sid_step2_issued = true;                   // queued -> blocks Phase 2a
-        logging::info("IFR SID climb: post-hold handoff -> %s %.3f (openair '%s') "
-                      "at %.0f ft MSL; FL%d queued for pilot check-in",
-                      lbl.c_str(), mhz, above.name.c_str(), ctx.altitude_ft_msl,
-                      s_sid_step2_alt_ft / 100);
+        s_sid_upper_handoff_issued = true;
+        // The FL110 hold travels WITH the aircraft, not with the controller. While it
+        // runs, do NOT queue step2: the new controller acks the check-in with a bare
+        // "radar contact" and Phase 2a (also gated on sid_step1_hold_active) issues
+        // FL140 when the hold releases -- said by the NEW controller, since the label
+        // has moved. Queue it only when the hold is already over, which keeps the
+        // pre-2026-08-08 one-call "radar contact, climb FLxxx" behaviour there.
+        const bool holding = sid_step1_hold_active(ctx);
+        s_sid_pending_climb_ft = holding ? 0 : s_sid_step2_alt_ft;
+        s_sid_step2_issued = !holding; // queued -> blocks Phase 2a
+        logging::info("IFR SID climb: sector handoff -> %s %.3f (openair '%s', %s) "
+                      "at %.0f ft MSL; FL%d %s",
+                      lbl.c_str(), mhz, src->name.c_str(),
+                      (src == &lateral) ? "lateral" : "above",
+                      ctx.altitude_ft_msl, s_sid_step2_alt_ft / 100,
+                      holding ? "held by the hold (Phase 2a will clear it)"
+                              : "queued for pilot check-in");
         return true;
       }
     }
@@ -4819,10 +4877,12 @@ skip_tma_check:;
                             s_sid_step2_alt_ft >= sid_climb_floor_ft(ctx);
 
   // ── Phase 2a: second intermediate step (Annecy FL110 -> FL140) ────────
-  // FALLBACK only: Phase 2.8 normally hands the aircraft to the upper controller and
-  // queues FL140 for the check-in (setting s_sid_step2_issued). This fires FL140
-  // directly ONLY when Phase 2.8 found no upper controller to hand off to (data gap),
-  // so the climb never stalls. Never while a check-in climb is pending.
+  // Fires FL140 when Phase 2.8 did NOT queue it: either it found no controller to
+  // hand off to (data gap), or -- the normal case at a field with a departure hold --
+  // it handed off DURING the hold and deliberately left step2 unqueued. The
+  // !sid_step1_hold_active guard below is what actually enforces the hold, and it is
+  // controller-independent, so whoever has the aircraft at the release point issues
+  // FL140. Never while a check-in climb is pending.
   if (s_sid_step1_issued && step2_usable && !s_sid_step2_issued &&
       !s_sid_cruise_issued && s_sid_pending_climb_ft == 0) {
     // Reached OR passed the step (not a symmetric +/-500 window): a climb that

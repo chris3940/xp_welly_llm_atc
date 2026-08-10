@@ -72,7 +72,7 @@
       { "role": "approach", "name": "Chambery Approach", "freq_mhz": 121.205, "alt_freqs_mhz": [123.700] }
     ],
     "departure_holds": [
-      { "hold_alt_ft": 11000, "release_nm": 30, "_comment": "Annecy: hold FL110 for 30 NM. Verified airspace.txt along the ROMA2A (BELUS->GIRED) track: the Geneva TMA S10 sliver ends ~27.5 NM GC out, so 30 NM lands the handoff ~2.5 NM inside LYON CTA -> hands to Lyon 120.230, not the Geneva sliver. FL140 second step stays generic." }
+      { "match_fixes": ["ROMAM", "PIRUV", "BULOL", "BUSIL", "LSE", "LTP"], "hold_alt_ft": 11000, "release_nm": 30, "_comment": "Annecy WESTBOUND departures ONLY (ROMAM 219deg, LTP 226deg, LSE 255deg, PIRUV 258deg, BULOL 279deg, BUSIL 291deg): hold FL110 for 30 NM. Verified airspace.txt along the ROMA2A (BELUS->GIRED) track: the Geneva TMA S10 sliver ends ~27.5 NM GC out, so 30 NM lands the handoff ~2.5 NM inside LYON CTA -> hands to Lyon 120.230, not the Geneva sliver. FL140 second step stays generic. Scoped 2026-08-09: it used to be a catch-all and also applied to the EASTBOUND SIDs (ESAP2A/ODIK2A/VENA2A), where FL110 is a TERRAIN trap -- the Alps rise east of Annecy and those SIDs publish +FL130 then +FL150. PAS2A (PAS 343deg, Passeiry) is NORTHBOUND and deliberately left unmatched -- it needs its own review." }
     ]
   },
 
