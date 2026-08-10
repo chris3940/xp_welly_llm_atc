@@ -74,6 +74,7 @@ Representative test routes:
 | LFLP ↔ LFMN | the reference flight: mountain departure held at an intermediate level under the overlying TMA shelves on the SIDs that need it, Alpine sector handoffs, STAR arrival with a weather-gated approach choice |
 | LFMN → LOWI | cross-border, and a curved RNP final into a valley |
 | LIMF → LFLP | cross-border from Italy, high-altitude stepped descent |
+| LIMF → LOWI | cross-border **delegated** airspace: a slice of the Milan FIR controlled by Ljubljana, absent from the airspace export and supplied by the `airspace+.txt` overlay |
 | LFLU → LFLP | **departure from an AFIS field** ("Information", no Tower) |
 | LFLP → LFQA | **arrival at an AFIS field**, no published STAR |
 
