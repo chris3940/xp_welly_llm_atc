@@ -71,7 +71,7 @@ Representative test routes:
 
 | Route | What it exercises |
 |---|---|
-| LFLP ↔ LFMN | the reference flight: mountain departure held at an intermediate level under the overlying TMA shelves on the SIDs that need it, Alpine sector handoffs, STAR arrival with a weather-gated approach choice |
+| LFLP ↔ LFMN | the reference flight, and the one leaning hardest on `airport+.json` at both ends: mountain departure held at an intermediate level under the overlying TMA shelves on the SIDs that need it, Alpine sector handoffs, STAR arrival whose approach is chosen against the destination weather |
 | LFMN → LOWI | cross-border, and a curved RNP final into a valley |
 | LIMF → LFLP | cross-border from Italy, high-altitude stepped descent |
 | LFLU → LFLP | **departure from an AFIS field** ("Information", no Tower), and a sector missing from the airspace export, supplied by the `airspace+.txt` overlay |
