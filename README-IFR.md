@@ -107,6 +107,20 @@ those flights.
 
 ---
 
+## Credits
+
+The IFR feature set — state machine, procedure handling, airspace-driven sector
+handoffs, phraseology — was designed and built by **Christopher P. Potter**
+(GitHub [@chris3940](https://github.com/chris3940)), together with the Linux
+port, on top of **thWelly**'s xp_wellys_atc. It is developed against real
+instrument flights in X-Plane 12 rather than synthetic scenarios; the routes it
+has been flown on are listed under [Tested configuration](#tested-configuration).
+
+Licensed GPL-3.0-or-later, like the rest of the plugin. Per-file copyright lines
+in `src/` record who wrote what.
+
+---
+
 Platform-specific caveats (cosmetic issues, shared-library notes) live in
 [README-LINUX.md](README-LINUX.md); everything about the plugin itself is in the
 upstream [README.md](README.md).
