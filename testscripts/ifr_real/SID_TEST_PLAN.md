@@ -10,6 +10,27 @@ For each flight, drop `Log.txt` **and** `transcript.log` in `~/Téléchargements
 `transcript.log` carries the per-event coordinates/altitude/heading that `Log.txt`
 does not — both are needed.
 
+## Le raccourci direct-to doit être forcé dans les deux sens
+
+Le direct-to SID a **deux points de déclenchement** et, sans forçage, un tirage à
+20 % — donc un vol pris au hasard ne dit pas quel chemin a été exercé. Réglage
+`shortcut_always` (Settings, « SHORTCUTS ALWAYS ») :
+
+| Réglage | Chemin exercé |
+|---|---|
+| **OFF** | Phase 1 / 1b ne tirent pas (4 fois sur 5) → montée SID nominale, aucun direct |
+| **ON** | Le direct part à coup sûr : au check-in si déjà ≥15 NM (Phase 1), sinon au franchissement des 15 NM (Phase 1b, `engine.cpp:5082`) |
+
+**Chaque cas ci-dessous marqué « ×2 » se vole deux fois, une fois par position.**
+
+**Point de vigilance (défaut antérieur, `kSidDirectMinNm`, 2026-08-07) :** Phase 1b
+n'a **aucune garde vérifiant que le fixe de sortie est encore devant l'avion**. Sur
+les SID est de LFLP, ESAPI est à 8,1 NM et ODIKI à 10,0 NM du terrain alors que
+l'offre se déclenche à 15 NM. Le tracker de route ne reculera pas (il cherche vers
+l'avant), mais le **texte parlé** peut annoncer un direct vers un point déjà passé.
+À surveiller explicitement au cas 2b. Ne pas l'imputer aux commits `1e8710b` /
+`9f70a0f`.
+
 ## Log anchors to grep
 
 ```
@@ -18,13 +39,19 @@ IFR SID climb: probe10nm tma_ceil=… cta_ceil=… (…) dep=… -> step1 FL… 
 [DBG] sid-handoff probe: lateral='…' above='…' -> <ctrl> <freq> (lateral|above|none)
 IFR SID climb: sector handoff -> <ctrl> <freq> (openair '…', lateral|above) … FL… <held|queued>
 IFR SID climb: FL140 (step2)
+[route] ATC direct: <FIX> (idx=…, SID)            ← raccourci au check-in (Phase 1)
+[route] ATC direct: <FIX> (idx=…, SID deferred)   ← raccourci différé (Phase 1b, 15 NM)
+IFR SID climb: deferred direct <FIX> (… NM crossing…)
 ```
 
 ---
 
-## 1. LFLP → LFMN, SID **ROMA2A** (ouest) — vol de référence
+## 1. LFLP → LFMN, SID **ROMA2A** (ouest) — vol de référence ×2
 
 The regression flight. Everything below is what beta-55 got wrong.
+
+ROMAM est à 63,6 NM du terrain, donc largement devant l'avion au franchissement des
+15 NM : c'est le cas **sain** du raccourci, celui qui sert de référence au cas 2b.
 
 | # | Attendu | Piège guardé |
 |---|---|---|
@@ -35,6 +62,8 @@ The regression flight. Everything below is what beta-55 got wrong.
 | 1.5 | Le nouveau contrôleur accuse le check-in **sec** : « radar contact » | FL140 annoncé trop tôt, pendant la retenue |
 | 1.6 | **FL140 seulement après 30 NM**, dit par **Lyon** | FL140 par Chambéry / avant la libération |
 | 1.7 | Puis palier FL140, handoff Marseille, montée croisière | échelle bloquée à FL140 |
+| 1.8 | **SHORTCUTS OFF** : aucun `[route] ATC direct:` dans le log | le raccourci part quand même |
+| 1.9 | **SHORTCUTS ON** : « direct ROMAM, when able » **une seule fois**, et le handoff Lyon + la retenue FL110 se déroulent identiquement | le direct casse l'échelle ou la retenue |
 
 ## 2. LFLP → est, SID **ESAP2A** ou **ODIK2A** — le nouveau plancher
 
@@ -47,6 +76,18 @@ Le cœur du correctif. Départ vers l'est, terrain élevé.
 | 2.3 | `hold 10 NM` (générique) — **pas** 30 NM | la retenue ouest s'applique encore à l'est |
 | 2.4 | Passage LP620/LP610 **à FL130 ou au-dessus** | à vérifier sur `transcript.log` (alt + coords) |
 | 2.5 | Puis step2 / croisière normalement | échelle cassée par le plancher relevé |
+
+### 2b. Le même, **SHORTCUTS ON** — le cas à risque
+
+ESAPI est à 8,1 NM (ODIKI 10,0 NM) alors que l'offre différée se déclenche à 15 NM,
+et Phase 1b ne vérifie pas que la cible est devant.
+
+| # | À observer |
+|---|---|
+| 2b.1 | Le direct part-il, et **à quelle distance** ? (`deferred direct … NM crossing`) |
+| 2b.2 | À cet instant, l'avion a-t-il **déjà passé ESAPI/ODIKI** ? (`transcript.log`, coords) |
+| 2b.3 | Si oui → défaut confirmé : garde « cible encore devant » à ajouter en Phase 1b |
+| 2b.4 | Le plancher FL130 tient-il malgré le direct ? (il doit : step1 est calculé à l'init, indépendamment du raccourci) |
 
 ## 3. LFLP → **VENA2A** — non-régression
 
