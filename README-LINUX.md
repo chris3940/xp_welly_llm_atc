@@ -5,6 +5,9 @@ Linux (Ubuntu 24.04 / Zorin OS 18.1) support for [xp_wellys_atc](README.md).
 > **Status**: working, tested on Zorin OS 18.1 + X-Plane 12.  
 > Branch: `feat/linux-port-pulseaudio` — PR #9 against upstream.
 
+> **Read [LIMITATIONS.md](LIMITATIONS.md) before flying IFR** — tested backend,
+> navdata requirements, and what the IFR flows do not do.
+
 ---
 
 ## Supported platforms
