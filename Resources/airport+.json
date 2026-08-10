@@ -30,7 +30,7 @@
     ],
     "approaches": [
       { "runway": "04L", "designator": "R04LA", "min_vis_m": 10000, "min_ceiling_ft": 2500 },
-      { "runway": "04L", "designator": "R04LZ" }
+      { "runway": "04L", "designator": "I04LZ", "_comment": "ILS 04L Zulu as the below-minima fallback, replacing RNP R04LZ (2026-08-10). This list is a FILTER, not a preference: preferred_approach returns the FIRST rule matching the runway, and an ungated rule always matches, so cifp_reader::best_approach is unreachable for 04L and any designator absent here can never be selected. With R04LZ ungated the ILS was therefore never offered at LFMN -- confirmed over the archived flight logs, which contain RNAV Alpha and Zulu and no ILS at all. I04LZ (not I04LY) because it shares the MUS->LEMPU transition family with R04LZ, so the STAR feeds it unchanged; I04LY routes via D222X/CF0LY. R04LZ is now unreachable in turn: that is the cost of first-match-wins and is TEMPORARY -- the intended end state is one entry carrying EQUIVALENT designators picked at random (CAT I minima are typically identical, so there is no objective tiebreak), which needs a schema + code change." }
     ],
     "sid_initial_climb": [
       { "match_sids": ["BASI8X"], "jet_alt_ft": 10000, "prop_alt_ft": 7000, "_comment": "BASIP 8X RNAV DEP (rwys 22L/R). Published initial climb clearance: JETS FL100 / PROP FL070. NOT in CIFP LFMN.dat (BASI8X fixes carry no FL100/FL070 constraint -- verified). Trans alt 5000." },

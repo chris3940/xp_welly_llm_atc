@@ -216,7 +216,11 @@ struct XPlaneContext {
   // a clock-time EFC in a holding clearance ("expect further clearance at HHMM").
   float zulu_time_sec = 0.0f;
   // Transponder state — read from sim/cockpit/radios/transponder_code and
-  // sim/cockpit2/radios/actuators/transponder_mode (0=OFF,1=STBY,2=ALT).
+  // sim/cockpit2/radios/actuators/transponder_mode
+  // (0=OFF, 1=STBY, 2=ON/Mode A, 3=ALT/Mode C, 4=TEST). The IFR holding-point
+  // check requires >= 3, i.e. Mode C -- this comment used to say "2=ALT", which
+  // is wrong and disagrees with the check in ground_operations.cpp:1638.
+  // (corrected 2026-08-10) [C. P. Potter]
   int transponder_code = 0;
   int transponder_mode = 0;
   // Path to the X-Plane CIFP directory, e.g. "/path/to/X-Plane 12/Custom

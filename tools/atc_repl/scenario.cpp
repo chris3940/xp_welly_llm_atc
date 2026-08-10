@@ -135,6 +135,15 @@ static void apply_field(xplane_context::XPlaneContext &ctx,
     ctx.longitude = std::stod(value);
   else if (field == "vertical_speed_fpm")
     ctx.vertical_speed_fpm = std::stof(value);
+  // Transponder state. The plugin reads these from DataRefs; without setters the
+  // harness left them at 0/0, so the IFR squawk check at the holding point could
+  // never be satisfied ("assigned=1724 actual=0000 mode=0") and every IFR
+  // departure scenario stalled in TAXI_CLEARED. mode: 0=OFF 1=STBY 2=ALT.
+  // [C. P. Potter]
+  else if (field == "transponder_code")
+    ctx.transponder_code = std::stoi(value);
+  else if (field == "transponder_mode")
+    ctx.transponder_mode = std::stoi(value);
   else
     throw std::runtime_error("unknown field: " + field);
 }
