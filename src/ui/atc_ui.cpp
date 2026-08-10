@@ -1896,6 +1896,8 @@ static void draw_settings_tab() {
   ImGui::Text("%s", ui_strings::tr("about.title_dev"));
 #endif
   ImGui::Text("%s", ui_strings::tr("about.tagline"));
+  // ASCII only -- the ImGui font renders UTF-8 specials as '?'. [C. P. Potter]
+  ImGui::TextDisabled("%s", ui_strings::tr("about.ifr_credit"));
   ImGui::TextDisabled("%s", ui_strings::tr("about.repo"));
 }
 

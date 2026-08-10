@@ -133,7 +133,7 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
   std::snprintf(name, 256, "Welly's ATC");
 #endif
   std::snprintf(sig, 256, "ch.thWelly.wellys_atc");
-  std::snprintf(desc, 256, "AI-powered ATC voice communication for VFR");
+  std::snprintf(desc, 256, "AI-powered ATC voice communication for VFR and IFR");
 
   logging::set_sink(&XPLMDebugString);
   // Build stamp so the running build is ALWAYS identifiable in Log.txt (the tester flies

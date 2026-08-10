@@ -1,4 +1,4 @@
-# xp_wellys_atc — IFR
+# xp_wellys_atc — IFR by C. Potter
 
 IFR ATC for X-Plane 12, added by this fork on top of upstream's VFR plugin.
 Instrument flights are handled end to end: clearance delivery, taxi, departure
@@ -26,6 +26,13 @@ upstream [README.md](README.md).
 | **Descent** | Top-of-descent negotiation, descent on the filed STAR with the published step-downs, occasional published hold. |
 | **Approach** | Approach selected against the destination weather, cleared at the initial approach fix, radar vectors to final where a reversal is needed, then Tower. |
 
+**Uncontrolled (AFIS) aerodromes are handled as such.** At a field whose radio
+service is "Information" rather than a Tower, there is no line-up or take-off
+clearance and no landing clearance to be had: the IFR clearance comes from the
+overlying area controller, and Information supplies traffic and field data only.
+Both ends of a flight are covered — departing from one, and arriving at one with
+no published STAR.
+
 Procedures come from the navigation data, not from a script: SIDs, STARs and
 approaches are read from the CIFP, and sector ownership from the OpenAir airspace
 export cross-referenced with `atc.dat` for frequencies.
@@ -44,14 +51,23 @@ work, but nobody has checked.
 
 | Item | Tested | Not tested |
 |---|---|---|
-| Inference backend | **Mistral Cloud** (Voxtral STT/TTS + `mistral-small`) | Local (whisper/llama/Piper) and OpenAI Cloud — both compile and are wired, but no IFR flight has been flown on them |
+| Inference backend | **Mistral Cloud** — `voxtral-mini-transcribe-2507` (STT), `mistral-large-latest` (intent), `voxtral-mini-tts-2603` (TTS) | Local (whisper/llama/Piper) and OpenAI Cloud — both compile and are wired, but no IFR flight has been flown on them. Smaller Mistral models are selectable but untested for IFR. |
 | Navigation data | **Navigraph**, current cycle | X-Plane stock navdata; expect missing or stale procedures |
 | Region | France, Alps, northern Italy | everywhere else |
 | Platform | Linux | macOS / Windows builds are maintained but unflown for IFR |
 
-Representative test routes: LFLP↔LFMN, LFLU→LFLP, LIMF→LFLP, LFLP→LFQA, LOWI
-arrivals. The phraseology, the airspace assumptions and the tuning all reflect
-those flights.
+Representative test routes:
+
+| Route | What it exercises |
+|---|---|
+| LFLP ↔ LFMN | the reference flight: mountain departure, Alpine sector handoffs, STAR arrival with a weather-gated approach choice |
+| LFMN → LOWI | cross-border, and a curved RNP final into a valley |
+| LIMF → LFLP | cross-border from Italy, high-altitude stepped descent |
+| LFLU → LFLP | **departure from an AFIS field** ("Information", no Tower) |
+| LFLP → LFQA | **arrival at an AFIS field**, no published STAR |
+
+The phraseology, the airspace assumptions and the tuning all reflect those
+flights.
 
 ### Data dependencies
 
@@ -74,6 +90,11 @@ those flights.
 - **Runway in use is derived from wind and `apt.dat`**, not from the published
   AIP preferential-runway rules or a real ATIS. `airport+.json` can override the
   pairing per airport; most airports have no entry.
+- **Where an airport lists approaches in `airport+.json`, that list is a filter,
+  not a preference.** Any approach missing from it is never selected for that
+  runway, even if the navdata has it — at LFMN 04L the file lists the RNAV
+  variants only, so the ILS is never offered. Airports with no entry fall back to
+  picking from the navdata and are unaffected.
 - **Curved (RF) RNP finals work — LOWI is flight-tested — but only where the
   handoff point has been entered by hand.** The last runway-aligned fix is set
   per approach in `airport+.json` (`tower_handoff_fixes`); it is **not** computed.
@@ -112,9 +133,15 @@ those flights.
 The IFR feature set — state machine, procedure handling, airspace-driven sector
 handoffs, phraseology — was designed and built by **Christopher P. Potter**
 (GitHub [@chris3940](https://github.com/chris3940)), together with the Linux
-port, on top of **thWelly**'s xp_wellys_atc. It is developed against real
-instrument flights in X-Plane 12 rather than synthetic scenarios; the routes it
-has been flown on are listed under [Tested configuration](#tested-configuration).
+port, on top of **thWelly**'s xp_wellys_atc.
+
+It is developed and **validated over tens of hours of real instrument flights**
+in X-Plane 12, not against synthetic scenarios — the routes are listed under
+[Tested configuration](#tested-configuration). That flight testing is not a
+footnote to the work: essentially every behaviour documented above was specified,
+and most defects found, from captured `Log.txt` / `transcript.log` pairs of
+actual flights. Sector-handoff geometry, climb floors and approach triggers are
+things no headless test suite surfaces.
 
 Licensed GPL-3.0-or-later, like the rest of the plugin. Per-file copyright lines
 in `src/` record who wrote what.
