@@ -1,12 +1,43 @@
-# Known limitations — IFR
+# xp_wellys_atc — IFR
 
-Scope of this document: the **IFR** feature set added by this fork. It is
-deliberately blunt. Everything below is a known, accepted boundary of the current
-release — not a bug report. Read it before filing an issue.
+IFR ATC for X-Plane 12, added by this fork on top of upstream's VFR plugin.
+Instrument flights are handled end to end: clearance delivery, taxi, departure
+with a SID, sector handoffs along the route, descent on a STAR, an instrument
+approach, and the transfer to Tower.
+
+Platform notes are in [README-LINUX.md](README-LINUX.md) /
+[README-WINDOWS.md](README-WINDOWS.md); the plugin itself is documented in the
+upstream [README.md](README.md).
+
+> **Read the [Limitations](#limitations) section before your first IFR flight.**
+> The IFR flows have been flown in one configuration only, and several behaviours
+> depend on hand-maintained data.
 
 ---
 
-## Tested configuration
+## What it does
+
+| Phase | Behaviour |
+|---|---|
+| **Clearance** | IFR clearance with the SID, the initial climb level and a squawk. At an AFIS field the clearance comes from the overlying area controller. |
+| **Ground / Tower** | Taxi to the holding point, runway crossings where applicable, line-up and take-off. |
+| **Departure** | Progressive climb ladder shaped by the airspace above the field, with a departure hold where the local procedure calls for one, then handoff to the next sector. |
+| **En route** | Sector handoffs driven by the airspace boundaries actually crossed, each new controller acknowledging the pilot's check-in and preserving the previous clearance. |
+| **Descent** | Top-of-descent negotiation, descent on the filed STAR with the published step-downs, occasional published hold. |
+| **Approach** | Approach selected against the destination weather, cleared at the initial approach fix, radar vectors to final where a reversal is needed, then Tower. |
+
+Procedures come from the navigation data, not from a script: SIDs, STARs and
+approaches are read from the CIFP, and sector ownership from the OpenAir airspace
+export cross-referenced with `atc.dat` for frequencies.
+
+---
+
+## Limitations
+
+Everything below is a known, accepted boundary of the current release — not a bug
+report. Read it before filing an issue.
+
+### Tested configuration
 
 The IFR flows have only ever been flown in one configuration. Anything else may
 work, but nobody has checked.
@@ -22,7 +53,7 @@ Representative test routes: LFLP↔LFMN, LFLU→LFLP, LIMF→LFLP, LFLP→LFQA, 
 arrivals. The phraseology, the airspace assumptions and the tuning all reflect
 those flights.
 
-## Data dependencies
+### Data dependencies
 
 - **A Navigraph subscription is effectively required.** SIDs, STARs and approaches
   come from the CIFP; sector boundaries come from the OpenAir airspace export.
@@ -36,7 +67,7 @@ those flights.
   `atc.dat`, departure holds, published initial-climb altitudes. Airports without
   an entry fall back to generic behaviour.
 
-## Procedures
+### Procedures
 
 - **SIDs and STARs are chosen by the plugin from the CIFP**, not read from your
   flight plan. The filed route's first and last fixes select them.
@@ -58,7 +89,7 @@ those flights.
 - **En-route and top-of-descent distances are great-circle**, not routed. Trigger
   points are therefore approximate on a route with significant dog-legs.
 
-## Phraseology and speech
+### Phraseology and speech
 
 - **ICAO / European phraseology only.** US IFR procedures and phraseology are not
   modelled.
@@ -68,7 +99,7 @@ those flights.
   recognition — a strict check on top of today's error rate would reject correct
   readbacks more often than wrong ones.
 
-## Out of scope
+### Out of scope
 
 - VFR flows are inherited from upstream and are not maintained here.
 - Traffic awareness beyond phase 1 (TCAS snapshot) is not implemented: no en-route
@@ -76,5 +107,6 @@ those flights.
 
 ---
 
-Older or platform-specific caveats live in [README-LINUX.md](README-LINUX.md)
-(cosmetic issues, shared-library notes) and in the upstream [README.md](README.md).
+Platform-specific caveats (cosmetic issues, shared-library notes) live in
+[README-LINUX.md](README-LINUX.md); everything about the plugin itself is in the
+upstream [README.md](README.md).
