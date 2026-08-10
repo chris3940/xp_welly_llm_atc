@@ -52,6 +52,9 @@ work, but nobody has checked.
 | Item | Tested | Not tested |
 |---|---|---|
 | Inference backend | **Mistral Cloud** — `voxtral-mini-transcribe-2507` (STT), `mistral-large-latest` (intent), `voxtral-mini-tts-2603` (TTS) | Local (whisper/llama/Piper) and OpenAI Cloud — see below. Smaller Mistral models are selectable but untested for IFR. |
+| Navigation data | **Navigraph**, current cycle | X-Plane stock navdata; expect missing or stale procedures |
+| Region | France, Alps, northern Italy | everywhere else |
+| Platform | Linux | macOS / Windows builds are maintained but unflown for IFR |
 
 **Speech recognition is tuned for Voxtral specifically, and that tuning does not
 carry over.** IFR radio work is dense with callsigns, fix names, flight levels,
@@ -63,9 +66,6 @@ discard the parameter by design and fall back to a freeform prompt, which is a
 materially weaker mechanism. So Local and OpenAI mode are not merely unflown for
 IFR — they are missing the biasing the IFR phraseology was tuned around, and
 should be expected to mis-transcribe more.
-| Navigation data | **Navigraph**, current cycle | X-Plane stock navdata; expect missing or stale procedures |
-| Region | France, Alps, northern Italy | everywhere else |
-| Platform | Linux | macOS / Windows builds are maintained but unflown for IFR |
 
 Representative test routes:
 
@@ -103,9 +103,11 @@ flights.
   pairing per airport; most airports have no entry.
 - **Where an airport lists approaches in `airport+.json`, that list is a filter,
   not a preference.** Any approach missing from it is never selected for that
-  runway, even if the navdata has it — at LFMN 04L the file lists the RNAV
-  variants only, so the ILS is never offered. Airports with no entry fall back to
-  picking from the navdata and are unaffected.
+  runway, even if the navdata has it, and the first rule whose weather gates hold
+  wins outright. So each runway offers exactly one approach per weather band,
+  never a choice between equivalent ones — at LFMN 04L, RNAV Alpha above 10 km /
+  2500 ft and the ILS below, with the RNP Zulu unreachable. Airports with no
+  entry fall back to picking from the navdata and are unaffected.
 - **Curved (RF) RNP finals work — LOWI is flight-tested — but only where the
   handoff point has been entered by hand.** The last runway-aligned fix is set
   per approach in `airport+.json` (`tower_handoff_fixes`); it is **not** computed.
@@ -126,10 +128,14 @@ flights.
 - **ICAO / European phraseology only.** US IFR procedures and phraseology are not
   modelled.
 - **English only.**
-- **Readbacks are acknowledged, not verified.** An incorrect readback is not
-  challenged or corrected. This is deliberate and waits on better speech
-  recognition — a strict check on top of today's error rate would reject correct
-  readbacks more often than wrong ones.
+- **Readback verification covers the numeric items only** — runway, altitude,
+  flight level, frequency, speed and squawk. Get one wrong and ATC answers
+  "negative, <item>, readback". Anything outside that set (route, procedure
+  names, conditional instructions) is acknowledged without being checked.
+- **A wrong readback is accepted after two attempts.** Speech recognition
+  garbles numbers in ways no biasing recovers, so looping "negative, readback"
+  forever would be worse than letting it through. The clearance ATC believes it
+  issued therefore may not be the one you read back.
 
 ### Out of scope
 
