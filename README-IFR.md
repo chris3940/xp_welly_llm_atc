@@ -51,7 +51,18 @@ work, but nobody has checked.
 
 | Item | Tested | Not tested |
 |---|---|---|
-| Inference backend | **Mistral Cloud** — `voxtral-mini-transcribe-2507` (STT), `mistral-large-latest` (intent), `voxtral-mini-tts-2603` (TTS) | Local (whisper/llama/Piper) and OpenAI Cloud — both compile and are wired, but no IFR flight has been flown on them. Smaller Mistral models are selectable but untested for IFR. |
+| Inference backend | **Mistral Cloud** — `voxtral-mini-transcribe-2507` (STT), `mistral-large-latest` (intent), `voxtral-mini-tts-2603` (TTS) | Local (whisper/llama/Piper) and OpenAI Cloud — see below. Smaller Mistral models are selectable but untested for IFR. |
+
+**Speech recognition is tuned for Voxtral specifically, and that tuning does not
+carry over.** IFR radio work is dense with callsigns, fix names, flight levels,
+QNH and squawk codes, and getting it transcribed reliably relies on a
+`context_bias` list built per situation — the aerodrome and controller in use,
+the aircraft callsign, the procedure fixes ahead, numbers spelled digit by digit.
+Only the Voxtral backend consumes that list; `whisper_stt` and `openai_stt`
+discard the parameter by design and fall back to a freeform prompt, which is a
+materially weaker mechanism. So Local and OpenAI mode are not merely unflown for
+IFR — they are missing the biasing the IFR phraseology was tuned around, and
+should be expected to mis-transcribe more.
 | Navigation data | **Navigraph**, current cycle | X-Plane stock navdata; expect missing or stale procedures |
 | Region | France, Alps, northern Italy | everywhere else |
 | Platform | Linux | macOS / Windows builds are maintained but unflown for IFR |
