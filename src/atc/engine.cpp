@@ -8776,6 +8776,18 @@ static bool poll_descend_to_enter_tma(const xplane_context::XPlaneContext &ctx,
 // en-route direct shortcut does the same inline (~6837). Shared so every direct-to
 // (en-route / connector IAF / no-STAR IAF) follows the rule identically. (user
 // 2026-07-31) [C. P. Potter]
+// Hold the DirectMonitor off for kDirectSettleSecs after ANY ATC direct-to, so the
+// pilot has time to TURN onto the new leg before being asked to confirm his routing.
+// Split out of apply_direct_to() because not every direct goes through it: the STAR
+// direct-to-IAF shortcut rebuilds the route itself and used to skip the settle
+// entirely, so "direct DOR, when able" drew "confirm routing, you appear tracking
+// heading 37, expected 319 to DOR" SEVEN seconds later -- before any turn could have
+// happened (real vol LFLP -> EDLW 2026-08-14). [C. P. Potter]
+static void arm_direct_settle() {
+  s_enroute_course_cooldown  = kDirectSettleSecs;
+  s_approach_course_cooldown = kDirectSettleSecs;
+}
+
 static void apply_direct_to(const std::string &fix_ident) {
   for (int i = std::max(0, s_route_fix_idx);
        i < static_cast<int>(s_route_fixes.size()); ++i)
@@ -8783,11 +8795,7 @@ static void apply_direct_to(const std::string &fix_ident) {
       s_route_fix_idx = i;
       break;
     }
-  // Post-direct settle: hold the DirectMonitor off for kDirectSettleSecs so the pilot has
-  // time to TURN onto the new leg before ATC flags "confirm direct <fix>, you appear
-  // tracking ...". [C. P. Potter]
-  s_enroute_course_cooldown  = kDirectSettleSecs;
-  s_approach_course_cooldown = kDirectSettleSecs;
+  arm_direct_settle();
   atc_state_machine::cancel_readback();
 }
 
@@ -9834,6 +9842,11 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
   s_star_shortcut_iaf = pick.ident;
   s_pending_route_direct = "ATC direct: " + pick.ident;
   s_star_shortcut_pending = true;
+  // This path rebuilds the route itself instead of going through apply_direct_to(),
+  // so it must arm the post-direct settle explicitly -- without it the course
+  // monitor challenged the routing 7 s after the direct was issued (LFLP -> EDLW
+  // 2026-08-14). [C. P. Potter]
+  arm_direct_settle();
 
   const std::string &cs = atc_state_machine::session_callsign();
   const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
