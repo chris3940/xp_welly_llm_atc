@@ -1361,7 +1361,7 @@ void update() {
       const double wall_d = wall_now - s_accel_wall_ref;
       if (wall_d >= 10.0) { // sample over 10 wall seconds for a stable ratio
         const double ratio = (s_sim_clock_secs - s_accel_sim_ref) / wall_d;
-        const int band = static_cast<int>(ratio * 2.0 + 0.5); // 0.5x steps
+        const int band = static_cast<int>(std::lround(ratio * 2.0)); // 0.5x steps
         if (band != s_accel_band_logged) {
           s_accel_band_logged = band;
           logging::info("Sim time: running at %.1fx wall clock -- all ATC "
