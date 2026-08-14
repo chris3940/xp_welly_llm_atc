@@ -2,10 +2,11 @@
 
 This file tracks the IFR flight simulation feature set and the Linux port status
 for the `xp_wellys_atc` fork. VFR features are maintained upstream.
-Organized **per functionality** (a by-version changelog lives in the separate
-release-notes document).
+Organized **per functionality** — the by-version changelog is
+[CHANGELOG-IFR.md](CHANGELOG-IFR.md), and the user-facing description of what the
+IFR flows do plus their known limits is [README-IFR.md](README-IFR.md).
 
-Last synced with the code: **v4.4.0-beta** (2026-08-02, based on tag `v4.3.1`,
+Last synced with the code: **v4.4.0-beta** (2026-08-14, based on tag `v4.3.1`,
 2026-07-13). Overall IFR completion: **~75%**. The `4.4.0` label is provisional
 pending the upstream maintainer.
 
@@ -15,7 +16,7 @@ pending the upstream maintainer.
 
 | Version | Headline | Date |
 |---------|----------|------|
-| **v4.4.0** (beta) | Radar-vectored teardrop approach (large-turn reversal onto the IAF course, inbound intercept) + published STAR holds (Zulu EFC); **per-airport override system** (`airport+.json` + `airspace+` overlays): override ATC controllers & frequencies, facility labels (Tower / AFIS / Information), SID initial-climb altitude, runway config, weather-gated preferred approach, departure holds, per-approach Tower-handoff fix, and airspace delegation — e.g. fixes the Slovenia/Ljubljana en-route handoff and the LOWI Tower mislabel; STAR chaining + multi-IAF shortcut; multi-sector ACC handoff robustness (Vienna/Innsbruck approach hysteresis, dest-CTA handoff, handoff continuity); curved-RNP final (Tower handoff + cross-track axis at the last-turn fix); corrective enforcement across altitude / speed / course (compliance monitor `check_next_fix` [alt+speed] + lateral `check_course` [heading/route], block-alt floor, corrective speed, CIFP SID route table); STT bias + readback fixes | in progress |
+| **v4.4.0** (beta) | Radar-vectored teardrop approach (large-turn reversal onto the IAF course, inbound intercept) + published STAR holds (Zulu EFC); **per-airport override system** (`airport+.json` + `airspace+` overlays): override ATC controllers & frequencies, facility labels (Tower / AFIS / Information), SID initial-climb altitude, runway config, weather-gated preferred approach, departure holds, per-approach Tower-handoff fix, and airspace delegation — e.g. fixes the Slovenia/Ljubljana en-route handoff and the LOWI Tower mislabel; STAR chaining + multi-IAF shortcut; multi-sector ACC handoff robustness (Vienna/Innsbruck approach hysteresis, dest-CTA handoff, handoff continuity); curved-RNP final (Tower handoff + cross-track axis at the last-turn fix); corrective enforcement across altitude / speed / course (compliance monitor `check_next_fix` [alt+speed] + lateral `check_course` [heading/route], block-alt floor, corrective speed, CIFP SID route table); STT bias + readback fixes; **sim-time clock** (time acceleration no longer desynchronises every ATC timer — instruction/long-flight prerequisite); **non-RNAV approaches** (ILS/VOR/LOC/NDB finals were dropped entirely by the CIFP reader — no FAF, no Tower handoff); **ownership-aware SID climb** (never cleared into a neighbouring TMA) + sector awareness decoupled from the cleared level; destination-field approach frequency as last-resort handoff (fields served from elsewhere, e.g. Dortmund/Langen); `FORCE ILS IF AVAILABLE` setting; ICAO readback-correction phraseology | in progress |
 | **v4.3.1** | Complete IFR arrival flow (TOD → landing): arrival phase model, multi-sector ACC handoff, CIFP DA/MDA, AFIS destinations, STT/readback robustness | 2026-07-12 |
 | **v4.2.1** | Full implementation and test of NON-STAR / AFIS-ONLY airport arrivals (IFR LFLP → LFQA, RNAV RWY 07 validated end-to-end) | 2026-07-05 |
 | v4.2.0 | IFR engine improvements, airspace fixes, STT accuracy | 2026-06-27 |

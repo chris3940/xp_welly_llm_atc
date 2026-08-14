@@ -53,7 +53,8 @@ work, but nobody has checked.
 |---|---|---|
 | Inference backend | **Mistral Cloud** — `voxtral-mini-transcribe-2507` (STT), `mistral-large-latest` (intent), `voxtral-mini-tts-2603` (TTS) | Local (whisper/llama/Piper) and OpenAI Cloud — see below. Smaller Mistral models are selectable but untested for IFR. |
 | Navigation data | **Navigraph**, current cycle | X-Plane stock navdata; expect missing or stale procedures |
-| Region | France, Alps, northern Italy | everywhere else |
+| Region | France, Alps, northern Italy, and one leg through Switzerland / Luxembourg / Belgium / Germany | everywhere else |
+| Approach type | **RNAV / RNP** | ILS, VOR, LOC and NDB finals were unusable until 2026-08-14 (the navdata reader dropped their final segment) and are fixed but **unflown** |
 | Platform | Linux | macOS / Windows builds are maintained but unflown for IFR |
 
 **Speech recognition is tuned for Voxtral specifically, and that tuning does not
@@ -76,6 +77,7 @@ Representative test routes:
 | LIMF → LFLP | cross-border from Italy, high-altitude stepped descent |
 | LFLU → LFLP | **departure from an AFIS field** ("Information", no Tower), and a sector missing from the airspace export, supplied by the `airspace+.txt` overlay |
 | LFLP → LFQA | **arrival at an AFIS field**, no published STAR |
+| LFLP → EDLW | the long leg: four ACC sectors across four countries, a filed step-climb profile, and an **ILS** arrival at a field with no approach unit of its own |
 
 The phraseology, the airspace assumptions and the tuning all reflect those
 flights.
@@ -86,9 +88,15 @@ flights.
   come from the CIFP; sector boundaries come from the OpenAir airspace export.
   Without current data the plugin will pick wrong procedures or fall silent.
 - **Sector handoffs are only as good as the OpenAir coverage.** Where a country's
-  export omits a volume (upper airspace is the usual gap), no controller resolves
-  and the handoff does not happen. Gaps are patched by hand in
-  `Resources/airspace+.txt`; several already are.
+  export omits a volume, no controller resolves and the handoff does not happen.
+  Two shapes of gap show up: upper airspace missing for a country (patched by hand
+  in `Resources/airspace+.txt`; several already are), and **whole classes absent**
+  — the export carries classes A–D plus CTR and the special-use areas, and **no
+  class E at all**. Where a country builds its approach layer in class E, as
+  Germany does, that leaves a vertical hole above the low terminal volumes. The
+  plugin falls back to the destination field's own published approach frequency,
+  so the arrival still gets a controller, but no hand-written overlay will fix
+  this class of gap systematically.
 - **Some data is hand-maintained, per airport, in `Resources/airport+.json`** —
   runway pairings, weather-gated approach selection, controllers missing from
   `atc.dat`, departure holds, published initial-climb altitudes. Airports without
@@ -107,7 +115,10 @@ flights.
   wins outright. So each runway offers exactly one approach per weather band,
   never a choice between equivalent ones — at LFMN 04L, RNAV Alpha above 10 km /
   2500 ft and the ILS below, with the RNP Zulu unreachable. Airports with no
-  entry fall back to picking from the navdata and are unaffected.
+  entry fall back to picking from the navdata and are unaffected. The
+  **`FORCE ILS IF AVAILABLE`** setting is the escape hatch: it takes the ILS
+  whenever the arrival runway has one published, ignoring both the filter and the
+  RNAV-first ranking.
 - **Curved (RF) RNP finals work — LOWI is flight-tested — but only where the
   handoff point has been entered by hand.** The last runway-aligned fix is set
   per approach in `airport+.json` (`tower_handoff_fixes`); it is **not** computed.
