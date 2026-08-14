@@ -97,29 +97,31 @@ TEST_CASE_METHOD(Fixture, "openair: restricted areas are never indexed",
   CHECK(e.name.empty());
 }
 
-// ── The two gaps that caused the 2026-08-14 misfire ───────────────────
-// GAP: both squares below are real control airspace whose name carries no type
-// keyword, so today they are invisible. Pinned deliberately -- if the classifier
-// is ever changed to key on the ICAO class letter, THESE are the assertions that
-// must be inverted, and their inversion is the whole point of that change.
+// ── The two gaps that caused the 2026-08-14 misfire — now CLOSED ──────
+// Both squares are control airspace whose NAME carries no type keyword. Until
+// the classifier also read the ICAO class letter from the AC record they were
+// invisible, which is what opened the "can't tell -> don't block" guard and let
+// a terminal descent fire 186 NM from the destination. These two assertions were
+// written inverted (pinning the gap) and flipped by that change -- they are the
+// tripwire for it, so if either starts returning an empty name again the
+// classifier has regressed.
 
-TEST_CASE_METHOD(Fixture,
-                 "openair: GAP -- a Free Route block is not indexed today",
+TEST_CASE_METHOD(Fixture, "openair: a Free Route block IS indexed",
                  "[openair][gap]") {
-  // Real-world instance: `FREE RT ASPC E` covers Nancy at FL280 (Reims UIR), and
-  // find_enclosing returns nothing there -- logged as "openair empty" on the
-  // LFLP -> EDLW flight.
+  // Real-world instance: `FREE RT ASPC E` covers Nancy at FL280 (Reims UIR).
+  // It used to log "openair empty" there on the LFLP -> EDLW flight.
   const auto e = openair_db::find_enclosing(kLat, lon_of(4), 30000);
-  CHECK(e.name.empty());
+  CHECK(e.name == "FREE RT ASPC ZZ");
+  CHECK(e.ac_class == AC::CTA); // enroute default for a bare class letter
 }
 
-TEST_CASE_METHOD(Fixture,
-                 "openair: GAP -- a bare class-letter volume is not indexed today",
+TEST_CASE_METHOD(Fixture, "openair: a bare class-letter volume IS indexed",
                  "[openair][gap]") {
-  // Real-world instance: `DORTMUND` (2000-4500) and `DORTMUND SECTOR B` carry no
-  // keyword, so only `DORTMUND CTR` survives at EDLW.
+  // Real-world instance: `DORTMUND` (2000-4500) and `DORTMUND SECTOR B`, which
+  // carry no keyword -- only `DORTMUND CTR` used to survive at EDLW.
   const auto e = openair_db::find_enclosing(kLat, lon_of(5), 3000);
-  CHECK(e.name.empty());
+  CHECK(e.name == "ECHO");
+  CHECK(e.ac_class == AC::CTA);
 }
 
 // ── Geometry queries built on the index ───────────────────────────────

@@ -104,6 +104,24 @@ static AirspaceClass parse_class(const char *s) {
     return AirspaceClass::FIR;
   if (std::strcmp(s, "UIR") == 0)
     return AirspaceClass::UIR;
+  // ICAO CLASS LETTER. Most European exports put the class in AC and the type in
+  // the name, and until now only the name was consulted -- so any controlled
+  // volume whose name carries no type word was invisible. Measured on the user's
+  // export: `FREE RT ASPC E` (Reims UIR over Nancy) and `DORTMUND` / `DORTMUND
+  // SECTOR B` at EDLW are all controlled airspace and none were indexed, which
+  // is what let a terminal-area descent fire 186 NM out on 2026-08-14.
+  //
+  // A-D are controlled; E/F/G are not indexed (E is advisory-to-uncontrolled
+  // depending on the state, and neither F nor G carries an ATC clearance
+  // obligation). Classified CTA -- the enroute default -- so a name keyword can
+  // still refine it to CTR/TMA/FIR in the AN handler below.
+  //
+  // R / P / Q / W (restricted, prohibited, danger, warning) deliberately fall
+  // through to OTHER: they are not control airspace and must never resolve to a
+  // controller.
+  if (std::strcmp(s, "A") == 0 || std::strcmp(s, "B") == 0 ||
+      std::strcmp(s, "C") == 0 || std::strcmp(s, "D") == 0)
+    return AirspaceClass::CTA;
   return AirspaceClass::OTHER;
 }
 
@@ -126,6 +144,14 @@ static std::vector<Entry> load_file(const std::string &path) {
   }
 
   bool active = false;
+  // True when cur.ac_class came from an ICAO class LETTER (AC C / AC D / ...)
+  // rather than an explicit type token (AC TMA / AC CTR / ...). A letter says
+  // how the airspace is REGULATED, not what it IS, so the name is still allowed
+  // to refine it below. Without this distinction, teaching parse_class to read
+  // class letters silently demoted every letter-named TMA to a plain CTA --
+  // terminal_tma() then returned nothing and the whole terminal-descent path
+  // went dead. Caught by tests/test_openair_db.cpp before it ever flew.
+  bool class_from_letter = false;
   Entry cur;
 
   char line[512];
@@ -144,7 +170,9 @@ static std::vector<Entry> load_file(const std::string &path) {
         entries.push_back(std::move(cur));
       }
       cur = Entry{};
-      cur.ac_class = parse_class(line + 3);
+      const char *ac = line + 3;
+      cur.ac_class = parse_class(ac);
+      class_from_letter = (std::strlen(ac) == 1);
       active = is_indexed(cur.ac_class);
       continue;
     }
@@ -155,7 +183,7 @@ static std::vector<Entry> load_file(const std::string &path) {
     // the airspace type — e.g. French TMA zones appear as "AC D AN ... TMA ...".
     if (std::strncmp(line, "AN ", 3) == 0) {
       cur.name = line + 3;
-      if (cur.ac_class == AirspaceClass::OTHER) {
+      if (cur.ac_class == AirspaceClass::OTHER || class_from_letter) {
         const std::string &n = cur.name;
         // The last branch assigns the same class as the "CTA" branch, but the two
         // MUST stay separate and in this order: a delegation polygon whose name
