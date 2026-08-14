@@ -9,6 +9,7 @@
  */
 
 #include "atc/atc_state_machine.hpp"
+#include "core/logging.hpp"
 #include "core/xplane_context.hpp"
 #include "data/airport_overrides.hpp"
 #include "data/airspace_db.hpp"
@@ -1291,17 +1292,90 @@ void init() {
   // Build towered cache on background thread
   std::thread(build_towered_cache).detach();
 }
+// Monotonic sim-seconds clock + its zulu reference. Rationale in update().
+static double s_sim_clock_secs = 0.0;
+static float s_last_zulu_secs = -1.0f;
+// Acceleration-factor sampler (sim seconds per wall second), reported to Log.txt.
+static double s_accel_wall_ref = 0.0;
+static double s_accel_sim_ref = 0.0;
+static int s_accel_band_logged = -1;
 
 void stop() {
   ctx = XPlaneContext{};
   frame_counter = 0;
   locked_airport_id_.clear();
+  s_sim_clock_secs = 0.0;
+  s_last_zulu_secs = -1.0f;
+  s_accel_wall_ref = 0.0;
+  s_accel_sim_ref = 0.0;
+  s_accel_band_logged = -1;
 }
 
+// Monotonic SIM-seconds clock, accumulated from sim/time/zulu_time_sec.
+//
+// XPLMGetElapsedTime() is documented as a WALL timer: it ignores time
+// acceleration and keeps running while the sim is paused. Every countdown in the
+// plugin was built on it, so as soon as the user speeds the sim up the aircraft
+// covers far more track miles per timer second than intended -- the approach
+// step-down fallback (180 s), the post-direct settle (90 s), the radar-handoff
+// stuck timer (3 min), the readback reminder budget (20/25 s) and the altitude
+// grace (45 s) all fire late in FLIGHT terms. Measured on LFLP -> EDLW
+// 2026-08-14: 136 NM in 17.1 min of wall clock (477 kt) against a reported
+// ground speed of ~350 kt, i.e. the world ran ~1.36x faster than the clocks.
+// Long flights and instruction use acceleration heavily, so this is a release
+// blocker rather than a curiosity. [C. P. Potter]
+//
+// zulu_time_sec is seconds-since-midnight UTC and DOES scale with acceleration.
+// Two hazards it brings: it wraps at midnight, and it is frozen while paused
+// (which is correct here -- no sim time passes, so no timer should advance).
+// Deltas are wrap-corrected and clamped, so a pause, a reposition or a
+// time-of-day change cannot inject a huge jump.
 void update() {
-  ctx.now_secs = static_cast<double>(XPLMGetElapsedTime());
-  if (dr_zulu_time)
-    ctx.zulu_time_sec = XPLMGetDataf(dr_zulu_time);
+  const float zulu_now = dr_zulu_time ? XPLMGetDataf(dr_zulu_time) : -1.0f;
+  if (zulu_now < 0.0f) {
+    // No zulu DataRef (should not happen in the sim): fall back to wall time so
+    // the plugin still runs rather than freezing every timer at zero.
+    ctx.now_secs = static_cast<double>(XPLMGetElapsedTime());
+  } else {
+    if (s_last_zulu_secs >= 0.0f) {
+      double d = static_cast<double>(zulu_now - s_last_zulu_secs);
+      if (d < 0.0)
+        d += 86400.0;                 // midnight wrap
+      if (d < 0.0 || d > 5.0)
+        d = 0.0;                      // paused / repositioned / clock changed
+      s_sim_clock_secs += d;
+    }
+    s_last_zulu_secs = zulu_now;
+    ctx.now_secs = s_sim_clock_secs;
+    ctx.zulu_time_sec = zulu_now;
+
+    // Report the measured acceleration factor (sim seconds per wall second),
+    // change-guarded to one line per band. Time acceleration is a first-class
+    // feature here -- instruction relies on it -- and without this line the
+    // effect is invisible in Log.txt: you would have to hand-compute distance
+    // over wall time to notice the sim was running fast, which is exactly what
+    // it took to find this. Reported in whole/half steps so a normal 1x flight
+    // logs it once and never again. [C. P. Potter]
+    const double wall_now = static_cast<double>(XPLMGetElapsedTime());
+    if (s_accel_wall_ref > 0.0) {
+      const double wall_d = wall_now - s_accel_wall_ref;
+      if (wall_d >= 10.0) { // sample over 10 wall seconds for a stable ratio
+        const double ratio = (s_sim_clock_secs - s_accel_sim_ref) / wall_d;
+        const int band = static_cast<int>(ratio * 2.0 + 0.5); // 0.5x steps
+        if (band != s_accel_band_logged) {
+          s_accel_band_logged = band;
+          logging::info("Sim time: running at %.1fx wall clock -- all ATC "
+                        "timers follow sim time",
+                        ratio);
+        }
+        s_accel_wall_ref = wall_now;
+        s_accel_sim_ref = s_sim_clock_secs;
+      }
+    } else {
+      s_accel_wall_ref = wall_now;
+      s_accel_sim_ref = s_sim_clock_secs;
+    }
+  }
   if (dr_latitude)
     ctx.latitude = XPLMGetDatad(dr_latitude);
   if (dr_longitude)

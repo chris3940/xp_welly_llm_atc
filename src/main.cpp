@@ -74,7 +74,7 @@ static int atc_panel_cmd_handler(XPLMCommandRef, XPLMCommandPhase phase,
 
 static int atis_check_counter_ = 0;
 static int traffic_check_counter_ = 0;
-static float last_elapsed_ = 0.0f;
+static double last_elapsed_ = 0.0; // sim seconds (xplane_context::now_secs)
 
 static XPLMDataRef dr_atc_verbose_ = nullptr;
 static XPLMDataRef dr_atc_show_hist_ = nullptr;
@@ -86,11 +86,19 @@ static float flight_loop_cb(float, float, int, void *) {
   // and worker callbacks could all throw under unexpected error
   // conditions; we'd rather log + skip a frame than terminate.
   try {
-    float now = XPLMGetElapsedTime();
-    float dt = (last_elapsed_ > 0.0f) ? (now - last_elapsed_) : (1.0f / 60.0f);
+    // dt is SIM seconds, not wall seconds. xplane_context::update() maintains a
+    // monotonic clock accumulated from sim/time/zulu_time_sec (see the comment
+    // there): it scales with time acceleration and stops while paused, so every
+    // countdown downstream stays proportional to the distance actually flown.
+    // XPLMGetElapsedTime() -- the old source -- is a wall timer and did neither.
+    // update() must therefore run BEFORE dt is derived. [C. P. Potter]
+    xplane_context::update();
+    const double now = xplane_context::get().now_secs;
+    float dt = (last_elapsed_ > 0.0)
+                   ? static_cast<float>(now - last_elapsed_)
+                   : (1.0f / 60.0f);
     last_elapsed_ = now;
 
-    xplane_context::update();
     flight_phase::update(xplane_context::get(), dt);
     // Check ATIS for updates ~1/s (every 60 frames)
     if (++atis_check_counter_ % 60 == 0)
