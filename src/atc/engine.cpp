@@ -1776,6 +1776,16 @@ void process_transcript(Input in, Done done) {
       // freq (matches_pending_handoff / sector-checkin detection), where the richer
       // approach handler responds. Silence here is correct -- the pilot is switching.
       if (handoff_ack) {
+        // The pilot DID read the handoff back -- consume the pending readback.
+        // "Accepted silently" used to mean silent for the PILOT only: the
+        // clearance stayed armed, so the reminder ticks kept counting against a
+        // readback that had already been given, and the third tick cancelled
+        // whatever clearance was current by then. LFMN 2026-08-14: the Tower
+        // handoff readback at 49:27 left it armed, ticks 1..3 ran while the
+        // pilot flew the final, and 10 s after "cleared to land" the stale
+        // budget expired -> "no response received, say again" plus a reset to
+        // IDLE at 1 NM on short final. [C. P. Potter]
+        atc_state_machine::cancel_readback();
         logging::info("Handoff readback on old freq -- accepted silently (pending "
                       "%s %.3f)",
                       s_pending_controller_label.c_str(),
@@ -4112,8 +4122,19 @@ bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
   // Transition to IFR_FREQ_HANDOFF: pilot must read back the frequency before
   // advancing to IFR_EN_ROUTE. Even with no frequency we advance so the state
   // doesn't get stuck in IFR_DEPARTURE_CLEARED forever.
+  // Store the new controller as PENDING, not current: the handoff is spoken by
+  // the controller the pilot is still listening to (Annecy Tower), and the label
+  // swaps to the target only when the pilot actually tunes the new frequency
+  // (deferred-swap promoter). Setting s_current here labelled the transcript
+  // "Chambery Approach:" while still on 118.200 and made the wrong-freq reminder
+  // read "you are still with Chambery Approach, contact the next controller on
+  // 121.205" -- both halves wrong, since s_pending_controller_label was left
+  // empty. It also broke the handoff-readback detector, which matches the pilot's
+  // echo against the PENDING controller name, so a correct readback drew the
+  // reminder instead of being accepted silently (LFLP 2026-08-14). Same fix as
+  // the approach -> Tower handoff below. [C. P. Potter]
   if (!controller_label.empty())
-    s_current_controller_label = controller_label;
+    s_pending_controller_label = controller_label;
   s_pending_handoff_freq_mhz = freq;
   logging::debug("[DBG] pending_handoff_freq=%.3f [dept-freq-handoff ctrl=%s]",
                  freq, controller_label.c_str());

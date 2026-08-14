@@ -756,13 +756,23 @@ std::string consume_readback_reminder(double now_secs) {
     const char *cur = state_name(g_state.state_);
     // IFR in-flight states where resetting to IDLE would destroy poll
     // statics and kill the approach / descent / cruise flow.
+    // LANDING_CLEARED, RADAR_CONTACT, FREQ_HANDOFF and EN_ROUTE were missing:
+    // all four are airborne IFR states, and a reset to IDLE there is as
+    // destructive as it is mid-cruise. LFMN 2026-08-14: a stale readback budget
+    // expired shortly after "cleared to land" and dropped IFR/LANDING_CLEARED to
+    // IDLE at 1 NM on short final. FREQ_HANDOFF / RADAR_CONTACT would do the
+    // same to the SID climb ladder on departure. [C. P. Potter]
     const bool is_ifr_inflight =
         std::strcmp(cur, "IFR/ENROUTE_CRUISE") == 0    ||
         std::strcmp(cur, "IFR/DESCENT") == 0            ||
         std::strcmp(cur, "IFR/ARRIVAL") == 0            ||
         std::strcmp(cur, "IFR/APPROACH_CONTACT") == 0   ||
         std::strcmp(cur, "IFR/APPROACH_DESCENT") == 0   ||
-        std::strcmp(cur, "IFR/APPROACH_TOWER") == 0;
+        std::strcmp(cur, "IFR/APPROACH_TOWER") == 0     ||
+        std::strcmp(cur, "IFR/LANDING_CLEARED") == 0    ||
+        std::strcmp(cur, "IFR/RADAR_CONTACT") == 0      ||
+        std::strcmp(cur, "IFR/FREQ_HANDOFF") == 0       ||
+        std::strcmp(cur, "IFR/EN_ROUTE") == 0;
     rb_clear();
     if (is_ifr_inflight) {
       // Stay in current state — the pilot is heads-down flying; going to IDLE
