@@ -2,6 +2,8 @@
   "_comment": "Data-driven intent classification rules for EU/ICAO phraseology. Loaded by src/atc/intent_rules.cpp. Schema: see intent_rules.hpp. Order of `rules` is priority order — first match wins. `normalize` patches Whisper transcription quirks before matching. `adjustments` apply post-match overrides (intent reassignment + confidence mutation) in array order.",
 
   "normalize": [
+    { "_note": "Pilots say the frequency-change readback in the PRESENT PARTICIPLE about as often as the imperative -- 'contacting tower on 118.200' rather than 'contact tower ...'. Every READBACK pattern is written on the imperative ('contact ground/tower/approach/departure'), so the gerund matched nothing: confidence fell to 0.30, the LM was consulted and guessed READY_FOR_DEPARTURE_VFR, and the ground handoff guard -- which only exempts READBACK and LEAVING_FREQUENCY -- answered 'you are still on Ground, contact Tower on 118.200' to a perfectly correct readback (real vol LFLP 2026-08-14). The same pilot said 'Contact tower ...' on the two previous flights and was answered with silence, which is why this looked like a regression. Normalising the gerund fixes every 'contact X' pattern at once instead of doubling the rule table. [C. P. Potter]",
+      "from": "contacting ", "to": "contact " },
     { "_note": "Whisper drops the first 'r' in 'departure' (observed LSZB log 2026-06-07).",
       "from": "depature", "to": "departure" },
     { "_note": "Whisper occasional slurred contraction of 'departure'.",
