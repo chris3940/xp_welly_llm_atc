@@ -1,0 +1,107 @@
+* Synthetic OpenAir fixture for openair_db classification + geometry tests.
+*
+* Hand-written: no vendor data is reproduced. Every polygon is a 1-degree square
+* placed on a grid so each case can be probed at a distinct, obvious point, and
+* every name is invented EXCEPT the airspace-type words themselves, which are
+* what the classifier keys on.
+*
+* Grid (lon runs 0..9 east, lat 40..41 for every square):
+*   lon 0-1  ALPHA CTR            AC CTR   -> CTR      indexed
+*   lon 1-2  BRAVO TMA            AC D     -> TMA      indexed via NAME keyword
+*   lon 2-3  CHARLIE CTA          AC C     -> CTA      indexed via NAME keyword
+*   lon 3-4  DELTA FIR            AC A     -> FIR      indexed via NAME keyword
+*   lon 4-5  FREE RT ASPC ZZ      AC C     -> OTHER    NOT indexed  <-- the gap
+*   lon 5-6  ECHO                 AC D     -> OTHER    NOT indexed  <-- the gap
+*   lon 6-7  R-FOXTROT (RANGE)    AC R     -> OTHER    NOT indexed  (correct)
+*   lon 7-8  DELEGATED BY AAAA TO BBBB     AC C -> CTA indexed via delegation marker
+*   lon 8-9  GOLF TMA (stacked)   two bands, for the lowest-floor selection
+*
+AC CTR
+AN ALPHA CTR
+AL GND
+AH 2500 MSL
+DP 40:00:00 N 000:00:00 E
+DP 41:00:00 N 000:00:00 E
+DP 41:00:00 N 001:00:00 E
+DP 40:00:00 N 001:00:00 E
+*
+AC D
+AN BRAVO TMA
+AL 2500 MSL
+AH 9500 MSL
+DP 40:00:00 N 001:00:00 E
+DP 41:00:00 N 001:00:00 E
+DP 41:00:00 N 002:00:00 E
+DP 40:00:00 N 002:00:00 E
+*
+AC C
+AN CHARLIE CTA
+AL 9500 MSL
+AH 19500 MSL
+DP 40:00:00 N 002:00:00 E
+DP 41:00:00 N 002:00:00 E
+DP 41:00:00 N 003:00:00 E
+DP 40:00:00 N 003:00:00 E
+*
+AC A
+AN DELTA FIR
+AL GND
+AH 66000 MSL
+DP 40:00:00 N 003:00:00 E
+DP 41:00:00 N 003:00:00 E
+DP 41:00:00 N 004:00:00 E
+DP 40:00:00 N 004:00:00 E
+*
+AC C
+AN FREE RT ASPC ZZ
+AL 19500 MSL
+AH 66000 MSL
+DP 40:00:00 N 004:00:00 E
+DP 41:00:00 N 004:00:00 E
+DP 41:00:00 N 005:00:00 E
+DP 40:00:00 N 005:00:00 E
+*
+AC D
+AN ECHO
+AL 2000 MSL
+AH 4500 MSL
+DP 40:00:00 N 005:00:00 E
+DP 41:00:00 N 005:00:00 E
+DP 41:00:00 N 006:00:00 E
+DP 40:00:00 N 006:00:00 E
+*
+AC R
+AN R-FOXTROT   (RANGE FOXTROT)
+AL GND
+AH 60000 MSL
+DP 40:00:00 N 006:00:00 E
+DP 41:00:00 N 006:00:00 E
+DP 41:00:00 N 007:00:00 E
+DP 40:00:00 N 007:00:00 E
+*
+AC C
+AN DELEGATED BY AAAA TO BBBB
+AL 19500 MSL
+AH 66000 MSL
+DP 40:00:00 N 007:00:00 E
+DP 41:00:00 N 007:00:00 E
+DP 41:00:00 N 008:00:00 E
+DP 40:00:00 N 008:00:00 E
+*
+AC D
+AN GOLF TMA SECTOR 1
+AL 1000 MSL
+AH 8500 MSL
+DP 40:00:00 N 008:00:00 E
+DP 41:00:00 N 008:00:00 E
+DP 41:00:00 N 009:00:00 E
+DP 40:00:00 N 009:00:00 E
+*
+AC C
+AN GOLF TMA SECTOR 2
+AL 8500 MSL
+AH 19500 MSL
+DP 40:00:00 N 008:00:00 E
+DP 41:00:00 N 008:00:00 E
+DP 41:00:00 N 009:00:00 E
+DP 40:00:00 N 009:00:00 E
