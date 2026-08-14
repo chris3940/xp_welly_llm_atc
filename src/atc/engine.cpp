@@ -6765,8 +6765,48 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
     }
   }
 
+  // P4 -- the DESTINATION AIRPORT's own approach/radar frequency (apt.dat).
+  // P1/P2/P3 all resolve a controller by POLYGON, and at a field whose approach
+  // service is provided by a distant unit with no local polygon they all fail
+  // even though the frequency is published on the field itself.
+  //
+  // EDLW/Dortmund, real vol 2026-08-14: openair has a vertical hole from 4500 ft
+  // to 10000 ft over the field (the German approach layer there is CLASS E, and
+  // the export carries no class E at all -- only R/Q/D/CTR/C/P/A/B), and atc.dat
+  // has only LANGEN as 'ctr' and DORTMUND as 'twr', no 'tracon'. Both datasets
+  // are RIGHT: Dortmund has no approach unit of its own, the service is Langen
+  // Radar -- which apt.dat lists on the field as LANGEN RADAR 125.225 and which
+  // the plugin's own Frequencies panel was displaying the whole time.
+  //
+  // So before giving up, ask the field. This needs no hand-maintained overlay and
+  // works at any airport whose approach frequency is published. [C. P. Potter]
   if (app_label.empty()) {
-    logging::info("IFR arrival handoff: no Approach controller (P1+P2+P3 failed) -- silent");
+    using FT = xplane_context::FrequencyType;
+    const float apt_app_mhz = ctx.airport_freqs.first_mhz(FT::APPROACH);
+    if (apt_app_mhz >= 100.0f) {
+      std::string raw = ctx.airport_freqs.first_name(FT::APPROACH);
+      // Title-case the apt.dat name ("LANGEN RADAR" -> "Langen Radar"); fall back
+      // to the destination's spoken airport NAME + " Approach" when unnamed.
+      std::string nice;
+      bool cap = true;
+      for (char c : raw) {
+        nice += cap ? static_cast<char>(std::toupper(static_cast<unsigned char>(c)))
+                    : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        cap = (c == ' ');
+      }
+      if (nice.empty()) {
+        const std::string apt_name = spoken_airport_name(s_assigned_dest_icao);
+        nice = (apt_name.empty() ? s_assigned_dest_icao : apt_name) + " Approach";
+      }
+      app_label = nice;
+      app_freq  = apt_app_mhz;
+      logging::info("IFR arrival handoff: [P4-apt.dat %s field frequency] %s %.3f",
+                    s_assigned_dest_icao.c_str(), app_label.c_str(), app_freq);
+    }
+  }
+
+  if (app_label.empty()) {
+    logging::info("IFR arrival handoff: no Approach controller (P1+P2+P3+P4 failed) -- silent");
     return false;
   }
 
