@@ -12,9 +12,10 @@ of a real flight, and says which one.
 
 ## Unreleased — 4.4.0-beta
 
-Two flights drove this batch: **LFLP → LFMN** (2026-08-14 morning) and
-**LFLP → EDLW** (2026-08-14 afternoon, the first long cross-border leg into
-Germany).
+Three flights drove this batch: **LFLP → LFMN** (2026-08-14 morning) and two
+attempts at **LFLP → EDLW** (2026-08-14 afternoon and evening) — the first long
+cross-border legs into Germany, the second broken off when the descent went
+wrong 200 NM out.
 
 ### Added
 
@@ -41,11 +42,9 @@ Germany).
   the procedure yielded 2 waypoints instead of 4. RNAV arrivals hid this because
   they were the only type the reader accepted.
 - **No approach controller at a field served from elsewhere.** The handoff
-  resolved a controller by polygon only. At Dortmund there is none to find — the
-  OpenAir export has a vertical hole from 4500 ft to 10000 ft (it carries no
-  class E at all, and the German approach layer there is class E), and `atc.dat`
-  lists Dortmund as a Tower, not an approach unit. Both are right: the service is
-  Langen Radar. The field's own published approach frequency is now the last
+  resolved a controller by polygon only, and at Dortmund there is none to find:
+  `atc.dat` lists Dortmund as a Tower, not an approach unit, and no approach
+  polygon covers the field. That is correct — the service is Langen Radar. The field's own published approach frequency is now the last
   resort, so ATC says "contact Langen Radar on 125.225" instead of going silent.
 - **"Request descent" drew no answer once the descent had begun.** The handler
   only covered the cruise phase. Now answered in descent, arrival and approach:
@@ -59,6 +58,26 @@ Germany).
   that lets the pilot turn onto the new leg was armed on one direct-to path but
   not on the STAR direct-to-IAF shortcut, so "direct DOR" drew "confirm routing,
   you appear tracking heading 37, expected 319" seven seconds later.
+
+### Fixed — airspace data
+
+- **Controlled airspace whose name carries no type word was invisible.** The
+  airspace index decided what a volume *was* from a keyword in its name (CTR /
+  TMA / CTA / FIR), because European exports put the ICAO class letter in the
+  class field and the type in the name. Anything without such a word — Free
+  Route blocks, and plenty of terminal volumes — was never indexed, so the
+  plugin saw nothing over them. That is the root cause of both the 200 NM
+  descent above and the missing approach controller at Dortmund. The class
+  letter is now read as well: A–D are controlled, E/F/G are not, and restricted,
+  prohibited and danger areas stay out. On the reference data the index grows
+  from 8 100 to 10 239 volumes. Measured over the flight corridor, the effect is
+  additive at altitude and almost nil in terminal airspace — 87 % of sampled
+  points at FL280 go from *nothing* to a resolved volume, against 6 % at
+  3 000 ft — and no existing volume is displaced by a new one.
+- **74 restricted and danger areas were being indexed by accident**, because a
+  type word appears inside their name — `R-33 (MATMATA)`, `P-33 (FIRGROVE)`,
+  `R-302 (REGIONAL PSYCHIATRIC CTR)`, `W-METTMANN`. They could be resolved as
+  controlled airspace. They no longer are.
 
 ### Fixed — en route
 
@@ -119,6 +138,16 @@ Germany).
 - **Correcting a readback now follows ICAO.** The procedure is NEGATIVE, then
   I SAY AGAIN, then the correct version. ATC said "negative, 250 knots or less,
   readback"; it now says "negative, I say again, 250 knots or less".
+
+### Still owed before the public build
+
+- **`FORCE VECTORING`**, and radar vectors to final generalised beyond the
+  large-turn reversal, so ATC can position the aircraft onto the FAF or the ILS
+  intercept at any airfield rather than only where the approach reverses.
+- **Pilot level requests** — request to maintain the present level, or request
+  higher or lower, with ATC **approving or refusing**. A refusal has to carry a
+  reason the pilot can act on, and an approval has to update the clearance ATC
+  then holds him to.
 
 ### Known, not fixed in this batch
 

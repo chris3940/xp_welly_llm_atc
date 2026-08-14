@@ -88,15 +88,13 @@ flights.
   come from the CIFP; sector boundaries come from the OpenAir airspace export.
   Without current data the plugin will pick wrong procedures or fall silent.
 - **Sector handoffs are only as good as the OpenAir coverage.** Where a country's
-  export omits a volume, no controller resolves and the handoff does not happen.
-  Two shapes of gap show up: upper airspace missing for a country (patched by hand
-  in `Resources/airspace+.txt`; several already are), and **whole classes absent**
-  — the export carries classes A–D plus CTR and the special-use areas, and **no
-  class E at all**. Where a country builds its approach layer in class E, as
-  Germany does, that leaves a vertical hole above the low terminal volumes. The
-  plugin falls back to the destination field's own published approach frequency,
-  so the arrival still gets a controller, but no hand-written overlay will fix
-  this class of gap systematically.
+  export omits a volume — upper airspace is the usual gap — no controller
+  resolves and the handoff does not happen. Gaps are patched by hand in
+  `Resources/airspace+.txt`; several already are. Note the export carries no
+  class E, so a country that builds its approach layer in class E leaves a
+  vertical hole above its low terminal volumes; the plugin then falls back to the
+  destination field's own published approach frequency so the arrival still gets
+  a controller.
 - **Some data is hand-maintained, per airport, in `Resources/airport+.json`** —
   runway pairings, weather-gated approach selection, controllers missing from
   `atc.dat`, departure holds, published initial-climb altitudes. Airports without
