@@ -8660,19 +8660,42 @@ bool poll_altitude_compliance(const xplane_context::XPlaneContext &ctx, float dt
   if (out_text) {
     const std::string &cs = atc_state_machine::session_callsign();
     const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
-    const char *verb = needs_descent ? "descending" : "climbing";
     char buf[160];
-    if (tgt_is_fl)
-      std::snprintf(buf, sizeof(buf), "%s, confirm %s flight level %d.",
-                    callsign.c_str(), verb, target / 100);
-    else
-      std::snprintf(buf, sizeof(buf), "%s, confirm %s %d feet.",
-                    callsign.c_str(), verb, target);
+    // Two different situations, and only one of them is about a vertical
+    // movement the pilot was asked to make:
+    //
+    //   ABOVE the cleared level -> he owes the descent he was cleared for, so
+    //       "confirm descending <level>" is the right query.
+    //   BELOW the cleared level -> he is LEAVING a level he was told to hold.
+    //       "confirm climbing <level>" reads as an instruction that was never
+    //       issued. On LFLP -> EDLW 2026-08-14 the pilot requested descent, got
+    //       silence, started down anyway, and 500 ft below FL180 at -2156 fpm was
+    //       asked to "confirm climbing flight level 180" -- ATC inventing a climb
+    //       clearance out of its own missing answer. Query the level instead.
+    //
+    // NOTE: the exact wording of the below-level query is worth checking against
+    // ICAO Doc 4444 before release. [C. P. Potter]
+    if (needs_descent) {
+      if (tgt_is_fl)
+        std::snprintf(buf, sizeof(buf), "%s, confirm descending flight level %d.",
+                      callsign.c_str(), target / 100);
+      else
+        std::snprintf(buf, sizeof(buf), "%s, confirm descending %d feet.",
+                      callsign.c_str(), target);
+    } else {
+      if (tgt_is_fl)
+        std::snprintf(buf, sizeof(buf),
+                      "%s, confirm your level, cleared flight level %d.",
+                      callsign.c_str(), target / 100);
+      else
+        std::snprintf(buf, sizeof(buf), "%s, confirm your level, cleared %d feet.",
+                      callsign.c_str(), target);
+    }
     *out_text = buf;
   }
   logging::info("IFR descent/arrival: alt-compliance target=%d diff=%+d VS=%.0f -> confirm %s",
                 target, diff, static_cast<double>(ctx.vertical_speed_fpm),
-                needs_descent ? "descending" : "climbing");
+                needs_descent ? "descending" : "level (below cleared)");
   return true;
 }
 
