@@ -7667,11 +7667,23 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
   // while the aircraft is still below cruise altitude (e.g. TMA exit fired the
   // handoff before cruise clearance reached the pilot). Fires once, ≥30 s
   // after Centre check-in, only when cleared_alt < cruise_alt.
+  //
+  // The AIRCRAFT must be below cruise too, not just the cleared level. The old
+  // condition looked at s_enroute_cleared_alt_ft alone, so it also fired when
+  // that level had been LOWERED on purpose -- turning a planned descent into a
+  // forced climb back to cruise. LFLP -> EDLW 2026-08-14, six seconds apart:
+  //     IFR en-route: filed step descend FL230 (fix ERUKI, cur FL270)
+  //     IFR en-route: step-up FL280
+  // This is a rescue for a climb that never got its cruise clearance; an
+  // aircraft already at cruise has nothing to be rescued from. (The filed-step
+  // site also marks the rescue spent -- see there.) [C. P. Potter]
   if (!s_cruise_stepup_issued && s_enroute_timer >= 30.0f &&
       s_enroute_cleared_alt_ft > 0 && ctx.ifr_cruise_alt_ft > 0 &&
-      ctx.ifr_cruise_alt_ft > s_enroute_cleared_alt_ft + 1000) {
+      ctx.ifr_cruise_alt_ft > s_enroute_cleared_alt_ft + 1000 &&
+      static_cast<int>(ctx.pressure_alt_ft) < ctx.ifr_cruise_alt_ft - 1000) {
     s_cruise_stepup_issued = true;
     int fl = round_to_fl(ctx.ifr_cruise_alt_ft);
+    const int prev_cleared_ft = s_enroute_cleared_alt_ft;
     s_enroute_cleared_alt_ft = fl * 100;
     if (out_text) {
       const std::string &cs2 = atc_state_machine::session_callsign();
@@ -7682,9 +7694,13 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
                     callsign2.c_str(), fl);
       *out_text = buf;
     }
-    logging::info("IFR en-route: step-up FL%d (cleared %d ft < cruise %d ft)",
-                  fl, s_enroute_cleared_alt_ft / 100,
-                  ctx.ifr_cruise_alt_ft / 100);
+    // Log the level we were cleared to BEFORE the assignment above -- printing
+    // s_enroute_cleared_alt_ft here produced the nonsense "cleared 280 < cruise
+    // 280" that hid this bug in Log(12).txt.
+    logging::info("IFR en-route: step-up FL%d (cleared FL%d < cruise FL%d, "
+                  "aircraft %d ft)",
+                  fl, prev_cleared_ft / 100, ctx.ifr_cruise_alt_ft / 100,
+                  static_cast<int>(ctx.pressure_alt_ft));
     rb(true);
     return true;
   }
@@ -7789,6 +7805,13 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
 
         ++s_route_step_idx;
         s_enroute_cleared_alt_ft = step_target_ft;
+        // The filed profile is now driving the level, so the cruise step-up
+        // rescue is moot -- it only exists for a climb that never received its
+        // cruise clearance. Marking it spent here stops it from later reading a
+        // deliberately lowered level as "the pilot never got cleared to cruise"
+        // and climbing the aircraft back up (LFLP -> EDLW 2026-08-14).
+        // [C. P. Potter]
+        s_cruise_stepup_issued = true;
         // VERB from the aircraft's CURRENT altitude, NOT the previously-cleared FL:
         // a filed step DOWN (e.g. FL220->FL210) issued while the aircraft is still
         // CLIMBING and BELOW the step target must not say "descend" (physically
