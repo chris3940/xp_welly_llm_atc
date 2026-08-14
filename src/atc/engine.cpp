@@ -277,6 +277,14 @@ static bool resolve_sector_controller(
     float *out_mhz,
     std::uint32_t avoid_freq_khz = 0); // unified handoff resolver
 
+// Spoken form of an assigned level -- "flight level 180" or "6500 feet, QNH 1013"
+// depending on the transition altitude. Defined further down (the full rationale
+// for the Auto heuristic lives there); declared here so the pilot-request handlers
+// near the top of process_transcript can answer with a properly formatted level.
+enum class AltHint { Auto, Feet, FlightLevel };
+static std::string format_alt_clearance(int alt_ft, AltHint hint,
+                                        int qnh_hpa = 1013, int ta_ft = 5000);
+
 // Arrival runway-in-use: the per-airport runway_config (airport+.json) wins when it
 // resolves one -- it pins the direction AND the L/R split that wind alone cannot
 // (LFLP arrive 04, LFMN arrive 04L) -- else the CIFP wind-based pick. This is the
@@ -2351,6 +2359,54 @@ void process_transcript(Input in, Done done) {
     }
     done(Output{});
     return;
+  }
+
+  // Same request, but made once the descent has already begun. The block above is
+  // scoped to IFR_ENROUTE_CRUISE, so in DESCENT / ARRIVAL / APPROACH a "request
+  // descent" fell through every handler and drew NOTHING -- the intent was parsed
+  // at 0.90 confidence and the response was "(silent)". Real vol LFLP -> EDLW
+  // 2026-08-14 at 67:15: the pilot asked, got no answer, descended on his own,
+  // and was then challenged by the altitude monitor for leaving his level.
+  //
+  // Unlike the en-route case there is no poll guaranteed to speak next frame: the
+  // step-downs here are driven by poll_descent / poll_approach and may legitimately
+  // have nothing to give yet (on that flight they had nothing at all, because no
+  // Approach controller could be resolved for EDLW). So answer directly, and let
+  // any real step-down follow on its own a moment later.
+  //
+  // NOTE: "expect lower shortly" is a plausible but UNVERIFIED wording -- check it
+  // against ICAO Doc 4444 before the public release. [C. P. Potter]
+  if (parsed.intent == PI::REQUEST_DESCENT) {
+    using AS2 = atc_state_machine::ATCState;
+    const AS2 st_rd = atc_state_machine::get_state();
+    if (st_rd == AS2::IFR_DESCENT || st_rd == AS2::IFR_ARRIVAL ||
+        st_rd == AS2::IFR_APPROACH_CONTACT || st_rd == AS2::IFR_APPROACH_DESCENT) {
+      s_pilot_requested_descent = true; // any poll able to step down now may
+      const std::string &cs_rd = atc_state_machine::session_callsign();
+      const std::string &callsign_rd =
+          cs_rd.empty() ? settings::pilot_callsign() : cs_rd;
+      const int ta_rd = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
+      const int cleared_rd = s_enroute_cleared_alt_ft;
+      Output out_rd;
+      if (cleared_rd <= 0) {
+        out_rd.response_text = callsign_rd + ", roger, expect lower shortly.";
+      } else {
+        const std::string clr_rd =
+            format_alt_clearance(cleared_rd, AltHint::Auto, ctx.qnh_hpa, ta_rd);
+        // Above the cleared level -> he already has the descent, restate it.
+        // At or below it -> nothing lower to give yet; say so instead of going mute.
+        if (static_cast<int>(ctx.pressure_alt_ft) > cleared_rd + 500)
+          out_rd.response_text = callsign_rd + ", descend " + clr_rd + ".";
+        else
+          out_rd.response_text =
+              callsign_rd + ", maintain " + clr_rd + ", expect lower shortly.";
+      }
+      logging::info("IFR descent request in %s -> \"%s\"",
+                    atc_state_machine::state_name(st_rd),
+                    out_rd.response_text.c_str());
+      done(std::move(out_rd));
+      return;
+    }
   }
 
   // IFR descent ASK declined: after ATC's "advise when ready to descend", the pilot says
@@ -5388,9 +5444,8 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
 //                           is a level even below it — the old TL guess spoke
 //                           LP403's 6500 ft as "flight level 65", LIMF->LFLP).
 // QNH is appended only in feet form, never with a flight level.
-enum class AltHint { Auto, Feet, FlightLevel };
-static std::string format_alt_clearance(int alt_ft, AltHint hint,
-                                        int qnh_hpa = 1013, int ta_ft = 5000) {
+static std::string format_alt_clearance(int alt_ft, AltHint hint, int qnh_hpa,
+                                        int ta_ft) {
   bool as_fl;
   switch (hint) {
   case AltHint::Feet:        as_fl = false; break;
