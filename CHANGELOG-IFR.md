@@ -131,9 +131,10 @@ Germany).
 - **Sector handoffs fire on crossing the boundary, not before it.** On the
   Annecy departure the transfer to Geneva came at 11 542 ft against a sector
   floor of 11 500 ft — 42 ft *after* entry. Detection is exact; the timing is
-  reactive by design. That margin happened to be small because the climb left
-  the lower sector's footprint before reaching its 9 500 ft floor; a track that
-  stays over it would enter 2 000 ft earlier and be handed off just as late. Real ATC hands off while the aircraft is still a minute or
+  reactive by design. That 42 ft is not representative: the aircraft had drifted
+  out of the lower sector's footprint, and on the published SID track the
+  boundary is crossed at **FL085** — with the procedure's own FL130 requirement
+  sitting 4 500 ft inside the neighbouring TMA. Real ATC hands off while the aircraft is still a minute or
   two out, so the pilot is already on the new frequency when they cross.
   Related: on that same departure the FL130 clearance is issued by Chambéry for a
   level that lies inside Geneva's airspace. That is correct and deliberate — the
