@@ -1004,6 +1004,61 @@ ApproachInfo best_approach(const std::string &cifp_dir,
   return best;
 }
 
+// ── ils_approach ────────────────────────────────────────────────────────
+
+ApproachInfo ils_approach(const std::string &cifp_dir, const std::string &icao,
+                          const std::string &dest_runway) {
+  if (cifp_dir.empty() || icao.empty() || dest_runway.empty())
+    return {};
+
+  const std::string cache_key = icao + ":ILS:" + dest_runway;
+  {
+    std::lock_guard<std::mutex> lk(g_alt_cache_mutex);
+    auto it = g_approach_cache.find(cache_key);
+    if (it != g_approach_cache.end())
+      return it->second;
+  }
+
+  ApproachInfo best;
+  int best_score = -1;
+  std::ifstream in(make_cifp_path(cifp_dir, icao));
+  std::string line;
+  while (in.good() && std::getline(in, line)) {
+    if (line.size() < 6 || line.compare(0, 6, "APPCH:") != 0)
+      continue;
+    auto f = split_csv(line);
+    if (f.size() < 3)
+      continue;
+    std::string des = trim(f[2]);
+    char type_char = 0, suffix = 0;
+    std::string rwy;
+    if (!parse_approach_designator(des, type_char, rwy, suffix))
+      continue;
+    // 'I' = ILS, 'S' = ILS/PRM or LDA-with-glideslope -- both map to "ILS" in
+    // approach_type_str, so both satisfy "force ILS". A bare localizer ('L') is
+    // NOT an ILS and is deliberately excluded: no glideslope.
+    if (rwy != dest_runway || (type_char != 'I' && type_char != 'S'))
+      continue;
+    const int score =
+        suffix ? std::toupper(static_cast<unsigned char>(suffix)) - 'A' + 1 : 0;
+    if (score > best_score) {
+      best_score      = score;
+      best.type_str   = approach_type_str(type_char);
+      best.runway     = rwy;
+      best.designator = des;
+    }
+  }
+
+  logging::info("[cifp] %s rwy %s force-ILS lookup -> %s", icao.c_str(),
+                dest_runway.c_str(),
+                best.designator.empty() ? "(none published)"
+                                        : best.designator.c_str());
+
+  std::lock_guard<std::mutex> lk(g_alt_cache_mutex);
+  g_approach_cache[cache_key] = best;
+  return best;
+}
+
 // ── approach_suffix ─────────────────────────────────────────────────────
 
 // Public accessor: parses the designator and returns the variant letter,

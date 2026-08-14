@@ -306,6 +306,24 @@ static float approach_gate_ceiling_ft(const xplane_context::XPlaneContext &ctx) 
                                            : ctx.cloud_base_ft_msl;
 }
 
+// Force-ILS override for the approach-selection chain (Settings toggle). Returns
+// the runway's published ILS so the caller can short-circuit the rest of its
+// chain, or an empty ApproachInfo when the toggle is off or the runway has no
+// ILS -- in which case the normal resolution runs untouched.
+//
+// Why it sits ahead of the whole chain: the airport+.json `approaches` list is a
+// FILTER, not a preference (first rule whose weather gates hold wins outright),
+// so at a field like LFMN 04L the published ILS is structurally unreachable --
+// the RNAV rules always match first. This is the escape hatch for a pilot who
+// wants to fly the ILS regardless of weather. [C. P. Potter]
+static cifp_reader::ApproachInfo forced_ils(const std::string &cifp_dir,
+                                            const std::string &icao,
+                                            const std::string &runway) {
+  if (!settings::force_ils())
+    return {};
+  return cifp_reader::ils_approach(cifp_dir, icao, runway);
+}
+
 // Effective altitude (ft) for OPENAIR airspace lookups (find_enclosing etc.).
 // Navigraph's openair writes FLIGHT-LEVEL ceilings (e.g. FL195 -> "19500 MSL",
 // Chambery TMA FL095 -> "9500 MSL") as feet labelled "MSL" and NEVER emits "FL".
@@ -2532,6 +2550,13 @@ void process_transcript(Input in, Done done) {
         if (!s_assigned_approach_designator.empty())
           appr = cifp_reader::approach_by_designator(
               ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator);
+        // Force-ILS goes AFTER the briefing lock above, never before it: the
+        // briefing already applied the override, so the locked designator is
+        // already the ILS. Jumping the lock would let the approach change
+        // between "expect" and "cleared", which is exactly what the lock exists
+        // to prevent.
+        if (appr.type_str.empty())
+          appr = forced_ils(ctx.cifp_dir, s_assigned_dest_icao, rwy);
         if (appr.type_str.empty() && !ofp_ac.preferred_approach_designator.empty())
           appr = cifp_reader::approach_by_designator(
               ctx.cifp_dir, s_assigned_dest_icao,
@@ -2614,8 +2639,10 @@ void process_transcript(Input in, Done done) {
       std::string dest_rwy = pick_arrival_runway(ctx, s_assigned_dest_icao);
       if (!dest_rwy.empty()) {
         const auto &ofp_early = simbrief_ofp::get();
-        cifp_reader::ApproachInfo appr_early;
-        if (!ofp_early.preferred_approach_designator.empty())
+        cifp_reader::ApproachInfo appr_early =
+            forced_ils(ctx.cifp_dir, s_assigned_dest_icao, dest_rwy);
+        if (appr_early.type_str.empty() &&
+            !ofp_early.preferred_approach_designator.empty())
           appr_early = cifp_reader::approach_by_designator(
               ctx.cifp_dir, s_assigned_dest_icao,
               ofp_early.preferred_approach_designator);
@@ -5503,8 +5530,9 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   std::string approach_phrase;
   if (!dest_runway.empty() && !ctx.cifp_dir.empty() &&
       !ofp.destination_icao.empty()) {
-    cifp_reader::ApproachInfo appr;
-    if (!ofp.preferred_approach_designator.empty())
+    cifp_reader::ApproachInfo appr =
+        forced_ils(ctx.cifp_dir, ofp.destination_icao, dest_runway);
+    if (appr.type_str.empty() && !ofp.preferred_approach_designator.empty())
       appr = cifp_reader::approach_by_designator(ctx.cifp_dir, ofp.destination_icao,
                                                  ofp.preferred_approach_designator);
     if (appr.type_str.empty()) {
@@ -5544,7 +5572,11 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
       // the selected designator against the ideal (same gate under perfect
       // weather). (user 2026-07-19: "log when another app is selected instead of
       // preferred".) Log.txt already carries the reason via airport_overrides.
-      if (ofp.preferred_approach_designator.empty()) {
+      // Skipped under force-ILS: the airport+.json "ideal" is by definition not
+      // the ILS there, so the note would fire on every arrival claiming the
+      // preferred approach was weather-blocked when the pilot simply asked for
+      // the ILS. [C. P. Potter]
+      if (ofp.preferred_approach_designator.empty() && !settings::force_ils()) {
         const std::string ideal = airport_overrides::preferred_approach(
             ofp.destination_icao, dest_runway, 1.0e9f, 1.0e9f);
         if (!ideal.empty() && ideal != appr.designator) {

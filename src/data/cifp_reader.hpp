@@ -162,6 +162,14 @@ ApproachInfo approach_by_designator(const std::string &cifp_dir,
                                      const std::string &icao,
                                      const std::string &designator);
 
+// Best ILS/LOC-type approach published for dest_runway ('I' or 'S' designators),
+// or an empty ApproachInfo when the runway has none. Backs the "force ILS when
+// available" setting, which bypasses both the weather gate and the RNAV-first
+// ranking in best_approach(). Ties break on the variant letter, Z-first like
+// best_approach(). dest_runway is without the "RW" prefix (e.g. "04L").
+ApproachInfo ils_approach(const std::string &cifp_dir, const std::string &icao,
+                          const std::string &dest_runway);
+
 // True if the approach terminates at the runway threshold (a straight-in
 // instrument approach to a DA -> "report established"); false if it has no
 // runway leg (MDA / visual-final approach flown visually on the last segment,

@@ -115,6 +115,17 @@ void set_hold_enabled(bool v);
 bool shortcut_always();
 void set_shortcut_always(bool v);
 
+// Force the ILS approach whenever the arrival runway has one published: skips
+// both the airport+.json weather gate and the RNAV-first ranking in
+// cifp_reader::best_approach(). Falls through to the normal chain on a runway
+// with no ILS. Takes precedence over the whole selection chain, including
+// SimBrief's preferred_approach_designator -- only the ENROUTE part of an OFP is
+// consumed (route fixes, cruise level), so that field is never populated on a
+// real flight; the atc_ifr_repl harness is the only writer. Default false.
+// (C. P. Potter)
+bool force_ils();
+void set_force_ils(bool v);
+
 // SimBrief pilot ID (numeric, 0 = not configured).
 int simbrief_pilot_id();
 void set_simbrief_pilot_id(int id);

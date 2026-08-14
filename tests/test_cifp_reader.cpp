@@ -156,6 +156,39 @@ TEST_CASE("cifp: approach_suffix extracts trailing letter", "[cifp][approach]") 
   CHECK(cifp_reader::approach_suffix("")      == 0);
 }
 
+// ── ils_approach: backs the "force ILS if available" setting ──────────
+// The setting short-circuits the whole approach-selection chain when the
+// ARRIVAL RUNWAY has an ILS published, and must stay out of the way when it
+// does not. Fixture: LFMN.dat, 04L with ILS + RNAV, 22L with RNAV/VOR only.
+
+TEST_CASE("cifp: ils_approach picks the Z variant on a runway with an ILS",
+          "[cifp][approach][ils]") {
+  reset();
+  const auto a = cifp_reader::ils_approach(kCifpDir, "LFMN", "04L");
+  CHECK(a.designator == "I04LZ"); // Z beats Y, same tie-break as best_approach
+  CHECK(a.type_str == "ILS");
+  CHECK(a.runway == "04L");
+}
+
+TEST_CASE("cifp: ils_approach returns nothing on a runway with no ILS",
+          "[cifp][approach][ils]") {
+  reset();
+  // 22L publishes RNAV (R22LD/R22LZ) and VOR/DME (D22LB) only. Force-ILS must
+  // fall through here rather than dragging in the OTHER end's ILS -- landing
+  // 22L on the 04L localizer would be the worst possible failure mode.
+  const auto a = cifp_reader::ils_approach(kCifpDir, "LFMN", "22L");
+  CHECK(a.designator.empty());
+  CHECK(a.type_str.empty());
+}
+
+TEST_CASE("cifp: ils_approach is empty for unknown airport / empty inputs",
+          "[cifp][approach][ils]") {
+  reset();
+  CHECK(cifp_reader::ils_approach(kCifpDir, "ZZZZ", "04L").type_str.empty());
+  CHECK(cifp_reader::ils_approach(kCifpDir, "LFMN", "").type_str.empty());
+  CHECK(cifp_reader::ils_approach("", "LFMN", "04L").type_str.empty());
+}
+
 // ── star_waypoints: STAR-lookahead constraint scan (P0-A) ─────────────
 // build_descent_clearance's STAR-lookahead clears the initial descent to
 // the first "at or below" constraint on the STAR (LUVOB FL090 on SALE3P)

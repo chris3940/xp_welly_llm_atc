@@ -1,0 +1,24 @@
+/*
+ * Minimal synthetic CIFP fixture for cifp_reader::ils_approach() tests.
+ *
+ * Hand-written, NOT extracted from any navdata product: only the approach
+ * DESIGNATORS and runway identifiers are real (they are factual procedure
+ * names); every leg field below is placeholder filler, and no altitude,
+ * course, distance or fix sequence here reflects a published chart.
+ *
+ * Covers the two cases the "force ILS if available" setting has to get right:
+ *   RWY 04L -- has ILS (I04LY, I04LZ) alongside RNAV (R04LA, R04LZ)
+ *              -> force-ILS must pick I04LZ (Z beats Y, ICAO Z-first convention)
+ *   RWY 22L -- RNAV and VOR/DME only, NO ILS
+ *              -> force-ILS must return nothing and let the normal chain run
+ *
+ * One leg per procedure is enough: ils_approach() only reads the designator
+ * field (column 3) and needs no leg geometry.
+ */
+APPCH:010,A,I04LY,FIXAA,FIXAA,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,    ,    , ,     ,     ,     , ,   ,    ,   , , , , , ,0,D,S;
+APPCH:010,A,I04LZ,FIXAA,FIXAA,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,    ,    , ,     ,     ,     , ,   ,    ,   , , , , , ,0,D,S;
+APPCH:010,A,R04LA,FIXAA,FIXAA,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,    ,    , ,     ,     ,     , ,   ,    ,   , , , , , ,0,D,S;
+APPCH:010,A,R04LZ,FIXAA,FIXAA,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,    ,    , ,     ,     ,     , ,   ,    ,   , , , , , ,0,D,S;
+APPCH:010,A,R22LD,FIXBB,FIXBB,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,    ,    , ,     ,     ,     , ,   ,    ,   , , , , , ,0,D,S;
+APPCH:010,A,R22LZ,FIXBB,FIXBB,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,    ,    , ,     ,     ,     , ,   ,    ,   , , , , , ,0,D,S;
+APPCH:010,A,D22LB,FIXBB,FIXBB,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,    ,    , ,     ,     ,     , ,   ,    ,   , , , , , ,0,D,S;

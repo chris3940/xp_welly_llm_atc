@@ -2560,6 +2560,16 @@ static void draw_ifr_tab() {
                         "fix, en-route fix, or the nearest approach IAF) fires at "
                         "100%% instead of the default ~20%% chance. Directs still "
                         "respect track saving and a max 3-degree descent.");
+
+    bool force_ils = settings::force_ils();
+    if (ImGui::Checkbox("FORCE ILS IF AVAILABLE", &force_ils))
+      settings::set_force_ils(force_ils);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("When ON, ATC assigns the ILS whenever the ARRIVAL RUNWAY "
+                        "has one published, ignoring the weather-gated choice in "
+                        "airport+.json and the RNAV-first ranking -- you will hear "
+                        "\"expect ILS ... approach runway NN\". A runway with no "
+                        "ILS is unaffected and keeps the normal selection.");
   }
   ImGui::Spacing();
 
