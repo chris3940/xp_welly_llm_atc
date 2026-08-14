@@ -8910,6 +8910,49 @@ static bool poll_descend_to_enter_tma(const xplane_context::XPlaneContext &ctx,
   if (!s_assigned_dest_icao.empty() && !on_destination_terminal(ctx) &&
       !dest_terminal_tma_below(ctx))
     return false;
+
+  // POSITIVE identification of the TMA we are about to descend INTO. The guard
+  // above is not sufficient on its own: on_destination_terminal() returns its
+  // permissive "can't tell -> true" whenever the aircraft sits ABOVE every
+  // openair volume, which at enroute levels is the normal case (the export has
+  // vertical gaps and carries no class E at all). The clearance below then
+  // descends into whatever TMA happens to lie under the aircraft.
+  //
+  // LFLP -> EDLW 2026-08-14, near Nancy at FL280 and ~200 NM from Dortmund:
+  //     [acc] ... (openair empty at 48.5916,6.3817 28000ft)
+  //     [dbg dte] tma_ceil=7500 target=7000 alt=27963 cleared=18000 -> FIRE
+  //     IFR descent: descend-to-enter terminal area, TMA ceil 7500 -> FL070
+  //     IFR descent: descend-to-enter terminal area, TMA ceil 6500 -> FL060
+  // Three clearances in 49 s took the aircraft from FL280 to FL060, and it then
+  // crossed Luxembourg and Belgium at 6000 ft. Same permissive-fallback trap
+  // that build 165 had to work around in poll_acc_sector_change; the fix was
+  // never carried here.
+  //
+  // So bound it by DISTANCE: a terminal area is never 100 NM from its own field.
+  //
+  // Deliberately NOT a name comparison between the local TMA and the
+  // destination's. That was tried first and is wrong: it blocks the
+  // Lyon-over-Chambery case this feature exists for -- 32 NM from LFLP the
+  // lowest-floor TMA overhead is LYON while the destination's is CHAMBERY, and
+  // descending to enter Chambery's shelf from under Lyon's is exactly the
+  // legitimate behaviour (see dest_terminal_tma_below). Measured against the
+  // real airspace.txt, distance alone separates the cases cleanly: LFLP 0 NM,
+  // Lyon-over-Chambery 32 NM and LFMN 18 NM all pass, the Nancy misfire at
+  // 186 NM does not. [C. P. Potter]
+  if (!s_assigned_dest_icao.empty()) {
+    const auto dpos = xplane_context::airport_pos_for(s_assigned_dest_icao);
+    if (dpos.first != 0.0 || dpos.second != 0.0) {
+      const double d_nm = traffic_geometry::distance_nm(
+          ctx.latitude, ctx.longitude, dpos.first, dpos.second);
+      constexpr double kMaxTerminalNm = 100.0;
+      if (d_nm > kMaxTerminalNm) {
+        logging::debug("[dbg dte] %.0f NM from %s -- too far for a terminal-area"
+                       " descent",
+                       d_nm, s_assigned_dest_icao.c_str());
+        return false;
+      }
+    }
+  }
   const int tma_ceil =
       openair_db::terminal_tma_ceiling(ctx.latitude, ctx.longitude);
   int target_ft = (tma_ceil > 1000) ? ((tma_ceil - 100) / 1000) * 1000 : 0;
