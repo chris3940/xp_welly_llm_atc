@@ -128,6 +128,19 @@ Germany).
   controller has no label yet.
 - The garble replies ("your transmission was garbled, say again") are plain
   language rather than standard phraseology; `SAY AGAIN` is standard and present.
+- **Sector handoffs fire on crossing the boundary, not before it.** On the
+  Annecy departure the transfer to Geneva came at 11 542 ft against a sector
+  floor of 11 500 ft — 42 ft *after* entry. Detection is exact; the timing is
+  reactive by design. That margin happened to be small because the climb left
+  the lower sector's footprint before reaching its 9 500 ft floor; a track that
+  stays over it would enter 2 000 ft earlier and be handed off just as late. Real ATC hands off while the aircraft is still a minute or
+  two out, so the pilot is already on the new frequency when they cross.
+  Related: on that same departure the FL130 clearance is issued by Chambéry for a
+  level that lies inside Geneva's airspace. That is correct and deliberate — the
+  SID publishes a minimum of FL130 at a fix 7 NM out, and Chambéry's own airspace
+  tops at 9 500 ft, so no level it "owns" could satisfy the procedure. A published
+  SID crossing into a neighbouring TMA implies coordination, which is what real
+  ATC does.
 - Upper-airspace naming is corrected for France only. Other countries whose
   navdata collapses the UIR into a single country-level entry will still be
   announced by that name, and no country reproduces handoffs between sectors of
