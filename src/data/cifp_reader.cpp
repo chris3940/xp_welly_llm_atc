@@ -1766,13 +1766,23 @@ std::vector<StarWaypoint> approach_procedure_waypoints(
       if (trim(f[3]) != transition_ident) continue;
       if (path_term == "FM") continue; // Fix-to-Manual = radar vector, no fixed endpoint
       if (path_term == "IF") continue; // IAF entry, already covered by STAR
-    } else if (rt == "R") {
-      // Final approach body: blank transition ident (main approach, not a named transition).
+    } else {
+      // Final approach body: blank transition ident (main approach, not a named
+      // transition).
+      //
+      // The route type here is the APPROACH TYPE letter, not a fixed "R":
+      // I = ILS, R = RNAV/RNP, D = VOR/DME, L = LOC, N = NDB, ... Only "R" was
+      // accepted, so every NON-RNAV approach silently lost its ENTIRE final
+      // segment -- no FAF, no MAP, only the two transition legs. EDLW ILS 06,
+      // real vol 2026-08-14: "IAF DOR -> 2 approach waypoints" (DOR + CF06),
+      // while KOLOT (route type I, descriptor "E  F" = FAF) and RW06 ("G  M" =
+      // MAP) were dropped. With no FAF the Tower handoff, which triggers there,
+      // could never fire and the flight reached the ground still on Langen.
+      // RNAV arrivals hid this because they are the only type that matched.
+      // [C. P. Potter]
       if (!trim(f[3]).empty()) continue;
       if (path_term == "IF") continue; // IF entry = BISBO, already in transition above
       if (is_holding(path_term)) continue;
-    } else {
-      continue;
     }
 
     std::string wpt = trim(f[4]);
@@ -1783,9 +1793,11 @@ std::vector<StarWaypoint> approach_procedure_waypoints(
     int seq = 0;
     try { seq = std::stoi(seq_str.substr(6)); } catch (...) { continue; }
 
-    // Distinguish A/R records by an offset so they sort correctly: R records
-    // always come after the last A record in the procedure sequence.
-    if (rt == "R") seq += 10000;
+    // Distinguish transition from final-body records by an offset so they sort
+    // correctly: the final approach body always comes after the last transition
+    // record in the procedure sequence. Keyed on "not a transition" rather than
+    // on "R", for the same reason as the branch above.
+    if (rt != "A") seq += 10000;
 
     std::string alt_desc = trim(f[22]);
     CifpAlt     alt      = parse_alt(f[23]);

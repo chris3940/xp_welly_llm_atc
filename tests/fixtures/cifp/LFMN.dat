@@ -22,3 +22,16 @@ APPCH:010,A,R04LZ,FIXAA,FIXAA,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,  
 APPCH:010,A,R22LD,FIXBB,FIXBB,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,    ,    , ,     ,     ,     , ,   ,    ,   , , , , , ,0,D,S;
 APPCH:010,A,R22LZ,FIXBB,FIXBB,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,    ,    , ,     ,     ,     , ,   ,    ,   , , , , , ,0,D,S;
 APPCH:010,A,D22LB,FIXBB,FIXBB,LF,D,B,E   , ,   ,IF, , , , , ,      ,    ,    ,    ,    , ,     ,     ,     , ,   ,    ,   , , , , , ,0,D,S;
+/*
+ * ILS 04L final-approach body, added 2026-08-14 for the non-RNAV regression.
+ * Same SHAPE as the real EDLW ILS 06 that exposed the bug: an "A" transition
+ * (route type A, named transition ident) followed by a final body whose route
+ * type is the APPROACH TYPE letter "I" -- not "R". Descriptor codes carry the
+ * roles: "E  I" = IAF, "E  F" = FAF, "G  M" = MAP. Idents and the I04LZ
+ * designator are real; every other field is placeholder.
+ */
+APPCH:010,A,I04LZ,MUS,MUS,LF,P,C,V  C, ,   ,TF, , , , , , , , , , ,+,05000,,     , , , , , , , , ,0,D,S, ;
+APPCH:020,A,I04LZ,MUS,IF04L,LF,P,C,EE  , ,   ,TF, , , , , , , , , , ,+,04000,,     , , , , , , , , ,0,D,S, ;
+APPCH:010,I,I04LZ, ,IF04L,LF,P,C,E  I, ,   ,IF, , , , , , , , , , ,J,04000,04000,     , , , , , , , , ,0,D,S, ;
+APPCH:020,I,I04LZ, ,FN04L,LF,P,C,E  F, ,   ,CF, , , , , , , , , , ,H,02000,02000,     , , , , , , , , ,0,D,S, ;
+APPCH:030,I,I04LZ, ,RW04L,LF,P,C,G  M, ,   ,CF, , , , , , , , , , , ,00060,,     , , , , , , , , ,0,D,S, ;

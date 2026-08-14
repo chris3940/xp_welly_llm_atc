@@ -189,6 +189,57 @@ TEST_CASE("cifp: ils_approach is empty for unknown airport / empty inputs",
   CHECK(cifp_reader::ils_approach("", "LFMN", "04L").type_str.empty());
 }
 
+// ── approach_procedure_waypoints: the final body of a NON-RNAV approach ──
+// The route type of an APPCH record is the APPROACH TYPE letter (I = ILS,
+// R = RNAV, D = VOR/DME, L = LOC, N = NDB), not a fixed "R". The reader used to
+// accept only "R", so every non-RNAV approach silently lost its whole final
+// segment: EDLW ILS 06 yielded just the two transition legs, the FAF index came
+// out -1, and the Tower handoff -- which triggers at the FAF -- could never fire
+// (real vol 2026-08-14). RNAV arrivals hid it because they were the only match.
+
+TEST_CASE("cifp: ILS approach keeps its final segment, not just the transition",
+          "[cifp][approach][ils]") {
+  reset();
+  const auto wps = cifp_reader::approach_procedure_waypoints(
+      kCifpDir, "LFMN", "I04LZ", "MUS");
+  // Transition (IF04L via the MUS transition) plus the final body. Without the
+  // fix only the transition legs survived.
+  REQUIRE(wps.size() >= 3);
+  std::vector<std::string> idents;
+  for (const auto &w : wps)
+    idents.push_back(w.ident);
+  const auto has = [&](const std::string &s) {
+    return std::find(idents.begin(), idents.end(), s) != idents.end();
+  };
+  CHECK(has("FN04L")); // the FAF -- descriptor "E  F"
+  CHECK(has("RW04L")); // the MAP  -- descriptor "G  M"
+}
+
+TEST_CASE("cifp: the ILS final body sorts after the transition",
+          "[cifp][approach][ils]") {
+  reset();
+  const auto wps = cifp_reader::approach_procedure_waypoints(
+      kCifpDir, "LFMN", "I04LZ", "MUS");
+  REQUIRE(wps.size() >= 3);
+  // The +10000 sequence offset must key on "not a transition", not on "R", or
+  // an ILS final body interleaves with its own transition. Expected order:
+  // MUS, IF04L (transition) then FN04L, RW04L (final body).
+  CHECK(wps.front().ident == "MUS");
+  CHECK(wps.back().ident == "RW04L");
+}
+
+TEST_CASE("cifp: the MAP is flagged on a non-RNAV approach",
+          "[cifp][approach][ils]") {
+  reset();
+  const auto wps = cifp_reader::approach_procedure_waypoints(
+      kCifpDir, "LFMN", "I04LZ", "MUS");
+  bool map_seen = false;
+  for (const auto &w : wps)
+    if (w.ident == "RW04L")
+      map_seen = w.is_map;
+  CHECK(map_seen);
+}
+
 // ── star_waypoints: STAR-lookahead constraint scan (P0-A) ─────────────
 // build_descent_clearance's STAR-lookahead clears the initial descent to
 // the first "at or below" constraint on the STAR (LUVOB FL090 on SALE3P)
