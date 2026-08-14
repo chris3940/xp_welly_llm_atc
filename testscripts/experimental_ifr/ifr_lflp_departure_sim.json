@@ -50,7 +50,7 @@
       "expect_state": "IFR/PREDEP_CLEARANCE"
     },
     {
-      "note": "2 - Readback of the clearance -> startup approved. The squawk MUST match the one ATC assigned: readback verification (shipped after this scenario was written) rejects a wrong code with \"negative, squawk NNNN, readback\". generate_squawk() uses std::rand(), which atc_repl never seeds, so the code is deterministic here (1724); the plugin seeds from the clock in main.cpp and will differ in sim.",
+      "note": "2 - Readback of the clearance -> startup approved. The squawk MUST match the one ATC assigned: readback verification (shipped after this scenario was written) rejects a wrong code with \"negative, I say again, squawk NNNN\". generate_squawk() uses std::rand(), which atc_repl never seeds, so the code is deterministic here (1724); the plugin seeds from the clock in main.cpp and will differ in sim.",
       "text": "Fox Golf Bravo Charlie Delta cleared to Nice as filed via ODIK2A initial climb six thousand five hundred squawk one seven two four QNH one zero one three",
       "expect": "startup approved",
       "expect_state": "IFR/CLEARED"

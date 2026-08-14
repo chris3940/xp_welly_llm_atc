@@ -405,6 +405,16 @@ static bool readback_contains(const std::string &norm, int value) {
   return false;
 }
 
+// Wording of every Mismatch::correction below: ICAO's correction procedure for an
+// incorrect read-back is the word NEGATIVE, then I SAY AGAIN, then the correct
+// version -- e.g. "negative, I say again, flight level one one zero". These used
+// to read "negative, flight level one one zero, readback", which is wrong twice
+// over: "I say again" was missing, and the trailing "readback" does not belong to
+// a correction at all (READ BACK is a separate instruction, and a level clearance
+// must be read back anyway). Verified against ICAO Doc 9432 / Annex 10 Vol II via
+// SKYbrary "Standard Phraseology" and the IVAO readback documentation, 2026-08-14
+// (user flagged it). The callsign and full stop are added by the caller.
+// [C. P. Potter]
 std::vector<Mismatch> check(const std::string &clearance_text,
                             const std::string &readback_text) {
   std::vector<Mismatch> out;
@@ -424,8 +434,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
       m.field    = "runway";
       m.expected = std::to_string(cl_rwy);
       m.stated   = rb_rwy >= 0 ? std::to_string(rb_rwy) : "";
-      m.correction = "negative, runway " + runway_to_speech(cl_rwy) +
-                     ", readback";
+      m.correction = "negative, I say again, runway " + runway_to_speech(cl_rwy);
       out.push_back(std::move(m));
     }
   }
@@ -441,8 +450,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
       m.field    = "fl";
       m.expected = std::to_string(cl_fl);
       m.stated   = rb_fl > 0 ? std::to_string(rb_fl) : "";
-      m.correction = "negative, flight level " + fl_to_speech(cl_fl) +
-                     ", readback";
+      m.correction = "negative, I say again, flight level " + fl_to_speech(cl_fl);
       out.push_back(std::move(m));
     }
   }
@@ -462,7 +470,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
         m.stated   = rb_alt > 0 ? std::to_string(rb_alt) : "";
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%d feet", cl_alt);
-        m.correction = std::string("negative, ") + buf + ", readback";
+        m.correction = std::string("negative, I say again, ") + buf;
         out.push_back(std::move(m));
       }
     }
@@ -477,7 +485,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
       m.field      = "freq";
       m.expected   = cl_freq;
       m.stated     = rb_freq;
-      m.correction = "negative, " + cl_freq + ", readback";
+      m.correction = "negative, I say again, " + cl_freq;
       out.push_back(std::move(m));
     }
   }
@@ -491,7 +499,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
       m.field      = "squawk";
       m.expected   = cl_sq;
       m.stated     = rb_sq;
-      m.correction = "negative, squawk " + cl_sq + ", readback";
+      m.correction = "negative, I say again, squawk " + cl_sq;
       out.push_back(std::move(m));
     }
   }
@@ -509,7 +517,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
       m.stated   = rb_spd > 0 ? std::to_string(rb_spd) : "";
       char buf[40];
       std::snprintf(buf, sizeof(buf), "%d knots or less", cl_spd);
-      m.correction = std::string("negative, ") + buf + ", readback";
+      m.correction = std::string("negative, I say again, ") + buf;
       out.push_back(std::move(m));
     }
   }
