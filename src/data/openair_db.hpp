@@ -83,6 +83,13 @@ int ctr_ceiling_ft(double lat, double lon);
 // low-ceilinged terminal TMA can never enter it otherwise.
 int terminal_tma_ceiling(double lat, double lon);
 
+// Same selection as terminal_tma_ceiling, but returns the whole entry instead of
+// just its ceiling -- the caller often needs the volume's NAME (to resolve which
+// facility owns it) and its FLOOR. An empty name means no TMA over the point.
+// The departure climb ladder uses this: a ceiling alone cannot tell you whether
+// the volume belongs to the controller currently working the aircraft.
+AirspaceEntry terminal_tma(double lat, double lon);
+
 // Highest TMA ceiling over the point: the MAX ceiling across every TMA block
 // (stacked sub-volumes) whose polygon contains (lat, lon). Unlike
 // terminal_tma_ceiling (which returns the lowest-floor block's ceiling, for

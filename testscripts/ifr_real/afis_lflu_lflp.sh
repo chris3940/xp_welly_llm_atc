@@ -246,5 +246,66 @@ then echo "  PASS  no IFR/RADAR_CONTACT entry routes to the dead-end IFR/EN_ROUT
 else echo "  FAIL  IFR/RADAR_CONTACT still routes to IFR/EN_ROUTE"; fails=$((fails+1)); fi
 
 echo
+# Regression guard (real vol LFLP->EDLW via VENA2A, 2026-08-14): the departure climb
+# must not be cleared into a NEIGHBOUR's TMA by the controller working the aircraft,
+# and entering that TMA must trigger the sector handoff.
+#   - The 10 NM probe read a ceiling and never asked whose volume it was. At LP610
+#     (7.3 NM) the lowest-floor TMA is GENEVA TMA SECTOR 6 (8500-19500), so step1 came
+#     out FL190 and Chambery Approach issued "climb flight level 190" at 6467 ft --
+#     11000 ft inside Geneva's airspace.
+#   - That bad step1 then forced step2 to 0, which killed Phase 2.8's `step2_usable`
+#     guard, and the step1-2000 gate blinded the Phase 3 airspace scan below 17000 ft.
+#     Result: the whole climb to FL280 on Chambery, Geneva never seen.
+# Asserts the ownership test fires and the handoff resolves to Geneva at ~FL95, well
+# before the aircraft reaches step1.
+echo "=== SID climb must not be cleared into a foreign TMA (LFLP VENA2A) ==="
+ven='set airport LFLP
+set dest EDLW
+set cruise 28000
+set ifr_sid VENA2A
+set ifr_sid_last_fix VENAT
+set airport_lat 45.9309
+set airport_lon 6.1055
+set runway 22
+set lat 45.9114
+set lon 6.0709
+set alt 3548
+set pa 3392
+set agl 2000
+set on_ground 0
+set gs 220
+set vs 1800
+set heading 30
+set com 118.200
+set freq_type TOWER
+set state IFR/DEPARTURE_CLEARED
+say November Romeo Charlie passing 3000 feet
+poll 5
+set com 121.205
+set freq_type APPROACH
+set lat 45.960
+set lon 6.140
+set alt 6500
+set pa 6500
+set agl 5000
+say Chambery Approach, November Romeo Charlie, six thousand five hundred feet
+poll 5
+set lat 46.0214
+set lon 6.2167
+set alt 9500
+set pa 9500
+poll 5
+quit'
+run "$ven"
+want   "aircraft inside a foreign volume is detected" \
+       "inside 'GENEVA TMA SECTOR 6' owned by Geneva Approach, not Chambery Approach"
+want   "handoff resolves LATERALLY to the volume's owner" \
+       "sector handoff -> Geneva Approach .* \(openair 'GENEVA TMA SECTOR 6', lateral\)"
+want   "handoff fires on ENTERING the TMA (~FL95), not at step1" \
+       "sector handoff -> Geneva Approach .* at 9[0-9]{3} ft MSL"
+reject "Chambery never clears to the top of Geneva's TMA (the FL190 bug)" \
+       "IFR SID climb: FL190 \(step1\)"
+
+echo
 if [[ $fails -eq 0 ]]; then echo "AFIS scenario: ALL PASS"; exit 0
 else echo "AFIS scenario: $fails FAILURE(S)"; exit 1; fi

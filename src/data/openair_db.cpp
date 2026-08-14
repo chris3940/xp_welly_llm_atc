@@ -346,11 +346,11 @@ int ctr_ceiling_ft(double lat, double lon) {
   return 0;
 }
 
-int terminal_tma_ceiling(double lat, double lon) {
+AirspaceEntry terminal_tma(double lat, double lon) {
   if (!s_ready)
-    return 0;
+    return {};
   int best_floor = 1000000000; // base (lowest-floor) TMA over the point
-  int ceil_at_best = 0;        // its ceiling; ties break to the higher ceiling
+  const Entry *best = nullptr; // ties on floor break to the higher ceiling
   for (const auto &e : s_entries) {
     if (e.ac_class != AirspaceClass::TMA)
       continue;
@@ -362,13 +362,20 @@ int terminal_tma_ceiling(double lat, double lon) {
       continue;
     if (!point_in_polygon(lat, lon, e.polygon))
       continue;
-    if (e.floor_ft < best_floor ||
-        (e.floor_ft == best_floor && e.ceiling_ft > ceil_at_best)) {
+    if (best == nullptr || e.floor_ft < best_floor ||
+        (e.floor_ft == best_floor && e.ceiling_ft > best->ceiling_ft)) {
       best_floor = e.floor_ft;
-      ceil_at_best = e.ceiling_ft;
+      best = &e;
     }
   }
-  return ceil_at_best;
+  if (best == nullptr)
+    return {};
+  return {best->name, best->ac_class, best->floor_ft, best->ceiling_ft,
+          best->freq_khz};
+}
+
+int terminal_tma_ceiling(double lat, double lon) {
+  return terminal_tma(lat, lon).ceiling_ft;
 }
 
 int highest_tma_ceiling(double lat, double lon) {

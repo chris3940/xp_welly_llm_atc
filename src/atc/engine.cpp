@@ -306,6 +306,29 @@ static float approach_gate_ceiling_ft(const xplane_context::XPlaneContext &ctx) 
                                            : ctx.cloud_base_ft_msl;
 }
 
+// Do two controller labels name the same facility? Compares the leading city
+// token only ("Geneva Approach" vs "Geneva Radar" -> same; "Geneva Approach" vs
+// "Chambery Approach" -> different), case-insensitively. The suffix varies with
+// the position (Approach / Departure / Radar / Control) while the city is what
+// identifies the authority, so the suffix must not make two labels differ.
+// Either side empty -> treated as the SAME, i.e. "unknown, do not act": callers
+// use this to REFUSE an action, and an unknown owner must never trigger one.
+static bool same_facility(const std::string &a, const std::string &b) {
+  auto city = [](const std::string &s) {
+    std::string out;
+    for (char c : s) {
+      if (c == ' ')
+        break;
+      out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return out;
+  };
+  const std::string ca = city(a), cb = city(b);
+  if (ca.empty() || cb.empty())
+    return true;
+  return ca == cb;
+}
+
 // Force-ILS override for the approach-selection chain (Settings toggle). Returns
 // the runway's published ILS so the caller can short-circuit the rest of its
 // chain, or an empty ApproachInfo when the toggle is off or the runway has no
@@ -4379,6 +4402,11 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     //           the last level below the FIR/Radar floor. Both data-driven, mirrored.
     int probe_ceil = 0; // terminal TMA ceiling at the probe point (ft)
     int cta_ceil = 0;   // ceiling of the volume stacked directly above it (ft)
+    // Set when the probed TMA belongs to a DIFFERENT facility than the one
+    // working the aircraft: then its ceiling is not ours to clear to, and its
+    // FLOOR becomes the cap instead. 0 = probe volume is our own (or unknown).
+    int foreign_tma_floor = 0;
+    std::string foreign_tma_name;
     if (openair_db::ready() &&
         (s_departure_apt_lat != 0.0 || s_departure_apt_lon != 0.0)) {
       for (const auto &rf : s_route_fixes) {
@@ -4390,8 +4418,39 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
           continue; // still the low field CTR/TMA sector
         if (d > 40.0)
           break; // past the terminal area -> no useful terminal ceiling
-        probe_ceil = openair_db::terminal_tma_ceiling(rf.lat, rf.lon);
+        const openair_db::AirspaceEntry tma =
+            openair_db::terminal_tma(rf.lat, rf.lon);
+        probe_ceil = tma.ceiling_ft;
         if (probe_ceil > 1500) {
+          // OWNERSHIP TEST. The probe used to read a ceiling and never ask whose
+          // volume it was, so a departure whose SID heads into the NEIGHBOUR's
+          // TMA was cleared to just below THAT TMA's top -- by a controller with
+          // no authority there. LFLP VENA2A 2026-08-14: the probe found GENEVA
+          // TMA SECTOR 6 (8500-19500) and Chambery Approach issued "climb flight
+          // level 190" at 6467 ft, 11000 ft inside Geneva's airspace. Six of the
+          // eight fields in this region have a foreign TMA in the 5-40 NM probe
+          // band, so this is a class of bug, not an LFLP quirk.
+          //
+          // When the volume is foreign, the correct cap is its FLOOR: hold below
+          // the shelf until its owner takes the aircraft and re-clears. That is
+          // the departure mirror of the arrival "descend to enter the TMA" model,
+          // and the data-driven form of the hand-written LFLP west hold in
+          // airport+.json. [C. P. Potter]
+          if (!tma.name.empty() && !s_current_controller_label.empty()) {
+            std::string owner;
+            float owner_mhz = 0.0f;
+            if (resolve_sector_controller(tma, /*terminal=*/true, &owner,
+                                          &owner_mhz) &&
+                !same_facility(owner, s_current_controller_label)) {
+              foreign_tma_floor = tma.floor_ft;
+              foreign_tma_name  = tma.name;
+              logging::info(
+                  "IFR SID climb: probe TMA '%s' (%d-%dft) belongs to %s, not %s "
+                  "-- capping step1 below its floor",
+                  tma.name.c_str(), tma.floor_ft, tma.ceiling_ft, owner.c_str(),
+                  s_current_controller_label.c_str());
+            }
+          }
           // Volume stacked directly ABOVE the TMA (the "high" CTA): sample just
           // above the TMA ceiling. Its ceiling is the FIR/Radar floor (~FL145).
           const openair_db::AirspaceEntry above =
@@ -4402,10 +4461,40 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
         break; // first fix beyond 5 NM is the ~10 NM probe point
       }
     }
+    // A foreign TMA ahead invalidates BOTH data-driven steps: step1 is capped at
+    // its floor below, and the "CTA stacked above it" is even further outside our
+    // controller's authority.
+    if (foreign_tma_floor > 0)
+      cta_ceil = 0;
 
     int step1 = kDefaultDepStep1Ft; // FL110 fallback
     bool from_probe = false;
-    if (probe_ceil > 1500) {
+    const char *foreign_mode = nullptr;
+    if (foreign_tma_floor > 0) {
+      // Probe volume belongs to someone else -- its CEILING is never a valid
+      // clearance for the controller working us. What replaces it depends on
+      // whether the SID lets us stay underneath:
+      //
+      //   SID floor <= TMA floor  -> hold below the shelf (foreign floor), get
+      //       handed off, let the owner re-clear. Annecy westbound.
+      //   SID floor >  TMA floor  -> the PROCEDURE obliges entry, so holding
+      //       under the shelf would bust the SID's own terrain minimum. Clear to
+      //       exactly the published floor, not one foot more, and rely on the
+      //       handoff at the boundary. LFLP VENA2A publishes +FL130 at LP610
+      //       while GENEVA TMA SECTOR 6 starts at 8500 ft: FL130 it is.
+      const int sid_floor = sid_climb_floor_ft(ctx);
+      const int under = fl_below(foreign_tma_floor);
+      if (sid_floor > 0 && sid_floor > under) {
+        step1 = sid_floor;
+        foreign_mode = "foreign-TMA/SID-floor";
+      } else if (under > static_cast<int>(dep_field_elev_ft) && under >= 3000) {
+        step1 = under;
+        foreign_mode = "foreign-TMA/hold-below";
+      }
+      // Neither usable (shelf too low to be a step) -> keep the FL110 fallback.
+      if (foreign_mode != nullptr && step1 >= cruise_ft)
+        step1 = kDefaultDepStep1Ft; // clamped again below; keep the ladder sane
+    } else if (probe_ceil > 1500) {
       const int fl = fl_below(probe_ceil);
       // Plausible only if above the field and below cruise.
       if (fl > static_cast<int>(dep_field_elev_ft) && fl < cruise_ft &&
@@ -4471,7 +4560,9 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
                   "step2 %s%s) dep=%s -> step1 FL%d step2 FL%d hold %.0f NM "
                   "(sid_min=%d cruise=%d)",
                   probe_ceil, cta_ceil,
-                  from_probe ? "data-driven" : "FL110-fallback",
+                  foreign_mode != nullptr
+                      ? foreign_mode
+                      : (from_probe ? "data-driven" : "FL110-fallback"),
                   step2_from_probe ? "data-driven" : "FL140-fallback",
                   has_override ? "+airport+.json" : "", s_departure_apt_id.c_str(),
                   s_sid_step1_alt_ft / 100, s_sid_step2_alt_ft / 100,
@@ -4511,10 +4602,42 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
   const bool step2_usable_ph28 =
       s_sid_step2_alt_ft > 0 && s_sid_step2_alt_ft < sid2_cruise_fl_ph28 * 100 &&
       s_sid_step2_alt_ft >= sid_climb_floor_ft(ctx);
+  // ESCAPE HATCH -- the aircraft is already inside a volume owned by a DIFFERENT
+  // facility than the one working it. Then neither of the two ladder-shaped
+  // guards below is legitimate: `step2_usable_ph28` makes the handoff depend on
+  // a second climb step existing, and the step1-500 altitude gate makes it
+  // depend on the level we happen to have been cleared to. Being in someone
+  // else's airspace is a fact about POSITION; the transfer is due regardless of
+  // where the climb ladder stands. LFLP VENA2A 2026-08-14: step1 came out FL190
+  // (see the ownership test in the ladder), which forced step2 to 0 and killed
+  // `step2_usable_ph28`, so Phase 2.8 was never even evaluated -- the aircraft
+  // flew the whole climb to FL280 inside GENEVA TMA SECTOR 6 still talking to
+  // Chambery. [C. P. Potter]
+  const bool in_foreign_volume = [&] {
+    if (!openair_db::ready() || s_current_controller_label.empty())
+      return false;
+    const openair_db::AirspaceEntry own =
+        openair_db::find_enclosing(ctx.latitude, ctx.longitude, openair_alt(ctx));
+    if (own.name.empty())
+      return false;
+    std::string owner;
+    float owner_mhz = 0.0f;
+    if (!resolve_sector_controller(own, /*terminal=*/true, &owner, &owner_mhz))
+      return false;
+    if (same_facility(owner, s_current_controller_label))
+      return false;
+    logging::info("IFR SID climb: inside '%s' owned by %s, not %s -- sector "
+                  "handoff due at %.0f ft MSL",
+                  own.name.c_str(), owner.c_str(),
+                  s_current_controller_label.c_str(), ctx.altitude_ft_msl);
+    return true;
+  }();
   if (!s_sid_radar_handoff_issued && !s_sid_upper_handoff_issued &&
       s_sid_initialized && s_sid_step1_issued && !s_sid_step2_issued &&
-      step2_usable_ph28 && s_sid_pending_climb_ft == 0 && openair_db::ready() &&
-      static_cast<int>(ctx.altitude_ft_msl) >= s_sid_step1_alt_ft - 500) {
+      s_sid_pending_climb_ft == 0 && openair_db::ready() &&
+      (in_foreign_volume ||
+       (step2_usable_ph28 &&
+        static_cast<int>(ctx.altitude_ft_msl) >= s_sid_step1_alt_ft - 500))) {
     const float active_com_freq_mhz =
         (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
     // Never resolve the handoff to the freq we're already on: two same-named
@@ -4690,8 +4813,17 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     // Don't hand off until the aircraft is approaching step1 altitude.
     // This prevents an immediate handoff right after step1 is issued
     // when the aircraft is still far below (e.g. at 6700 ft for FL170 step1).
-    if (static_cast<int>(ctx.altitude_ft_msl) < s_sid_step1_alt_ft - 2000)
-      goto skip_tma_check;
+    //
+    // It suppresses the HANDOFF ONLY -- it used to `goto skip_tma_check` and skip
+    // the airspace scan entirely, which made sector awareness depend on the level
+    // we happened to be cleared to. LFLP VENA2A 2026-08-14: step1 came out FL190,
+    // so the scan did not run below 17000 ft and the log's first and only entry
+    // reads `in_tma=1 was_in=0 zones=[GENEVA TMA SECTOR 6(8500-19500ft)]
+    // alt=17000ft` -- Geneva was invisible for the whole climb, and the 60 s
+    // position log with it. Crossing a boundary is a fact about POSITION; observe
+    // it always, gate only the action. [C. P. Potter]
+    const bool handoff_altitude_reached =
+        static_cast<int>(ctx.altitude_ft_msl) >= s_sid_step1_alt_ft - 2000;
 
     // Compute the altitude-based fallback threshold regardless of openair_db.
     // Used when openair_db is absent OR when it is present but never detected
@@ -4789,7 +4921,10 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
       }
     }
 
-    if (exited_tma && !sid_step1_hold_active(ctx)) {
+    // The altitude gate applies HERE -- to the action, not to the observation
+    // above, which now runs on every pass so s_sid_was_in_tma tracks the real
+    // trajectory whatever level the aircraft was cleared to.
+    if (exited_tma && handoff_altitude_reached && !sid_step1_hold_active(ctx)) {
       // Look up Centre controller — use ctx.enclosing_airspaces (polygon
       // containment, same source as the sector check and the EN ROUTE tab UI)
       // so the SID handoff and the sector check always agree.
@@ -4925,7 +5060,6 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
       return true;
     }
   }
-skip_tma_check:;
 
   const int sid_cruise_fl =
       round_to_fl(ctx.ifr_cruise_alt_ft > 0 ? ctx.ifr_cruise_alt_ft
