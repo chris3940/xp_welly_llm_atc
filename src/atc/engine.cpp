@@ -7565,11 +7565,32 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
 
       if (new_freq_khz != 0) {
         if (s_enroute_sector_freq_khz == 0) {
-          // Seed silently: Phase 2/3 already gave the pilot the correct freq; the
-          // FIRST real sector change is announced, not the baseline.
-          s_enroute_sector_freq_khz = new_freq_khz;
-          logging::info("IFR en-route: sector baseline %s %.3f MHz floor=%dft (silent)",
-                        new_label.c_str(),
+          // Seed to the pilot's ACTUAL freq, NOT the resolved sector. The old
+          // comment here claimed "Phase 2/3 already gave the pilot the correct
+          // freq", but Phase 2.8 hands off to a TERMINAL controller, and by the
+          // first poll_enroute pass the aircraft is often already over the ACC
+          // volume stacked above it -- seeding the resolved sector then SWALLOWS
+          // that handoff. LFLP -> EDLW 2026-08-14: Phase 2.8 gave Geneva Approach
+          // 119.530, poll_enroute resolved Swiss Radar 119.175 (floor FL195) and
+          // seeded it silently, so "contact Swiss Radar" was never spoken -- the
+          // pilot got the frequency in STANDBY and nothing else, and the
+          // transcript kept labelling 119.175 "Geneva" for the rest of the climb.
+          // Seeding the pilot's freq makes the difference fire the real
+          // "contact <sector>" on the next poll.
+          //
+          // This is the same seed bug already fixed in poll_acc_sector_change
+          // (see the SKYGUIDE/Switzerland-above-FL195 comment there, LFLP
+          // 2026-07-18, itself the alpha-31 Chambery seed bug) -- the fix had
+          // never been carried across to poll_enroute. [C. P. Potter]
+          const float acom_sb =
+              (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
+          const uint32_t acom_sb_khz =
+              static_cast<uint32_t>(std::lround(acom_sb * 1000.0));
+          s_enroute_sector_freq_khz =
+              (acom_sb_khz > 0) ? acom_sb_khz : new_freq_khz;
+          logging::info("IFR en-route: sector baseline: pilot on %.3f, sector "
+                        "resolves %s %.3f floor=%dft (silent)",
+                        static_cast<double>(acom_sb), new_label.c_str(),
                         static_cast<float>(new_freq_khz) / 1000.0f, sector_floor_ft);
         } else if (new_freq_khz != s_enroute_sector_freq_khz) {
           // Never hand back to a sector already left (openair has no visited filter of
