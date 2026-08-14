@@ -267,6 +267,11 @@ static std::string approach_clearance_phrase(
 static double routed_distance_to_fix_idx(const xplane_context::XPlaneContext &ctx,
                                          int target_idx); // defined before check_next_fix
 static std::string controller_label_for(const airspace_db::Controller *ctrl); // defined near handoff helpers
+// Above the UIR floor, name the REGIONAL centre ("Reims") instead of the
+// country-level atc.dat entry ("France"). Defined near controller_label_for.
+static std::string refine_upper_acc_label(const xplane_context::XPlaneContext &ctx,
+                                          const std::string &label,
+                                          const std::string &facility_id);
 static std::string openair_sector_label(const std::string &name); // openair NAME -> label ("MARSEILLE CTA..." -> "Marseille")
 // Spoken facility name from an ICAO: airport name with any "/..." suffix dropped
 // ("Nice/Cote d'Azur" -> "Nice") so a slash never garbles the radio call
@@ -892,7 +897,9 @@ void training_jump_enroute(int cleared_alt_ft) {
     for (const auto *s : sectors) {
       if (s && s->role == airspace_db::ControllerRole::CTR &&
           !s->freqs_khz.empty()) {
-        s_current_controller_label = controller_label_for(s);
+        // Regional centre above the UIR floor -- see refine_upper_acc_label.
+        s_current_controller_label =
+            refine_upper_acc_label(ctx, controller_label_for(s), s->facility_id);
         s_jump_switch_freq_mhz =
             static_cast<float>(s->freqs_khz.front()) / 1000.0f;
         break;
@@ -1081,7 +1088,9 @@ void training_jump_arrival() {
     for (const auto *s : sectors) {
       if (s && s->role == airspace_db::ControllerRole::CTR &&
           !s->freqs_khz.empty()) {
-        s_current_controller_label = controller_label_for(s);
+        // Regional centre above the UIR floor -- see refine_upper_acc_label.
+        s_current_controller_label =
+            refine_upper_acc_label(ctx, controller_label_for(s), s->facility_id);
         s_jump_switch_freq_mhz =
             static_cast<float>(s->freqs_khz.front()) / 1000.0f;
         break;
@@ -3972,6 +3981,78 @@ static std::string controller_label_for(const airspace_db::Controller *ctrl) {
   return controller_location(ctrl->name);
 }
 
+// Above the UIR floor the REGIONAL centre gives its name -- "Reims", not
+// "France". atc.dat models French upper airspace as ONE controller
+// (NAME FRANCE / LFFF / ctr, a single polygon 19500-60000 ft carrying 64
+// frequencies), so every en-route handoff above FL195 in France announced
+// "France" (real vol LFLP -> EDLW 2026-08-14, user: "ce n'etait pas FRANCE mais
+// REIMS qu'il aurait fallu dire").
+//
+// The regional geometry IS available: the same lateral position is covered by a
+// lower-band ACC -- REIMS/LFEE 0-19500 at both sampled points of that flight.
+// So probe the SAME lat/lon in the lower band and borrow its NAME.
+//
+// SCOPE, deliberately narrow (user 2026-08-14, France + Germany only):
+//   - France is the only entry needed. Germany already names its upper centres
+//     regionally in atc.dat -- RHEIN/EDUU (Karlsruhe UAC, whose real callsign IS
+//     "Rhein Radar") and HANNOVER/EDVV -- so it resolves correctly today and
+//     gets no entry.
+//   - Only the NAME is refined. The FREQUENCY still comes from the existing
+//     resolution, because the lower-FIR entry carries lower-FIR frequencies
+//     (REIMS lists 121.070) and speaking one for an upper sector would be a
+//     functional regression, not a cosmetic one.
+//
+// KNOWN SIMPLIFICATION: a real upper centre subdivides further (Reims UIR works
+// several sectors on different frequencies). This gets the name right, which is
+// the complaint; it does not reproduce sector-to-sector handoffs inside Reims.
+// [C. P. Potter]
+static std::string refine_upper_acc_label(const xplane_context::XPlaneContext &ctx,
+                                          const std::string &label,
+                                          const std::string &facility_id) {
+  // Country-level ACC names that should defer to the regional centre below them.
+  static const char *const kCountryAcc[] = {"France"};
+  bool needs_refining = false;
+  for (const char *c : kCountryAcc)
+    if (label == c) {
+      needs_refining = true;
+      break;
+    }
+  if (!needs_refining || !airspace_db::enabled() || facility_id.size() < 2)
+    return label;
+
+  // Probe the lower band at the SAME lateral position. 10000 ft sits inside
+  // every European lower FIR and below every UIR floor.
+  const auto lower = airspace_db::find_enclosing(ctx.latitude, ctx.longitude,
+                                                 10000.0f);
+  const airspace_db::Controller *best = nullptr;
+  double best_area = 1e18;
+  for (const auto *c : lower) {
+    if (c == nullptr || c->role != airspace_db::ControllerRole::CTR)
+      continue;
+    // Same country only. atc.dat has polygons that span implausible areas
+    // (OAKLAND OCEANIC / KZAK contains eastern France), and without this guard
+    // one of them can win. FRANCE is LFFF, REIMS is LFEE -> both "LF".
+    if (c->facility_id.size() < 2 ||
+        c->facility_id.compare(0, 2, facility_id, 0, 2) != 0)
+      continue;
+    // Prefer the most LOCAL polygon: the country-level entry also matches here.
+    const double area = (c->bbox_max_lat - c->bbox_min_lat) *
+                        (c->bbox_max_lon - c->bbox_min_lon);
+    if (best == nullptr || area < best_area) {
+      best = c;
+      best_area = area;
+    }
+  }
+  if (best == nullptr)
+    return label;
+  const std::string refined = controller_label_for(best);
+  if (refined.empty() || refined == label)
+    return label;
+  logging::info("ACC label refined: %s -> %s (regional centre %s below the UIR)",
+                label.c_str(), refined.c_str(), best->facility_id.c_str());
+  return refined;
+}
+
 bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
                             float dt, std::string *out_text) {
   using AS = atc_state_machine::ATCState;
@@ -5017,7 +5098,8 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
                            "find_by_role_near -> %s", best->name.c_str());
         }
         if (best && !best->freqs_khz.empty()) {
-          centre_label = controller_label_for(best);
+          centre_label = refine_upper_acc_label(ctx, controller_label_for(best),
+                                                best->facility_id);
           centre_freq = static_cast<float>(best->freqs_khz.front()) / 1000.0f;
         }
       }
@@ -7598,7 +7680,9 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     for (const auto *s : sectors) {
       if (s && s->role == airspace_db::ControllerRole::CTR &&
           !s->freqs_khz.empty()) {
-        s_current_controller_label = controller_label_for(s);
+        // Regional centre above the UIR floor -- see refine_upper_acc_label.
+        s_current_controller_label =
+            refine_upper_acc_label(ctx, controller_label_for(s), s->facility_id);
         break;
       }
     }
@@ -7653,7 +7737,10 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
             ctx.enclosing_airspaces, s_enroute_visited_sector_freqs);
         if (best) {
           new_freq_khz = best->freqs_khz.front();
-          new_label = controller_label_for(best);
+          // Name by the REGIONAL centre above the UIR floor ("Reims", not
+          // "France"); frequency unchanged. See refine_upper_acc_label.
+          new_label = refine_upper_acc_label(ctx, controller_label_for(best),
+                                             best->facility_id);
           sector_floor_ft = best->floor_ft;
         }
       }

@@ -62,6 +62,18 @@ Germany).
 
 ### Fixed — en route
 
+- **Above FL195 in France, ATC announced itself as "France" instead of the
+  regional centre.** In the UIR it is the area control centre that gives its
+  name — over eastern France that is **Reims**. The navdata models French upper
+  airspace as one country-wide controller with 64 frequencies attached, so every
+  handoff above the UIR floor used the country name. The regional centre is now
+  taken from the lower band at the same position. Germany was checked and needs
+  nothing: its upper centres are already named regionally (Rhein for Karlsruhe
+  UAC, Hannover). **Only the name changes — the frequency is untouched**, since
+  the lower-band entry carries lower-band frequencies. This does not reproduce
+  sector-to-sector handoffs *inside* a regional centre, which work several
+  frequencies in reality.
+
 - **The first ACC handoff after the terminal phase was swallowed.** The sector
   memory was initialised to the sector just resolved rather than the frequency
   the pilot was actually on, which records the transition as already done at the
@@ -116,5 +128,9 @@ Germany).
   controller has no label yet.
 - The garble replies ("your transmission was garbled, say again") are plain
   language rather than standard phraseology; `SAY AGAIN` is standard and present.
+- Upper-airspace naming is corrected for France only. Other countries whose
+  navdata collapses the UIR into a single country-level entry will still be
+  announced by that name, and no country reproduces handoffs between sectors of
+  the same regional centre.
 - `"readback please"` in the VFR templates is non-standard, but those templates
   belong to upstream and are left alone.
