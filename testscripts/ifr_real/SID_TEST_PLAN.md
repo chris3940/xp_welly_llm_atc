@@ -1,5 +1,10 @@
 # SID climb — in-sim test plan (beta-56)
 
+> **Superseded by [TEST_PLAN.md](TEST_PLAN.md) (beta-61).** Kept for its
+> SID-by-SID detail, which the newer plan does not repeat. Several items here are
+> now covered headless by `make test-afis` — check that plan first so you do not
+> spend a flight on something the harness already proves.
+
 Covers the two changes that have **never been flown**: the lateral sector handoff
 (Phase 2.8, decoupled from the departure hold) and the SID climb **floor** now read
 from the earliest constrained fix. Headless coverage is in `afis_lflu_lflp.sh`;
