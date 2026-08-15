@@ -11076,6 +11076,26 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
     return false;
   }
 
+  // Resolve the FAF FIRST -- before the waypoint load below, which scans the
+  // freshly-appended list for the FAF's index and does so exactly ONCE (it is
+  // gated on s_approach_waypoints being empty). This used to sit AFTER that
+  // scan, so the scan compared against an empty ident, recorded
+  // s_faf_ap_idx = -1, and never ran again: EDLW ILS 06 on 2026-08-15 logged
+  // "[route] FAF ap_idx=-1 MAP ap_idx=3" even though KOLOT is declared FAF in
+  // the CIFP ("E  F") and is present in the route table at index 23. With no FAF
+  // index the Tower handoff, which triggers there, can never fire -- and
+  // poll_vector's precondition bails "precondition empty: faf" for the same
+  // reason (real vol LOWI NANI2A -> R08-Z 2026-08-01). Independent of the STAR
+  // so both the with-STAR and no-STAR paths get it. [C. P. Potter]
+  if (s_approach_faf.ident.empty() && !s_assigned_approach_designator.empty() &&
+      !s_assigned_dest_icao.empty() && !ctx.cifp_dir.empty()) {
+    s_approach_faf = cifp_reader::approach_faf(ctx.cifp_dir, s_assigned_dest_icao,
+                                               s_assigned_approach_designator);
+    if (!s_approach_faf.ident.empty())
+      logging::info("IFR approach: FAF resolved = %s",
+                    s_approach_faf.ident.c_str());
+  }
+
   // Load STAR + approach procedure waypoints on first entry (fallback if not
   // loaded at APPROACH_CONTACT, e.g. training_jump_approach).
   if (s_approach_waypoints.empty() && s_approach_waypoint_idx == 0 &&
@@ -11114,6 +11134,27 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         }
       }
     }
+  }
+
+  // Belt and braces: the scan above runs ONCE (gated on an empty waypoint list),
+  // so anything that resolves the FAF later would never get an index. Recompute
+  // whenever the index is still missing but both halves are now available --
+  // cheap, and it makes the result independent of call ordering rather than of a
+  // comment telling the next person not to move a block. [C. P. Potter]
+  if (s_faf_ap_idx < 0 && !s_approach_faf.ident.empty() &&
+      !s_approach_waypoints.empty()) {
+    for (int i = 0; i < static_cast<int>(s_approach_waypoints.size()); ++i) {
+      const auto &w = s_approach_waypoints[i];
+      if (w.is_approach_proc && w.ident == s_approach_faf.ident) {
+        s_faf_ap_idx = i;
+        logging::info("[route] FAF ap_idx=%d (late resolve, %s)", i,
+                      s_approach_faf.ident.c_str());
+        break;
+      }
+    }
+  }
+
+  {
     // Route tracker init (lazy path: training jump, waypoints loaded here).
     if (s_route_fixes.empty())
       init_route_fixes(ctx);
@@ -11237,14 +11278,6 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
   // s_approach_faf (real vol 2026-08-01: LOWI NANI2A -> R08-Z, FAF never populated here),
   // it bails "precondition empty: faf" and the reversal never arms. Resolve it now,
   // independent of the STAR, so both paths have it. [C. P. Potter]
-  if (s_approach_faf.ident.empty() && !s_assigned_approach_designator.empty() &&
-      !s_assigned_dest_icao.empty() && !ctx.cifp_dir.empty()) {
-    s_approach_faf = cifp_reader::approach_faf(ctx.cifp_dir, s_assigned_dest_icao,
-                                               s_assigned_approach_designator);
-    if (!s_approach_faf.ident.empty())
-      logging::info("IFR approach: FAF resolved = %s (fallback for vectoring)",
-                    s_approach_faf.ident.c_str());
-  }
   if (poll_vector_to_intercept(ctx, dt, out_text, out_requires_readback))
     return true;
 
