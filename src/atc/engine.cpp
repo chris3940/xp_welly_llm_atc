@@ -7324,6 +7324,40 @@ static double descent_distance_nm(double alt_to_lose) {
   return alt_to_lose / kDescentSlopeFtPerNm + kDescentReactionNm;
 }
 
+// One ATC transmission clears ONE step, not the whole descent. Clearing an aircraft
+// from FL180 straight to a 2500 ft platform is 15 500 ft in a single call and is not
+// credible on any real frequency (user, 2026-08-15) -- a controller walks it down.
+//
+// The ladder is anchored on structure rather than on arbitrary chunk sizes:
+//   FL100  -- the 250 kt boundary, and the ceiling of most terminal areas
+//             (exactly the Duesseldorf TMA top over EDLW);
+//   6000   -- the usual last level before the platform / approach altitude;
+//   then the platform itself.
+// So FL180 -> FL100 -> 6000 -> 2500, each rung issued only once the aircraft has
+// reached the previous one. A rung is taken only when it lies genuinely BETWEEN the
+// aircraft and the target, so a high platform simply skips it. The limiter can only
+// ever clear the aircraft HIGHER than the raw target, never lower, so it cannot
+// introduce a terrain or airspace bust that the target itself did not already have.
+// [C. P. Potter]
+static int descent_rung_ft(float alt_now_ft, int target_ft, int tma_ceiling_ft) {
+  // Rungs, highest first. The destination TMA ceiling is the one that matters most:
+  // an arrival should reach the terminal boundary already at a sensible level rather
+  // than arriving on top of it and plunging (user, 2026-08-15). Rounded UP to the
+  // next 1000 ft so the aircraft sits JUST ABOVE the TMA, not inside it -- entering
+  // it is the terminal controller's clearance to give.
+  int rungs[3] = {10000, 0, 6000};
+  if (tma_ceiling_ft > 0)
+    rungs[1] = ((tma_ceiling_ft + 999) / 1000) * 1000;
+  int best = target_ft;
+  for (int r : rungs) {
+    if (r <= 0)
+      continue;
+    if (alt_now_ft > static_cast<float>(r) + 1000.0f && target_ft < r && r > best)
+      best = r;
+  }
+  return best;
+}
+
 // ── poll_profile_crossing ─────────────────────────────────────────────────
 // Extracted from poll_descent: the CIFP crossing-altitude corrective, now shared
 // by every airborne IFR phase via poll_profile_enforcement. Fires once per target
@@ -7385,11 +7419,29 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   // Wide window: check_next_fix returns the governing constrained fix regardless
   // of proximity; the REAL trigger is the top-of-descent distance below.
   const FixCompliance fc = check_next_fix(ctx, 900.0);
-  if (!(fc.valid && fc.alt_bust && fc.alt_target_ft > 0 &&
-        fc.alt_target_ft != s_descent_cifp_target_ft))
+  if (!(fc.valid && fc.alt_bust && fc.alt_target_ft > 0))
+    return false;
+  // The level actually transmitted: the next rung of the ladder, not necessarily the
+  // constraint itself. Reference matters -- an FL constraint is judged on pressure
+  // altitude, an altitude constraint on MSL.
+  const float alt_ref_now =
+      fc.alt_is_fl ? ctx.pressure_alt_ft : ctx.altitude_ft_msl;
+  int dest_tma_ceil = 0;
+  if (openair_db::ready() && !s_assigned_dest_icao.empty()) {
+    const auto dp = xplane_context::airport_pos_for(s_assigned_dest_icao);
+    if (dp.first != 0.0 || dp.second != 0.0)
+      dest_tma_ceil = openair_db::terminal_tma_ceiling(dp.first, dp.second);
+  }
+  const int issue_ft =
+      descent_rung_ft(alt_ref_now, fc.alt_target_ft, dest_tma_ceil);
+  if (issue_ft == s_descent_cifp_target_ft)
+    return false; // already cleared to this level
+  // Do not stack the next rung on top of one the pilot has not flown yet.
+  if (s_descent_cifp_target_ft > 0 &&
+      alt_ref_now > static_cast<float>(s_descent_cifp_target_ft) + 1000.0f)
     return false;
   const int cleared = engine::current_cleared_alt_ft();
-  if (fc.alt_target_ft >= cleared)
+  if (issue_ft >= cleared)
     return false; // only a genuine DOWN step below what is already cleared
   // ICAO/EUROCONTROL: the current controller may not descend the aircraft into a
   // lower, differently-controlled TMA. If this crossing's target lies below the
@@ -7399,8 +7451,8 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   // it (Geneva must not clear "descend 6500" into the Chambery TMA -- LFLP
   // 2026-07-15). Once handed off and inside the inner TMA, cur == inner volume and
   // this returns 0, so the inner controller's crossings fire normally.
-  const int xfer_floor = sector_transfer_floor_ft(ctx, fc.alt_target_ft);
-  if (xfer_floor > 0 && fc.alt_target_ft < xfer_floor) {
+  const int xfer_floor = sector_transfer_floor_ft(ctx, issue_ft);
+  if (xfer_floor > 0 && issue_ft < xfer_floor) {
     static int s_last_suppressed_target = 0; // dedup the per-frame diagnostic
     if (fc.alt_target_ft != s_last_suppressed_target) {
       s_last_suppressed_target = fc.alt_target_ft;
@@ -7424,13 +7476,18 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   const double tod_dist = descent_distance_nm(alt_to_lose);
   if (fc.dist_nm > tod_dist)
     return false; // not yet at the top of descent for this crossing
-  s_descent_cifp_target_ft = fc.alt_target_ft;
-  s_enroute_cleared_alt_ft = fc.alt_target_ft; // coordinates with the walker
+  s_descent_cifp_target_ft = issue_ft;
+  s_enroute_cleared_alt_ft = issue_ft; // coordinates with the walker
   const std::string &cs = atc_state_machine::session_callsign();
   const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
   const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
-  const AltHint hint = fc.alt_is_fl ? AltHint::FlightLevel : AltHint::Auto;
-  const std::string clr = format_alt_clearance(fc.alt_target_ft, hint, ctx.qnh_hpa, ta);
+  // An intermediate rung is not the constraint, so let the formatter decide FL vs
+  // feet from the transition level; only the constraint itself carries its own
+  // reference. QNH is spoken when the level is given in feet -- never with an FL.
+  const AltHint hint = (issue_ft != fc.alt_target_ft) ? AltHint::Auto
+                       : fc.alt_is_fl                 ? AltHint::FlightLevel
+                                                      : AltHint::Auto;
+  const std::string clr = format_alt_clearance(issue_ft, hint, ctx.qnh_hpa, ta);
   *out_text = callsign + ", descend " + clr + ".";
   if (settings::debug_logging())
     logging::info("[dbg prof] crossing %s -> descend %s @ PA %.0f (%.1f NM, TOD %.1f NM, "
