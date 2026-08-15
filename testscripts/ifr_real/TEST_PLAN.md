@@ -33,13 +33,32 @@ coordinates / altitude / heading that `Log.txt` does not.
 
 ---
 
-## Flight 1 — EDLW arrival only *(~15 min, highest value)*
+**Three flights, under an hour in total, cover every risky fix.** The airspace
+classifier is deliberately last: it is already fenced by 14 unit tests and a
+10 800-point measurement, so it is the least urgent thing to fly.
+
+---
+
+## Flight 1 — EDLW, starting at DIK *(~20 min, highest value)*
 
 The one thing blocking everything else: the arrival chain has failed twice, and
 the two fixes for it have never flown.
 
-**Setup.** Reposition ~30 NM south-east of EDLW at FL180, destination EDLW,
-runway 06. Settings → jump **Arrival**. Stay on the route.
+**Setup.** Load the SimBrief OFP (without it the STAR and the filed steps do not
+exist and the test is meaningless), then start in cruise at **DIK**, FL270-280.
+114 NM to run. **Stay on the route** — leaving it is a separate test.
+
+From DIK you get the whole descent sequence, not just its end:
+
+| at | what it exercises |
+|---|---|
+| ERUKI, 17 NM after DIK | the filed step down to FL230 |
+| en route | Brussels → Hannover → Langen handoffs |
+| ~BAMSU | top-of-descent negotiation and the STAR clearance |
+| last 23 NM | arrival, ILS 06, Tower |
+
+Note DIK is 114 NM out, just above the 100 NM bound added after the Nancy
+misfire — so this also proves the bound does not block a legitimate descent.
 
 **Look for, in order:**
 
@@ -58,7 +77,52 @@ IFR approach: FAF resolved = KOLOT
 **Also expect:** a handoff to Tower near KOLOT, which never happened on either
 previous attempt.
 
-## Flight 2 — LFMN → LOWI *(the airspace classifier)*
+## Flight 2 — Nice departure *(~15 min, the sharpest single check)*
+
+Covers a completely separate set from flight 1, and contains the only place in
+the plugin where a clearance depends on the AIRCRAFT TYPE.
+
+**Setup.** Depart LFMN 04L or 04R, any destination that gives you one of the SIDs
+below.
+
+**Expected initial climb** — these come from the published chart and are NOT in
+the navdata, so they exercise `airport+.json` end to end:
+
+| SID | expected | note |
+|---|---|---|
+| PERU8A · BADO8A · BODR8A · IRMA8A | **FL130** | single value, no type split |
+| BASI8A · EPOL8A · LANK8A · TURI8A · VARE8A · SODR8A · RUBA8A | FL100 | jet SIDs |
+| **BASI8X** | **FL070 with the TBM** | jets FL100 / props FL070 — the split |
+| EPOL8B · LANK8B · TURI8B · VARE8B · SODR8B | **FL070** | prop variants |
+
+**The sharp check:** on a split SID the TBM must get the PROP figure. Hearing
+FL100 on BASI8X would be the bug, and nothing else in the plugin would reveal it.
+
+Also validated here, both unflown: the departure handoff now names the outgoing
+controller correctly (it used to say "you are still with Chambery Approach,
+contact the next controller"), and "contacting tower on …" is recognised as a
+readback instead of drawing "you are still on Ground".
+
+Look for:
+
+```
+airport_overrides: LFMN SID <name> -> initial climb <alt> ft
+```
+
+Runway crossings on the way out are worth watching too (04L/04R).
+
+## Flight 3 — LOWI, from your saved TOD point *(~20 min)*
+
+Enough for what matters here: the **curved RNP final**, which has not flown since
+the non-RNAV reader fix, at the airport where terrain margins are tightest.
+
+It will NOT test the airspace classifier — that needs the whole leg. Measured
+along LFMN → LOWI (278 NM), the three upper blocks are: `FREE RT ASPC SE` from
+0 NM, `IT ZONE A` from 35 NM (208 NM of it), `DFS EDMM SOUTH` for the last 35 NM.
+Starting near the TOD gives you one transition out of three, and misses the
+France → Italy change entirely.
+
+## Flight 4 — LFMN → LOWI in full *(the airspace classifier, when time allows)*
 
 Most discriminating route for the classification change: **61 of 61** sampled
 points newly resolve, across **three** upper blocks (Italy, France, Munich), so
@@ -77,14 +141,14 @@ IFR en-route: sector change -> <name> <freq>  <- handoffs should chain, not bunc
 "contact X" in quick succession — that would mean a newly visible small volume is
 winning the innermost-volume test when it should not.
 
-## Flight 3 — LFLP → LFMN *(non-regression witness)*
+## Flight 5 — LFLP → LFMN *(non-regression witness)*
 
 Deliberately the *least* affected route: only 15 of 61 points change, and those
 are Alpine LTAs rather than upper blocks. At FL190 you stay below the layer the
 classifier touched. **It must behave exactly as before.** Any difference here is
 a regression, not a feature.
 
-## Flight 4 — LIMF → LFLP *(Milan UIR, optional)*
+## Flight 6 — LIMF → LFLP *(Milan UIR, optional)*
 
 Short and targeted. 24 of 61 points newly resolve, all in `IT ZONE A` — the Milan
 UIR, where the symptom was first noticed. Confirms that one case without
