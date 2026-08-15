@@ -7113,13 +7113,63 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
   int first_app_idx = -1;
   for (int i = 0; i < static_cast<int>(s_route_fixes.size()); ++i)
     if (s_route_fixes[i].is_approach_proc) { first_app_idx = i; break; }
+  // "If the STAR publishes no constraint, take the first fix of the ASSOCIATED
+  // APPROACH" -- the agreed rule. Without it a STAR carrying nothing (EDLW ADEM3A:
+  // "0 constrained waypoints") leaves this walker with nothing to enforce the whole
+  // way down, and ATC simply goes quiet: the aircraft held FL180 to 13 NM from the
+  // field, 34 NM of silence (real flight 2026-08-15).
+  // The platform -- the FIRST approach fix -- is precisely the one altitude ATC does
+  // issue on an approach, so promoting it is the clearance a controller would give
+  // anyway, just earlier. Deliberately gated on the STAR being GENUINELY empty ahead,
+  // so the regression documented above (LP403's 6500 ft leaking into the STAR near
+  // COLLO at LFLP, skipping LUVOB/GOVNA) cannot return: whenever the STAR publishes,
+  // its fixes govern and approach fixes stay out until in_approach. [C. P. Potter]
+  bool star_has_alt_ahead = false;
   for (int i = std::max(0, s_route_fix_idx);
        i < static_cast<int>(s_route_fixes.size()); ++i) {
     const auto &f = s_route_fixes[i];
-    if (f.is_approach_proc && !in_approach)
+    if (f.is_approach_proc)
+      continue;
+    if (f.alt.feet > 0 || f.floor_ft > 0) {
+      star_has_alt_ahead = true;
+      break;
+    }
+  }
+  // The fix the fallback promotes is the first approach fix that actually FORCES a
+  // descent -- a ceiling / "at" / block-ceiling constraint. NOT merely the first
+  // approach fix: at EDLW the platform DOR publishes "at or above 3000", a FLOOR,
+  // which can never bust from above and so would leave the aircraft exactly as high
+  // as before. The fix that forces the descent there is the FAF KOLOT at 2500, and
+  // it was being suppressed as "beyond the platform". This mirrors what ATC actually
+  // does -- ONE descent to the platform altitude -- and it is the same figure the
+  // pre-TOD target already takes from approach_faf(). [C. P. Potter]
+  int fallback_app_idx = -1;
+  if (!star_has_alt_ahead) {
+    for (int i = std::max(0, s_route_fix_idx);
+         i < static_cast<int>(s_route_fixes.size()); ++i) {
+      const auto &f = s_route_fixes[i];
+      if (!f.is_approach_proc || f.alt.feet <= 0)
+        continue;
+      const bool forces_descent = !f.is_floor || f.floor_ft > 0; // ceiling/at/block
+      if (forces_descent) {
+        fallback_app_idx = i;
+        break;
+      }
+    }
+  }
+  for (int i = std::max(0, s_route_fix_idx);
+       i < static_cast<int>(s_route_fixes.size()); ++i) {
+    const auto &f = s_route_fixes[i];
+    const bool platform_fallback = f.is_approach_proc && !in_approach &&
+                                   !star_has_alt_ahead && fallback_app_idx >= 0 &&
+                                   i == fallback_app_idx;
+    if (f.is_approach_proc && !in_approach && !platform_fallback)
       continue; // APP fix but still on the STAR -> not yet enforceable
-    const bool app_beyond_platform =
-        f.is_approach_proc && first_app_idx >= 0 && i > first_app_idx;
+    // The promoted fix IS the platform for this arrival, so it must not also be
+    // suppressed as "beyond the platform" -- that guard exists to stop per-fix
+    // step-downs down the published profile, not to mute the single descent.
+    const bool app_beyond_platform = f.is_approach_proc && first_app_idx >= 0 &&
+                                     i > first_app_idx && !platform_fallback;
     const bool has_alt = (f.alt.feet > 0) || (f.floor_ft > 0);
     const bool has_spd = (f.speed_kt > 0);
     if (!has_alt && !has_spd)
