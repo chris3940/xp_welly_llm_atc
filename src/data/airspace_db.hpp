@@ -54,6 +54,18 @@ struct Controller {
   std::uint64_t file_offset = 0;
 };
 
+// The vertical extent of the specific polygon RING that encloses (lat, lon, alt_ft)
+// inside this controller. find_enclosing() answers WHICH controllers contain a point,
+// but a controller is a stack of tiered shelves (the Duesseldorf tracon alone has 24,
+// floors 1500..8500 under one 10000 ft ceiling) and the caller needs the shelf, not the
+// aggregate. Returns false when no ring matches, leaving the outputs untouched.
+//
+// Exists so openair_db can synthesise an AirspaceEntry from atc.dat when no OpenAir
+// file is installed -- atc.dat ships with a standard X-Plane install, the OpenAir
+// airspace file only comes with a paid navdata subscription. [C. P. Potter]
+bool enclosing_ring_extent(const Controller &c, double lat, double lon, float alt_ft,
+                           int *out_floor_ft, int *out_ceiling_ft);
+
 // Load atc.dat from the given path. Pass an empty string to disable
 // (useful for headless tests). Caller is responsible for resolving
 // the path (plugin uses XPLMGetSystemPath; CLI passes empty).

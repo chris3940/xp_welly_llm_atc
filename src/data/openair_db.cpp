@@ -10,6 +10,8 @@
  */
 
 #include "data/openair_db.hpp"
+
+#include "data/airspace_db.hpp"
 #include "core/logging.hpp"
 
 #include <algorithm>
@@ -309,9 +311,85 @@ void stop() {
 
 bool ready() { return s_ready.load(); }
 
+
+// ── atc.dat fallback ──────────────────────────────────────────────────────
+// The OpenAir airspace file ships with a PAID navdata subscription; atc.dat comes with
+// a standard X-Plane install. Without a fallback, a user without that subscription has
+// no volumes at all -- no sector handoffs, no TMA logic, no descend-to-enter -- which
+// is the entire IFR core of the plugin (user, 2026-08-15).
+//
+// Precedence is strict and one-way: OpenAir stays AUTHORITATIVE wherever it answers.
+// atc.dat is consulted ONLY when OpenAir is absent or silent for that point, so an
+// installed subscription behaves exactly as before, byte for byte.
+//
+// atc.dat carries the same shelved geometry (the Duesseldorf tracon alone: 24 polygons,
+// floors 1500-8500 under one 10000 ft ceiling), so the mapping is a role translation
+// plus the ring that actually contains the point. [C. P. Potter]
+namespace {
+
+AirspaceClass class_from_role(airspace_db::ControllerRole r) {
+  switch (r) {
+  case airspace_db::ControllerRole::TWR:
+    return AirspaceClass::CTR;
+  case airspace_db::ControllerRole::TRACON:
+    return AirspaceClass::TMA;
+  case airspace_db::ControllerRole::CTR:
+    return AirspaceClass::CTA;
+  default:
+    return AirspaceClass::OTHER;
+  }
+}
+
+double bbox_area_of(const airspace_db::Controller &c) {
+  if (!c.has_bbox)
+    return 1e18; // no box -> never wins the innermost test
+  return (c.bbox_max_lat - c.bbox_min_lat) * (c.bbox_max_lon - c.bbox_min_lon);
+}
+
+// Innermost enclosing atc.dat volume, mapped to an AirspaceEntry. want_tma restricts
+// the search to TRACON records (the terminal_tma() query). Empty entry when nothing
+// encloses the point.
+AirspaceEntry atc_dat_entry(double lat, double lon, int alt_ft, bool want_tma) {
+  if (!airspace_db::ready())
+    return {};
+  const auto hits =
+      airspace_db::find_enclosing(lat, lon, static_cast<float>(alt_ft));
+  const airspace_db::Controller *best = nullptr;
+  double best_area = 1e18;
+  for (const auto *c : hits) {
+    if (c == nullptr)
+      continue;
+    if (want_tma && c->role != airspace_db::ControllerRole::TRACON)
+      continue;
+    const double a = bbox_area_of(*c);
+    if (best == nullptr || a < best_area) {
+      best = c;
+      best_area = a;
+    }
+  }
+  if (best == nullptr)
+    return {};
+  AirspaceEntry out;
+  out.name = best->name;
+  out.ac_class = class_from_role(best->role);
+  out.floor_ft = best->floor_ft;
+  out.ceiling_ft = best->ceiling_ft;
+  int f = 0, ceil = 0;
+  if (airspace_db::enclosing_ring_extent(*best, lat, lon,
+                                         static_cast<float>(alt_ft), &f, &ceil)) {
+    out.floor_ft = f;      // the shelf the aircraft is actually in, not the
+    out.ceiling_ft = ceil; // record's first polygon
+  }
+  if (!best->freqs_khz.empty())
+    out.freq_khz = best->freqs_khz.front();
+  return out;
+}
+
+} // namespace
+
 AirspaceEntry find_enclosing(double lat, double lon, int alt_ft) {
   if (!s_ready)
-    return {};
+    return atc_dat_entry(lat, lon, alt_ft, /*want_tma=*/false);
   const Entry *best = nullptr;
   for (const auto &e : s_entries) {
     // Bounding-box fast reject.
@@ -332,7 +410,7 @@ AirspaceEntry find_enclosing(double lat, double lon, int alt_ft) {
       best = &e;
   }
   if (!best)
-    return {};
+    return atc_dat_entry(lat, lon, alt_ft, /*want_tma=*/false);
   return {best->name, best->ac_class, best->floor_ft, best->ceiling_ft,
           best->freq_khz};
 }
@@ -376,7 +454,7 @@ int ctr_ceiling_ft(double lat, double lon) {
 
 AirspaceEntry terminal_tma(double lat, double lon) {
   if (!s_ready)
-    return {};
+    return atc_dat_entry(lat, lon, 3000, /*want_tma=*/true);
   int best_floor = 1000000000; // base (lowest-floor) TMA over the point
   const Entry *best = nullptr; // ties on floor break to the higher ceiling
   for (const auto &e : s_entries) {
@@ -397,7 +475,7 @@ AirspaceEntry terminal_tma(double lat, double lon) {
     }
   }
   if (best == nullptr)
-    return {};
+    return atc_dat_entry(lat, lon, 3000, /*want_tma=*/true);
   return {best->name, best->ac_class, best->floor_ft, best->ceiling_ft,
           best->freq_khz};
 }

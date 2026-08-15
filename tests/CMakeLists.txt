@@ -49,6 +49,7 @@ add_executable(xp_wellys_atc_tests
     test_simbrief_ofp.cpp
     test_msa_db.cpp
     test_openair_db.cpp
+    test_openair_atcdat_fallback.cpp
     test_sector_picker.cpp
 )
 

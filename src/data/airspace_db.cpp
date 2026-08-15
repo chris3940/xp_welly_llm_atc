@@ -356,6 +356,27 @@ std::vector<const Controller *> find_enclosing(double lat, double lon,
   return out;
 }
 
+bool enclosing_ring_extent(const Controller &c, double lat, double lon, float alt_ft,
+                           int *out_floor_ft, int *out_ceiling_ft) {
+  if (!enabled_.load())
+    return false;
+  ensure_polygons(const_cast<Controller *>(&c));
+  for (const auto &ring : c.polygons) {
+    if (ring.ceiling_ft > 0 && alt_ft > static_cast<float>(ring.ceiling_ft))
+      continue;
+    if (alt_ft < static_cast<float>(ring.floor_ft) - 1.0f)
+      continue;
+    if (!point_in_ring(lat, lon, ring.points))
+      continue;
+    if (out_floor_ft)
+      *out_floor_ft = ring.floor_ft;
+    if (out_ceiling_ft)
+      *out_ceiling_ft = ring.ceiling_ft;
+    return true;
+  }
+  return false;
+}
+
 const Controller *lookup_by_freq(std::uint32_t freq_khz, double lat, double lon,
                                  float alt_ft) {
   if (!enabled_.load() || freq_khz == 0)
