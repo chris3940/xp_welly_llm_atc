@@ -2296,8 +2296,14 @@ void process_transcript(Input in, Done done) {
   // Radio check (IFR): reply with an ICAO readability report -- but ONLY when the
   // active frequency actually has a controller/station in this area. On a frequency
   // with no station a radio check draws SILENCE, as in real ops (user 2026-07-30).
-  // ICAO Annex 10 Vol II: reply is a readability 1-5 ("readability five"), NOT the
-  // US-military "five by five". IFR only; VFR keeps its own template. [C. P. Potter]
+  // ICAO Annex 10 Vol II / Doc 9432 sec. 2.16.2 -- a reply to a test transmission
+  // is: the station CALLING (the aircraft), the station REPLYING (us), then the
+  // readability. The documented example is "CESSNA XYZ / DUBAI TOWER / READING
+  // YOU FIVE", so the readability is spoken "reading you five" -- not "readability
+  // five", which was used here until 2026-08-15 and is not the published form
+  // (nor the US-military "five by five"). The 1-5 scale itself is 1 unreadable,
+  // 2 readable now and then, 3 readable but with difficulty, 4 readable,
+  // 5 perfectly readable. IFR only; VFR keeps its own template. [C. P. Potter]
   {
     using PIR = intent_parser::PilotIntent;
     const auto rc_state = atc_state_machine::get_state();
@@ -2310,9 +2316,9 @@ void process_transcript(Input in, Done done) {
         Output out;
         out.response_text =
             s_current_controller_label.empty()
-                ? (cs + ", readability five.")
-                : (cs + ", " + s_current_controller_label + ", readability five.");
-        logging::info("IFR radio check -> readability five (controller '%s')",
+                ? (cs + ", reading you five.")
+                : (cs + ", " + s_current_controller_label + ", reading you five.");
+        logging::info("IFR radio check -> reading you five (controller '%s')",
                       s_current_controller_label.c_str());
         done(std::move(out));
         return;
