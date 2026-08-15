@@ -7259,7 +7259,20 @@ static CourseCheck check_course(const xplane_context::XPlaneContext &ctx,
 //     2026-07-17). NOTE: 3 deg (ILS glideslope / the pilot 3:1 rule) is a planning
 //     convention, not an ATC rule -- safe to tune.
 static constexpr double kDescentSlopeFtPerNm = 265.0; // 2.5 deg
+
+// Distance needed to lose `alt_to_lose` feet at the shared 2.5-degree slope, plus
+// the reaction buffer. THE one place this rule lives: the pre-TOD alert, the
+// per-crossing step-down and anything else that asks "can I still make that fix
+// at that altitude?" must agree, or ATC prompts at one distance and clears at
+// another. Returns 0 when there is nothing to lose. [C. P. Potter]
+static double descent_distance_nm(double alt_to_lose);
 static constexpr double kDescentReactionNm   = 8.0;   // flat pre-TOD buffer (NM)
+
+static double descent_distance_nm(double alt_to_lose) {
+  if (alt_to_lose <= 200.0)
+    return 0.0; // essentially at the level already
+  return alt_to_lose / kDescentSlopeFtPerNm + kDescentReactionNm;
+}
 
 // ── poll_profile_crossing ─────────────────────────────────────────────────
 // Extracted from poll_descent: the CIFP crossing-altitude corrective, now shared
@@ -7358,7 +7371,7 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   const double alt_to_lose = static_cast<double>(alt_now) - fc.alt_target_ft;
   if (alt_to_lose <= 200.0)
     return false; // essentially at the level already
-  const double tod_dist = alt_to_lose / kDescentSlopeFtPerNm + kDescentReactionNm;
+  const double tod_dist = descent_distance_nm(alt_to_lose);
   if (fc.dist_nm > tod_dist)
     return false; // not yet at the top of descent for this crossing
   s_descent_cifp_target_ft = fc.alt_target_ft;
@@ -8236,6 +8249,9 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
     double dist_nm = 1e9;
     float alert_nm = 25.0f; // fallback when groundspeed unavailable
     float tod_alt_component = 0.0f; // hoisted for pre-TOD gate
+    // Routed distance to the fix that BINDS the descent, when the candidate walk
+    // below finds one. -1 = nothing binding, fall back to the STAR entry.
+    double tod_binding_dist_nm = -1.0;
     float tod_spd_component = 0.0f; // hoisted: ASK->authoritative negotiation window
     {
       auto ofp = simbrief_ofp::get();
@@ -8261,6 +8277,154 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
         bool se_valid = find_star_entry(ctx.cifp_dir, ofp, se);
         if (se_valid && se.entry_alt_ft > 0 && se.entry_alt_ft < cruise_ref)
           descent_target = se.entry_alt_ft;
+
+        // The pre-TOD target must be a PUBLISHED altitude, and it must be paired
+        // with the ROUTED distance to the very fix that publishes it.
+        //
+        // Two failures this replaces, both measured:
+        //  - EDLW ADEM3A publishes nothing ("0 constrained waypoints"), so the
+        //    target stayed the cruise*0.66 heuristic and the ASK came at 49 NM
+        //    when a 3:1 profile from FL230 needed 54. The aircraft reached 13 NM
+        //    from the field still at FL180 (2026-08-15).
+        //  - Taking an altitude from one fix and a distance to another is worse
+        //    still: aiming at the LFLP FAF (3500 ft) while measuring to the STAR
+        //    entry SALEV produced "alert=71 NM" at 32 NM to run, i.e. a descent
+        //    started far too early.
+        //
+        // So evaluate CANDIDATES, each carrying its own (distance, altitude), and
+        // keep whichever forces the descent to start earliest. Distances are
+        // ROUTED: SALE3P loops back on itself, so a straight line to a fix bears
+        // no relation to the track that will actually be flown.
+        // Altitudes are CIFP only -- the OFP supplies route fixes, never a
+        // vertical profile. [[project_ofp_replay_harness]] (user's design,
+        // 2026-08-15) [C. P. Potter]
+        const float alt_now_tod =
+            ctx.pressure_alt_ft > 0.0f ? ctx.pressure_alt_ft : ctx.altitude_ft_msl;
+        double worst_lateness = -1e9;
+        auto consider = [&](const char *what, const std::string &ident, int alt_ft,
+                            double d_nm) {
+          if (alt_ft <= 0 || alt_ft >= cruise_ref || d_nm <= 0.0)
+            return;
+          const double need_nm =
+              descent_distance_nm(static_cast<double>(alt_now_tod) - alt_ft);
+          const double lateness = need_nm - d_nm;
+          if (lateness > worst_lateness) {
+            worst_lateness = lateness;
+            descent_target = alt_ft;
+            tod_binding_dist_nm = d_nm;
+            logging::debug("[DBG] pre-TOD candidate %s %s %d ft: needs %.0f NM, "
+                           "%.0f NM routed (%.0f late) -> binding",
+                           what, ident.c_str(), alt_ft, need_nm, d_nm, lateness);
+          }
+        };
+
+        // Walk the path the aircraft will ACTUALLY FLY, leg by leg, and offer every
+        // fix that publishes an altitude as a candidate at its own accumulated
+        // distance. Straight lines are wrong here: SALE3P loops back on itself, so
+        // "distance to the FAF" as the crow flies cuts across the procedure and
+        // under-reads the track by a wide margin (user, 2026-08-15).
+        //
+        // The chain is: remaining route fixes -> the rest of the STAR in PUBLISHED
+        // order (the loop included) -> the FAF. The STAR fixes are not in the route
+        // table yet at top-of-descent time, which is exactly why SALE3P's LUVOB /
+        // GOVNA / PIRUV were being ignored altogether.
+        struct Leg {
+          std::string ident;
+          double lat = 0.0, lon = 0.0;
+          int alt_ft = 0;
+          const char *src = "route";
+        };
+        std::vector<Leg> chain;
+        for (int i = std::max(0, s_route_fix_idx);
+             i < static_cast<int>(s_route_fixes.size()); ++i) {
+          const RouteFix &rf = s_route_fixes[i];
+          if (rf.lat == 0.0 && rf.lon == 0.0)
+            continue;
+          chain.push_back({rf.ident, rf.lat, rf.lon, rf.alt.feet, "route"});
+        }
+
+        if (!ctx.cifp_dir.empty() && !ofp.destination_icao.empty()) {
+          const std::string &dest_icao = ofp.destination_icao;
+          // STAR: every fix, constrained or not -- the unconstrained ones still
+          // carry the geometry the loop is made of.
+          // se.star_name, NOT s_assigned_star_name: at top-of-descent the arrival
+          // clearance has not been issued yet, so nothing is "assigned" -- keying on
+          // that left the chain with no STAR at all and silently dropped SALE3P's
+          // LUVOB / GOVNA / PIRUV.
+          const std::string star_now =
+              !s_assigned_star_name.empty() ? s_assigned_star_name
+              : (se_valid ? se.star_name : std::string());
+          if (!star_now.empty()) {
+            const auto star_all = cifp_reader::star_waypoints(
+                ctx.cifp_dir, dest_icao, star_now, false);
+            std::vector<std::string> want;
+            for (const auto &w : star_all)
+              want.push_back(w.ident);
+            const auto pos =
+                cifp_reader::lookup_fix_positions(ctx.cifp_dir, want, dest_icao);
+            for (const auto &w : star_all) {
+              bool already = false;
+              for (const auto &c : chain)
+                if (c.ident == w.ident) {
+                  already = true;
+                  break;
+                }
+              if (already)
+                continue;
+              auto it = pos.find(w.ident);
+              if (it == pos.end())
+                continue;
+              const int alt = (w.is_floor && !w.is_ceiling) ? 0 : w.alt.feet;
+              chain.push_back(
+                  {w.ident, it->second.first, it->second.second, alt, "STAR"});
+            }
+          }
+
+          // The FAF of the approach the arrival is HEADING for. Not committed yet --
+          // runway, STAR and approach can all still change -- so this is a planning
+          // estimate, exactly as a real controller descends on an expected arrival
+          // and refines later. approach_faf() needs no transition ident, unlike
+          // approach_procedure_waypoints() which returns nothing without one.
+          const std::string rwy = pick_arrival_runway(ctx, dest_icao);
+          if (!rwy.empty()) {
+            cifp_reader::ApproachInfo ai =
+                forced_ils(ctx.cifp_dir, dest_icao, rwy);
+            if (ai.type_str.empty())
+              ai = cifp_reader::best_approach(ctx.cifp_dir, dest_icao, rwy,
+                                              approach_gate_vis_m(ctx));
+            if (!ai.designator.empty()) {
+              const auto faf = cifp_reader::approach_faf(ctx.cifp_dir, dest_icao,
+                                                         ai.designator);
+              if (faf.alt_ft > 0 && (faf.lat != 0.0 || faf.lon != 0.0)) {
+                bool already = false;
+                for (const auto &c : chain)
+                  if (c.ident == faf.ident) {
+                    already = true;
+                    break;
+                  }
+                if (!already)
+                  chain.push_back(
+                      {faf.ident, faf.lat, faf.lon, faf.alt_ft, "FAF"});
+              }
+            }
+          }
+        }
+
+        {
+          std::string dbg;
+          for (const auto &c : chain)
+            dbg += " " + c.ident + "(" + std::string(c.src) + ")";
+          logging::debug("[DBG] pre-TOD chain idx=%d/%d:%s", s_route_fix_idx,
+                         static_cast<int>(s_route_fixes.size()), dbg.c_str());
+        }
+        double acc_nm = 0.0;
+        double prev_lat = ctx.latitude, prev_lon = ctx.longitude;
+        for (const auto &c : chain) {
+          acc_nm += traffic_geometry::distance_nm(prev_lat, prev_lon, c.lat, c.lon);
+          prev_lat = c.lat;
+          prev_lon = c.lon;
+          consider(c.src, c.ident, c.alt_ft, acc_nm);
+        }
         // alert = NM to lose the altitude at the shared descent slope
         // (kDescentSlopeFtPerNm = 265 ft/NM = 2.5 deg, matching the crossing/navlog-step
         // calcs and a typical VNAV) + clearance-exchange buffer (gs/20). PROPORTIONAL to
@@ -8284,16 +8448,28 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
           int se_idx = -1;
           for (int i = 0; i < static_cast<int>(s_route_fixes.size()); ++i)
             if (s_route_fixes[i].ident == se.ident) { se_idx = i; break; }
-          dist_nm = (se_idx >= 0)
-                        ? routed_distance_to_fix_idx(ctx, se_idx)
-                        : traffic_geometry::distance_nm(ctx.latitude,
-                                                        ctx.longitude, se.lat,
-                                                        se.lon);
+          // The binding candidate wins: its altitude fed alert_nm, so the distance
+          // compared against it must be the distance to THAT fix. Measuring to the
+          // STAR entry while aiming at a constraint further along the procedure is
+          // what fired the TOD before BANKO -- 32 NM to run compared against the
+          // 50 NM needed to reach LUVOB, which is 90 NM away around the SALE3P loop.
+          if (tod_binding_dist_nm > 0.0) {
+            dist_nm = tod_binding_dist_nm;
+          } else {
+            dist_nm = (se_idx >= 0)
+                          ? routed_distance_to_fix_idx(ctx, se_idx)
+                          : traffic_geometry::distance_nm(ctx.latitude,
+                                                          ctx.longitude, se.lat,
+                                                          se.lon);
+          }
         } else {
           // No CIFP match — measure to destination so prompt fires at correct time.
           const auto &dest_fix = ofp.navlog.back();
-          dist_nm = traffic_geometry::distance_nm(
-              ctx.latitude, ctx.longitude, dest_fix.lat, dest_fix.lon);
+          dist_nm = tod_binding_dist_nm > 0.0
+                        ? tod_binding_dist_nm
+                        : traffic_geometry::distance_nm(
+                              ctx.latitude, ctx.longitude, dest_fix.lat,
+                              dest_fix.lon);
         }
         // Expose the TOD estimate to the IFR tab (routed dist + alert distance).
         s_tod_dist_nm = static_cast<float>(dist_nm);
