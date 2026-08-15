@@ -554,6 +554,14 @@ static float s_approach_course_cooldown = 0.0f;
 // intercept. [C. P. Potter]
 static constexpr float kDirectSettleSecs = 90.0f;
 
+// Fix an ATC direct-to was actually issued to, or empty. Only that fix may be
+// challenged with "confirm DIRECT <fix>"; anything else is a plain off-route
+// deviation and must be phrased "confirm ROUTING ... to <fix>", which claims no
+// clearance that was never given (real vol 2026-08-15: the pilot was asked to
+// "confirm direct BAMSU" having never been cleared direct anywhere, and
+// reasonably wondered whether he had been). [C. P. Potter]
+static std::string s_last_direct_ident;
+
 // Route fix tracker — the COMPLETE ordered arrival sequence (enroute navlog +
 // ALL STAR + ALL approach fixes, constrained or not). Fixes are dropped from
 // the sequence ONLY when ATC issues a direct-to (user rule 2026-07-11), never
@@ -798,6 +806,7 @@ void reset() {
   s_star_shortcut_prev_idx = -1;
   s_star_shortcut_prev_route.clear();
   s_star_shortcut_iaf.clear();
+  s_last_direct_ident.clear();
   s_approach_faf = {};
   s_vec_plan = {};
   s_vec_step = -1;
@@ -981,6 +990,7 @@ void training_jump_approach() {
   s_star_shortcut_prev_idx = -1;
   s_star_shortcut_prev_route.clear();
   s_star_shortcut_iaf.clear();
+  s_last_direct_ident.clear();
   s_approach_faf = {};
   s_vec_plan = {};
   s_vec_step = -1;
@@ -1055,6 +1065,7 @@ void training_jump_arrival() {
   s_star_shortcut_prev_idx = -1;
   s_star_shortcut_prev_route.clear();
   s_star_shortcut_iaf.clear();
+  s_last_direct_ident.clear();
   s_approach_faf              = {};
   s_last_cleared_route_idx    = -1;
   s_faf_route_idx             = -1;
@@ -1136,6 +1147,7 @@ void training_set_arrival(const std::string &dest, const std::string &star,
   s_star_shortcut_prev_idx = -1;
   s_star_shortcut_prev_route.clear();
   s_star_shortcut_iaf.clear();
+  s_last_direct_ident.clear();
   s_no_star_direct_iaf.clear();
   s_route_fixes.clear();
   s_route_fix_idx = 0;
@@ -1661,7 +1673,8 @@ void process_transcript(Input in, Done done) {
       }
       if (s_star_shortcut_prev_idx >= 0)
         s_route_fix_idx = s_star_shortcut_prev_idx;
-      s_star_shortcut_iaf.clear(); // refused -> route reverts to the STAR; let the
+      s_star_shortcut_iaf.clear();
+  s_last_direct_ident.clear(); // refused -> route reverts to the STAR; let the
                                    // approach check-in rebuild normally again
       logging::info("IFR STAR shortcut: pilot UNABLE -> reverting to STAR "
                     "(tracker idx %d)",
@@ -8521,10 +8534,17 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
       if (out_text) {
         char buf[176];
         std::snprintf(buf, sizeof(buf),
-                      "%s, confirm direct %s, you appear tracking heading %.0f, "
-                      "expected %.0f.",
+                      "%s, confirm direct %s, you appear tracking heading "
+                      "%.0f, expected %.0f.",
                       callsign.c_str(), cc.ident.c_str(),
                       static_cast<double>(ctx.heading_true), cc.bearing_deg);
+        if (cc.ident != s_last_direct_ident)
+          std::snprintf(buf, sizeof(buf),
+                        "%s, confirm route, you appear tracking heading %.0f, "
+                        "expected %.0f to %s.",
+                        callsign.c_str(),
+                        static_cast<double>(ctx.heading_true), cc.bearing_deg,
+                        cc.ident.c_str());
         *out_text = buf;
       }
       logging::info("IFR en-route: course deviation hdg %.0f vs brg %.0f to %s (diff %.0f)",
@@ -8997,9 +9017,11 @@ static bool poll_descend_to_enter_tma(const xplane_context::XPlaneContext &ctx,
 // entirely, so "direct DOR, when able" drew "confirm routing, you appear tracking
 // heading 37, expected 319 to DOR" SEVEN seconds later -- before any turn could have
 // happened (real vol LFLP -> EDLW 2026-08-14). [C. P. Potter]
-static void arm_direct_settle() {
+static void arm_direct_settle(const std::string &ident = std::string()) {
   s_enroute_course_cooldown  = kDirectSettleSecs;
   s_approach_course_cooldown = kDirectSettleSecs;
+  if (!ident.empty())
+    s_last_direct_ident = ident;
 }
 
 static void apply_direct_to(const std::string &fix_ident) {
@@ -9009,7 +9031,7 @@ static void apply_direct_to(const std::string &fix_ident) {
       s_route_fix_idx = i;
       break;
     }
-  arm_direct_settle();
+  arm_direct_settle(fix_ident);
   atc_state_machine::cancel_readback();
 }
 
@@ -9665,10 +9687,17 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
         const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
         char buf[176];
         std::snprintf(buf, sizeof(buf),
-                      "%s, confirm direct %s, you appear tracking heading %.0f, "
-                      "expected %.0f.",
+                      "%s, confirm direct %s, you appear tracking heading "
+                      "%.0f, expected %.0f.",
                       callsign.c_str(), cc.ident.c_str(),
                       static_cast<double>(ctx.heading_true), cc.bearing_deg);
+        if (cc.ident != s_last_direct_ident)
+          std::snprintf(buf, sizeof(buf),
+                        "%s, confirm route, you appear tracking heading %.0f, "
+                        "expected %.0f to %s.",
+                        callsign.c_str(),
+                        static_cast<double>(ctx.heading_true), cc.bearing_deg,
+                        cc.ident.c_str());
         *out_text = buf;
       }
       if (out_requires_readback)
@@ -10060,7 +10089,7 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
   // so it must arm the post-direct settle explicitly -- without it the course
   // monitor challenged the routing 7 s after the direct was issued (LFLP -> EDLW
   // 2026-08-14). [C. P. Potter]
-  arm_direct_settle();
+  arm_direct_settle(pick.ident);
 
   const std::string &cs = atc_state_machine::session_callsign();
   const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
@@ -12476,10 +12505,17 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         if (out_text) {
           char buf[176];
           std::snprintf(buf, sizeof(buf),
-                        "%s, confirm direct %s, you appear tracking heading %.0f, "
-                        "expected %.0f.",
+                        "%s, confirm direct %s, you appear tracking heading "
+                        "%.0f, expected %.0f.",
                         cs.c_str(), cc.ident.c_str(),
                         static_cast<double>(ctx.heading_true), cc.bearing_deg);
+          if (cc.ident != s_last_direct_ident)
+            std::snprintf(buf, sizeof(buf),
+                          "%s, confirm route, you appear tracking heading %.0f, "
+                          "expected %.0f to %s.",
+                          cs.c_str(),
+                          static_cast<double>(ctx.heading_true), cc.bearing_deg,
+                          cc.ident.c_str());
           *out_text = buf;
         }
         logging::info("[approach] course deviation hdg %.0f vs brg %.0f to %s (diff %.0f)",
