@@ -307,5 +307,50 @@ reject "Chambery never clears to the top of Geneva's TMA (the FL190 bug)" \
        "IFR SID climb: FL190 \(step1\)"
 
 echo
+# Regression guard (real vol LFLP -> EDLW, 2026-08-14/15): the arrival into a field
+# whose approach is served from elsewhere. Two defects from those flights, both
+# reproducible here against the REAL CIFP -- so they no longer need a flight to catch.
+#   - NON-RNAV approaches lost their whole final segment: the CIFP reader treated
+#     route type "R" as "final approach body", but that letter is the APPROACH TYPE
+#     (I=ILS, R=RNAV, D=VOR/DME...). EDLW ILS 06 yielded 2 waypoints instead of 6,
+#     so there was no FAF and the Tower handoff could never fire.
+#   - FORCE ILS had never been exercised end to end; at EDLW it must select I06 and
+#     the descent clearance must SAY "ILS approach runway 06".
+# Navlog rebuilt from the flight's own Log.txt (idents + coordinates), so the fixes
+# and their positions are the real ones.
+echo "=== EDLW arrival: non-RNAV final segment + FORCE ILS (LFLP -> EDLW) ==="
+edlw='set navlog_clear 1
+set navlog_fix BAMSU 51.1888 7.3090 17400 DSC 1
+set navlog_fix PADBA 51.3117 7.6786 10400 DSC 1
+set navlog_fix HEFME 51.3872 7.7703 7800 DSC 1
+set navlog_fix BARAG 51.4186 7.8086 6900 DSC 1
+set navlog_fix ADEMI 51.4828 7.8886 4800 DSC 1
+set dest EDLW
+set cruise 23000
+set runway 06
+set lat 51.0670
+set lon 6.9953
+set alt 22950
+set pa 22994
+set agl 21000
+set on_ground 0
+set gs 250
+set vs -800
+set com 118.750
+set freq_type APPROACH
+jump enroute 23000
+say November Romeo Charlie ready to descend
+poll 5
+track 51.2500 7.4000 18000 20
+track 51.3900 7.7700 12000 20
+quit'
+OUT="$(printf '%s' "$edlw" | XP_ATC_FORCE_ILS=1 "$REPL" 2>&1)"
+want   "FORCE ILS selects the published ILS at EDLW 06"      "force-ILS lookup -> I06"
+want   "the ILS final segment is read (6 waypoints, not 2)"  "EDLW I06 IAF DOR -> 6 approach waypoints"
+want   "the STAR still resolves from the filed last fix"     "STAR entry_fix=ADEMI -> STAR=ADEM3A"
+want   "the clearance names the ILS"                         "expect ILS approach runway 06"
+reject "the RNAV is not selected under FORCE ILS"            "approach_by_designator R06"
+
+
 if [[ $fails -eq 0 ]]; then echo "AFIS scenario: ALL PASS"; exit 0
 else echo "AFIS scenario: $fails FAILURE(S)"; exit 1; fi
