@@ -6745,39 +6745,39 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
     }
   }
 
-  // Fallback 1: destination airport's own APPROACH frequency from apt.dat.
-  // ctx.airport_freqs is the NEAREST airport's freq list — only valid as
-  // the destination's approach freq once nearest_airport_id has actually
-  // switched to the destination. Guard on that equality: without it, a
-  // handoff issued while still ~50+ NM out picks a random nearer airport's
-  // approach freq (LIMF -> LFLP 2026-07-09: nearest=LFLI gave 136.250
-  // instead of the correct Geneva sector 119.530). When nearest != dest,
-  // skip P2 and let the sector-based handoff (openair/atc.dat) or the
-  // later poll_approach local handoff serve the correct frequency.
-  // NOTE: minimal call-site guard for v4.3.1; the full nearest_airport ->
-  // s_assigned_dest_icao refactor is deferred to v4.4.0
-  // (see [[feedback_nearest_airport_ifr]]).
-  const bool nearest_is_dest =
-      !s_assigned_dest_icao.empty() &&
-      ctx.nearest_airport_id == s_assigned_dest_icao;
-  if (app_label.empty() && nearest_is_dest) {
-    float arr_app_freq = ctx.airport_freqs.first_mhz(FT::APPROACH);
-    float arr_dep_freq = ctx.airport_freqs.first_mhz(FT::DEPARTURE);
-    float arr_freq = arr_app_freq >= 100.0f ? arr_app_freq : arr_dep_freq;
+  // Fallback 1: the DESTINATION airport's own APPROACH (or DEPARTURE) frequency
+  // from apt.dat, looked up BY ICAO.
+  //
+  // This used to read ctx.airport_freqs -- the NEAREST airport's list -- behind a
+  // `nearest_airport_id == dest` guard, with a note deferring the real fix to
+  // v4.4.0. The guard was correct but crippling: nearest_airport_id drifts
+  // continuously in flight, so on the LFLP -> EDLW arrival of 2026-08-15 it was
+  // 'XEDD4' (a scenery marker with no frequencies) 20 NM out, the guard closed,
+  // and the arrival got NO approach controller at all -- hence no descent below
+  // FL180 and no Tower handoff. Keying on s_assigned_dest_icao removes both the
+  // guard and the drift. [[feedback_nearest_airport_ifr]]
+  if (app_label.empty() && !s_assigned_dest_icao.empty()) {
+    const float arr_app_freq =
+        xplane_context::freq_mhz_for(s_assigned_dest_icao, FT::APPROACH);
+    const float arr_dep_freq =
+        xplane_context::freq_mhz_for(s_assigned_dest_icao, FT::DEPARTURE);
+    const float arr_freq = arr_app_freq >= 100.0f ? arr_app_freq : arr_dep_freq;
     if (arr_freq >= 100.0f) {
-      FT ft = arr_app_freq >= 100.0f ? FT::APPROACH : FT::DEPARTURE;
-      std::string raw = ctx.airport_freqs.first_name(ft);
+      const FT ft = arr_app_freq >= 100.0f ? FT::APPROACH : FT::DEPARTURE;
+      const std::string raw =
+          xplane_context::freq_name_for(s_assigned_dest_icao, ft);
+      // The apt.dat row name is the SERVING unit, which need not be the field:
+      // EDLW publishes "LANGEN RADAR", because Dortmund has no approach unit of
+      // its own. Speak that name rather than "<dest> Approach".
       app_label = raw.empty()
-                      ? (ctx.nearest_airport_id + " Approach")
-                      : controller_location(raw) + " Approach";
+                      ? (spoken_airport_name(s_assigned_dest_icao) + " Approach")
+                      : controller_location(raw);
       app_freq = arr_freq;
-      logging::info("IFR arrival handoff: [P2-apt.dat] %s %.3f (nearest=%s)",
-                    app_label.c_str(), app_freq,
-                    ctx.nearest_airport_id.c_str());
+      logging::info("IFR arrival handoff: [P2-apt.dat dest %s] %s %.3f",
+                    s_assigned_dest_icao.c_str(), app_label.c_str(), app_freq);
     } else {
-      logging::info(
-          "IFR arrival handoff: [P2-apt.dat] no APP/DEP freq for nearest=%s",
-          ctx.nearest_airport_id.c_str());
+      logging::info("IFR arrival handoff: [P2-apt.dat] no APP/DEP freq at dest %s",
+                    s_assigned_dest_icao.c_str());
     }
   }
 
@@ -6853,48 +6853,8 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
     }
   }
 
-  // P4 -- the DESTINATION AIRPORT's own approach/radar frequency (apt.dat).
-  // P1/P2/P3 all resolve a controller by POLYGON, and at a field whose approach
-  // service is provided by a distant unit with no local polygon they all fail
-  // even though the frequency is published on the field itself.
-  //
-  // EDLW/Dortmund, real vol 2026-08-14: openair has a vertical hole from 4500 ft
-  // to 10000 ft over the field (the German approach layer there is CLASS E, and
-  // the export carries no class E at all -- only R/Q/D/CTR/C/P/A/B), and atc.dat
-  // has only LANGEN as 'ctr' and DORTMUND as 'twr', no 'tracon'. Both datasets
-  // are RIGHT: Dortmund has no approach unit of its own, the service is Langen
-  // Radar -- which apt.dat lists on the field as LANGEN RADAR 125.225 and which
-  // the plugin's own Frequencies panel was displaying the whole time.
-  //
-  // So before giving up, ask the field. This needs no hand-maintained overlay and
-  // works at any airport whose approach frequency is published. [C. P. Potter]
   if (app_label.empty()) {
-    using FT = xplane_context::FrequencyType;
-    const float apt_app_mhz = ctx.airport_freqs.first_mhz(FT::APPROACH);
-    if (apt_app_mhz >= 100.0f) {
-      std::string raw = ctx.airport_freqs.first_name(FT::APPROACH);
-      // Title-case the apt.dat name ("LANGEN RADAR" -> "Langen Radar"); fall back
-      // to the destination's spoken airport NAME + " Approach" when unnamed.
-      std::string nice;
-      bool cap = true;
-      for (char c : raw) {
-        nice += cap ? static_cast<char>(std::toupper(static_cast<unsigned char>(c)))
-                    : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        cap = (c == ' ');
-      }
-      if (nice.empty()) {
-        const std::string apt_name = spoken_airport_name(s_assigned_dest_icao);
-        nice = (apt_name.empty() ? s_assigned_dest_icao : apt_name) + " Approach";
-      }
-      app_label = nice;
-      app_freq  = apt_app_mhz;
-      logging::info("IFR arrival handoff: [P4-apt.dat %s field frequency] %s %.3f",
-                    s_assigned_dest_icao.c_str(), app_label.c_str(), app_freq);
-    }
-  }
-
-  if (app_label.empty()) {
-    logging::info("IFR arrival handoff: no Approach controller (P1+P2+P3+P4 failed) -- silent");
+    logging::info("IFR arrival handoff: no Approach controller (P1+P2+P3 failed) -- silent");
     return false;
   }
 

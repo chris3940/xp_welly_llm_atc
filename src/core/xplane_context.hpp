@@ -284,6 +284,18 @@ std::pair<double, double> airport_pos_for(const std::string &icao);
 // freq cache. Returns 0.0f if the airport is unknown or has no Tower freq.
 float tower_mhz_for(const std::string &icao);
 
+// Frequency of the given TYPE at the given ICAO, from the apt.dat freq cache,
+// plus the row's spoken name. 0.0f / empty when unknown.
+//
+// USE THESE, NOT ctx.airport_freqs, ANYWHERE AIRBORNE. ctx.airport_freqs
+// belongs to ctx.nearest_airport_id, which drifts continuously in flight -- on
+// the LFLP -> EDLW arrival of 2026-08-15 it was 'XEDD4', a scenery marker with
+// no frequencies at all, 20 NM from the destination. Airborne IFR must key on
+// the persistent flight airport (s_departure_apt_id / s_assigned_dest_icao).
+// [[feedback_nearest_airport_ifr]]
+float freq_mhz_for(const std::string &icao, FrequencyType type);
+std::string freq_name_for(const std::string &icao, FrequencyType type);
+
 // Returns true if the airport has a dedicated Ground frequency. Use this to
 // distinguish a real Tower from an AFIS/Information service (AFIS airports
 // have a Tower-type freq but no Ground freq, e.g. LFQA 134.925 AFIS).

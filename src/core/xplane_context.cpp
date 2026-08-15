@@ -124,6 +124,13 @@ const char *frequency_type_name(FrequencyType ft) {
 // are simply omitted there to avoid a duplicate-symbol link error.
 #if !defined(_WIN32)
 __attribute__((weak)) float tower_mhz_for(const std::string &) { return 0.0f; }
+__attribute__((weak)) float freq_mhz_for(const std::string &, FrequencyType) {
+  return 0.0f;
+}
+__attribute__((weak)) std::string freq_name_for(const std::string &,
+                                                FrequencyType) {
+  return {};
+}
 __attribute__((weak)) bool has_ground_freq_for(const std::string &) { return false; }
 __attribute__((weak)) bool has_approach_freq_for(const std::string &) { return false; }
 __attribute__((weak)) std::string airport_name_for(const std::string &) {

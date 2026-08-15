@@ -2319,6 +2319,20 @@ std::pair<double, double> airport_pos_for(const std::string &icao) {
   return (it != pos_cache_.end()) ? it->second : std::make_pair(0.0, 0.0);
 }
 
+float freq_mhz_for(const std::string &icao, FrequencyType type) {
+  if (!towered_cache_ready_ || icao.empty())
+    return 0.0f;
+  auto it = freq_cache_.find(icao);
+  return (it == freq_cache_.end()) ? 0.0f : it->second.first_mhz(type);
+}
+
+std::string freq_name_for(const std::string &icao, FrequencyType type) {
+  if (!towered_cache_ready_ || icao.empty())
+    return {};
+  auto it = freq_cache_.find(icao);
+  return (it == freq_cache_.end()) ? std::string{} : it->second.first_name(type);
+}
+
 float tower_mhz_for(const std::string &icao) {
   if (!towered_cache_ready_ || icao.empty())
     return 0.0f;
