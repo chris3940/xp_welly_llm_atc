@@ -54,7 +54,7 @@ struct Record {
 
 // Parse earth_msa.dat. Pass an empty path to disable (headless tools without
 // Custom Data). Safe to call twice; the second call replaces the first.
-void init(std::string path);
+void init(const std::string &path);
 void stop();
 
 // True once init() has finished parsing.

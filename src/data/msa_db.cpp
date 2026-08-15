@@ -40,7 +40,7 @@ double distance_nm(double la1, double lo1, double la2, double lo2) {
 
 } // namespace
 
-void init(std::string path) {
+void init(const std::string &path) {
   {
     std::lock_guard<std::mutex> lk(s_mutex);
     s_by_icao.clear();
