@@ -452,9 +452,18 @@ int ctr_ceiling_ft(double lat, double lon) {
   return 0;
 }
 
+// NOTE: terminal_tma() deliberately does NOT fall back to atc.dat. Measured on the
+// DIK -> EDLW replay (2026-08-15): dest_terminal_tma_below() probes the AIRCRAFT's
+// position as well as the destination's, and with a fallback atc.dat answered there
+// with a NEIGHBOURING terminal area (ceiling 10000 ft) which the guard then mistook
+// for the destination's -- firing "descend-to-enter terminal area -> FL090" 63 NM
+// out, on top of the ladder's FL100 twenty seconds earlier. Silence is the correct
+// answer for that guard: it reads "no volume" as "can't tell" and stays permissive.
+// find_enclosing() keeps the fallback, which is where the value is (sector handoffs
+// and the enclosing-volume queries). [C. P. Potter]
 AirspaceEntry terminal_tma(double lat, double lon) {
   if (!s_ready)
-    return atc_dat_entry(lat, lon, 3000, /*want_tma=*/true);
+    return {};
   int best_floor = 1000000000; // base (lowest-floor) TMA over the point
   const Entry *best = nullptr; // ties on floor break to the higher ceiling
   for (const auto &e : s_entries) {
@@ -475,7 +484,7 @@ AirspaceEntry terminal_tma(double lat, double lon) {
     }
   }
   if (best == nullptr)
-    return atc_dat_entry(lat, lon, 3000, /*want_tma=*/true);
+    return {}; // see the note above terminal_tma(): no atc.dat fallback here
   return {best->name, best->ac_class, best->floor_ft, best->ceiling_ft,
           best->freq_khz};
 }

@@ -166,14 +166,18 @@ TEST_CASE_METHOD(WithoutOpenAir, "fallback: roles map to airspace classes",
   CHECK(openair_db::find_enclosing(kLat, lon_of(9), 15000).ac_class == AC::CTA);
 }
 
-TEST_CASE_METHOD(WithoutOpenAir, "fallback: terminal_tma finds the tracon",
+TEST_CASE_METHOD(WithoutOpenAir, "fallback: terminal_tma does NOT fall back",
                  "[openair][atcdat]") {
-  // terminal_tma() must restrict itself to TRACON records -- returning the centre
-  // would hand the descent logic a 24500 ft "terminal" ceiling.
-  const auto t = openair_db::terminal_tma(kLat, lon_of(9));
-  CHECK(t.name == "LONE TRACON");
-  CHECK(t.ceiling_ft == 10000);
-  CHECK(openair_db::terminal_tma_ceiling(kLat, lon_of(9)) == 10000);
+  // Deliberate asymmetry, and the reason is worth keeping: dest_terminal_tma_below()
+  // probes the AIRCRAFT's position as well as the destination's, so a fallback made
+  // atc.dat answer with a NEIGHBOURING terminal area which the guard mistook for the
+  // destination's -- "descend-to-enter terminal area -> FL090" fired 63 NM out on the
+  // DIK -> EDLW replay (2026-08-15). Silence is what that guard needs: it reads "no
+  // volume" as "can't tell" and stays permissive. find_enclosing() keeps the fallback.
+  CHECK(openair_db::terminal_tma(kLat, lon_of(9)).name.empty());
+  CHECK(openair_db::terminal_tma_ceiling(kLat, lon_of(9)) == 0);
+  // ... while the enclosing query at the very same point still answers.
+  CHECK(openair_db::find_enclosing(kLat, lon_of(9), 5000).name == "LONE TRACON");
 }
 
 TEST_CASE_METHOD(WithoutOpenAir, "fallback: outside everything stays empty",
