@@ -47,6 +47,7 @@ add_executable(xp_wellys_atc_tests
     test_audit_logging.cpp
     test_model_manifest.cpp
     test_simbrief_ofp.cpp
+    test_msa_db.cpp
     test_openair_db.cpp
     test_sector_picker.cpp
 )

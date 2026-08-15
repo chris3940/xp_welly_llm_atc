@@ -1,0 +1,24 @@
+I
+1150 Version - synthetic test fixture, hand-written for tests/test_msa_db.cpp
+*
+* Layout copied from the real file; every value below is invented EXCEPT the
+* shape of the records. Centre points are placed at whole degrees so the test
+* can compute bearings by hand.
+*
+* TESTA -- centre at 45N 005E, four sectors, the classic four-quadrant chart.
+*          Sectors run CLOCKWISE from their start bearing:
+*            000-090 -> 5000 ft      090-180 -> 3000 ft
+*            180-270 -> 4000 ft      270-360 -> 7000 ft
+*          Note the 000 sector: a zero START bearing with a real altitude is NOT
+*          the "000 000" terminator, and must survive parsing.
+ 1 TESTA TT TEST M 000 050 25 090 030 25 180 040 25 270 070 25 000 000  0
+*
+* TESTB -- same airport, a DIFFERENT centre point (an IAF), so records_for()
+*          must return both and minimum_ft() must pick by centre ident.
+ 2 TESTB TT TEST M 010 090 30 190 060 30 000 000  0
+*
+* SOLO -- a single sector covering the whole circle, radius 10 NM only.
+ 1  SOLO TT TSOL M 000 025 10 000 000  0
+*
+* TRUEB -- bearings flagged TRUE rather than magnetic, so magvar must be ignored.
+ 1 TRUEB TT TTRU T 000 080 25 180 020 25 000 000  0
