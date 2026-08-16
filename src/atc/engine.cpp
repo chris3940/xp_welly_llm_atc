@@ -9010,8 +9010,16 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
   // coarse 5 NM cross-track check above (heading-vs-bearing, not offset).
   s_enroute_course_cooldown = std::max(0.0f, s_enroute_course_cooldown - dt);
   if (s_enroute_course_cooldown <= 0.0f) {
+    // No route challenge once the aircraft is flying the APPROACH. It is not on
+    // the route any more and is not going back to it: on the flight of
+    // 2026-08-16, forty seconds after "cleared ILS approach runway 06, report
+    // established" came "confirm route, you appear tracking heading 53, expected
+    // 128 to PADBA". Also silent under vectors and after an abandoned sequence,
+    // for the same reason -- the aircraft is where ATC put it. [C. P. Potter]
     const CourseCheck cc =
-        vectoring_active() ? CourseCheck{} : check_course(ctx, 25.0);
+        (vectoring_active() || s_vtf_abandoned || s_approach_cleared_issued)
+            ? CourseCheck{}
+            : check_course(ctx, 25.0);
     if (cc.valid && cc.off_course && cc.dist_nm > 3.0) {
       s_enroute_course_cooldown = 180.0f;
       if (out_text) {
@@ -10863,8 +10871,16 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
   // it needs the leg-track refinement (see the consolidation roadmap).
   s_enroute_course_cooldown = std::max(0.0f, s_enroute_course_cooldown - dt);
   if (s_enroute_course_cooldown <= 0.0f) {
+    // No route challenge once the aircraft is flying the APPROACH. It is not on
+    // the route any more and is not going back to it: on the flight of
+    // 2026-08-16, forty seconds after "cleared ILS approach runway 06, report
+    // established" came "confirm route, you appear tracking heading 53, expected
+    // 128 to PADBA". Also silent under vectors and after an abandoned sequence,
+    // for the same reason -- the aircraft is where ATC put it. [C. P. Potter]
     const CourseCheck cc =
-        vectoring_active() ? CourseCheck{} : check_course(ctx, 25.0);
+        (vectoring_active() || s_vtf_abandoned || s_approach_cleared_issued)
+            ? CourseCheck{}
+            : check_course(ctx, 25.0);
     if (cc.valid && cc.off_course && cc.dist_nm > 3.0) {
       s_enroute_course_cooldown = 180.0f;
       if (out_text) {
@@ -11581,8 +11597,16 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
   // (ARRIVAL is mutually exclusive with en-route/descent).
   s_enroute_course_cooldown = std::max(0.0f, s_enroute_course_cooldown - dt);
   if (s_enroute_course_cooldown <= 0.0f) {
+    // No route challenge once the aircraft is flying the APPROACH. It is not on
+    // the route any more and is not going back to it: on the flight of
+    // 2026-08-16, forty seconds after "cleared ILS approach runway 06, report
+    // established" came "confirm route, you appear tracking heading 53, expected
+    // 128 to PADBA". Also silent under vectors and after an abandoned sequence,
+    // for the same reason -- the aircraft is where ATC put it. [C. P. Potter]
     const CourseCheck cc =
-        vectoring_active() ? CourseCheck{} : check_course(ctx, 25.0);
+        (vectoring_active() || s_vtf_abandoned || s_approach_cleared_issued)
+            ? CourseCheck{}
+            : check_course(ctx, 25.0);
     if (cc.valid && cc.off_course && cc.dist_nm > 3.0) {
       s_enroute_course_cooldown = 180.0f;
       if (out_text) {
@@ -13726,8 +13750,16 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
   if (state != AS::IFR_APPROACH_TOWER && state != AS::IFR_LANDING_CLEARED) {
     s_approach_course_cooldown = std::max(0.0f, s_approach_course_cooldown - dt);
     if (s_approach_course_cooldown <= 0.0f) {
-      const CourseCheck cc =
-        vectoring_active() ? CourseCheck{} : check_course(ctx, 25.0);
+      // No route challenge once the aircraft is flying the APPROACH. It is not on
+    // the route any more and is not going back to it: on the flight of
+    // 2026-08-16, forty seconds after "cleared ILS approach runway 06, report
+    // established" came "confirm route, you appear tracking heading 53, expected
+    // 128 to PADBA". Also silent under vectors and after an abandoned sequence,
+    // for the same reason -- the aircraft is where ATC put it. [C. P. Potter]
+    const CourseCheck cc =
+        (vectoring_active() || s_vtf_abandoned || s_approach_cleared_issued)
+            ? CourseCheck{}
+            : check_course(ctx, 25.0);
       if (cc.valid && cc.off_course && cc.dist_nm > 2.0) {
         s_approach_course_cooldown = 90.0f;
         if (out_text) {
