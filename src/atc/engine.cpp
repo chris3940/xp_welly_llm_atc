@@ -201,9 +201,9 @@ static float s_descent_arrival_check_sec = 0.0f; // throttle DESCENT->ARRIVAL po
 // 0 = no deferral pending (cruise was already <= FL200, or single-step). The
 // freq change is DECOUPLED -- poll_acc_sector_change fires at the real boundary.
 static bool s_vector_mode_logged = false;    // vectoring-mode decision, once per arrival
-// Frequency the FULL registration was last spoken on; empty means the next call
-// is a first contact. See spoken_callsign().
-static std::string s_callsign_full_said_on;
+// Whether the FULL registration has been spoken yet on this flight.
+// See spoken_callsign().
+static bool s_callsign_full_used = false;
 // Radar-vectoring state machine (docs/force-app-vectoring.md).
 enum class VecLeg { None, Displace, Downwind, Base, Intercept, Axis, Done, Refused };
 static VecLeg s_vtf_leg          = VecLeg::None;
@@ -796,7 +796,7 @@ void reset() {
   s_vector_mode_logged = false;
   // A jump or a reset is a FIRST CONTACT: the controller has not addressed
   // this aircraft yet, so the next call gives the registration in full.
-  s_callsign_full_said_on.clear();
+  s_callsign_full_used = false;
   s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
   s_vtf_leg = VecLeg::None;
@@ -939,7 +939,7 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_vector_mode_logged = false;
   // A jump or a reset is a FIRST CONTACT: the controller has not addressed
   // this aircraft yet, so the next call gives the registration in full.
-  s_callsign_full_said_on.clear();
+  s_callsign_full_used = false;
   s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
   s_vtf_leg = VecLeg::None;
@@ -2016,8 +2016,7 @@ void process_transcript(Input in, Done done) {
       // *impersonated* Milan on 121.100 due to the too-permissive
       // APPROACH classification check).
       if (s_sector_checkin_pending && s_pending_handoff_freq_mhz > 100.0f) {
-        const std::string &sess_cs = atc_state_machine::session_callsign();
-        const std::string &cs = sess_cs.empty() ? settings::pilot_callsign() : sess_cs;
+        const std::string cs = spoken_callsign(ctx);
         // Target of the reminder = pending controller (Milan).  The
         // speaker of this transmission is still the current controller
         // (Torino) — the transcript labels the message with
@@ -2493,9 +2492,7 @@ void process_transcript(Input in, Done done) {
     if (st_rd == AS2::IFR_DESCENT || st_rd == AS2::IFR_ARRIVAL ||
         st_rd == AS2::IFR_APPROACH_CONTACT || st_rd == AS2::IFR_APPROACH_DESCENT) {
       s_pilot_requested_descent = true; // any poll able to step down now may
-      const std::string &cs_rd = atc_state_machine::session_callsign();
-      const std::string &callsign_rd =
-          cs_rd.empty() ? settings::pilot_callsign() : cs_rd;
+      const std::string callsign_rd = spoken_callsign(ctx);
       const int ta_rd = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
       const int cleared_rd = s_enroute_cleared_alt_ft;
       Output out_rd;
@@ -9871,12 +9868,13 @@ static std::string spoken_callsign(const xplane_context::XPlaneContext &ctx) {
   const std::string &cs = atc_state_machine::session_callsign();
   const std::string full = cs.empty() ? settings::pilot_callsign() : cs;
 
-  const float mhz = (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
-  char key[16];
-  std::snprintf(key, sizeof(key), "%.3f", static_cast<double>(mhz));
-  if (s_callsign_full_said_on != key) {
-    s_callsign_full_said_on = key;
-    return full; // first call on this frequency -- full registration
+  // ONCE per flight, not once per frequency. A controller taking over does not
+  // necessarily go back to the full registration, and the user reported hearing
+  // "November One One One Romeo Charlie" repeatedly -- noting that even the
+  // answer to a check-in is often already abbreviated (2026-08-16).
+  if (!s_callsign_full_used) {
+    s_callsign_full_used = true;
+    return full; // first contact of the flight -- full registration
   }
 
   std::vector<std::string> w;
@@ -11532,9 +11530,7 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
     if (cc.valid && cc.off_course && cc.dist_nm > 3.0) {
       s_enroute_course_cooldown = 180.0f;
       if (out_text) {
-        const std::string &cs = atc_state_machine::session_callsign();
-        const std::string &callsign =
-            cs.empty() ? settings::pilot_callsign() : cs;
+        const std::string callsign = spoken_callsign(ctx);
         char buf[188];
         std::snprintf(buf, sizeof(buf),
                       "%s, confirm routing, you appear tracking heading %.0f, "
