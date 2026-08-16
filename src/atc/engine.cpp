@@ -299,6 +299,9 @@ static std::string resolve_approach_iaf(const xplane_context::XPlaneContext &ctx
 static void build_sid_route_table(const xplane_context::XPlaneContext &ctx); // departure half of the route table
 static std::string approach_clearance_phrase(
     const xplane_context::XPlaneContext &ctx); // "RNAV Zulu approach runway 08"; defined near poll_approach
+// Full registration on first contact with a controller, abbreviated afterwards
+// (registration callsigns only -- an operator callsign is never abbreviated).
+static std::string spoken_callsign(const xplane_context::XPlaneContext &ctx);
 static double routed_distance_to_fix_idx(const xplane_context::XPlaneContext &ctx,
                                          int target_idx); // defined before check_next_fix
 static std::string controller_label_for(const airspace_db::Controller *ctrl); // defined near handoff helpers
@@ -4418,8 +4421,7 @@ bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
   if (controller_label.empty())
     return false; // uncontrolled airspace — silent transition, nothing to speak
 
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
 
   if (out_text) {
     char buf[160];
@@ -4561,8 +4563,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
   s_sid_climb_timer += dt;
 
   const auto &defaults = flight_phase::get_ifr_defaults();
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
 
   // One-time initialisation on first entry to IFR_RADAR_CONTACT.
   if (!s_sid_initialized) {
@@ -6403,8 +6404,7 @@ bool poll_star_clearance_safety_net(const xplane_context::XPlaneContext &ctx,
                                                  se.lat, se.lon);
   if (d > kStarClearanceLeadNm)
     return false; // not yet within lead distance of the STAR entry
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
   const auto &defaults = flight_phase::get_ifr_defaults();
   logging::info("IFR STAR safety-net: %.0f NM from STAR entry %s, arrival clearance "
                 "not yet issued -> issuing now (state %s)",
@@ -7563,8 +7563,7 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
     return false; // not yet at the top of descent for this crossing
   s_descent_cifp_target_ft = issue_ft;
   s_enroute_cleared_alt_ft = issue_ft; // coordinates with the walker
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
   const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
   // An intermediate rung is not the constraint, so let the formatter decide FL vs
   // feet from the transition level; only the constraint itself carries its own
@@ -7658,8 +7657,7 @@ bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
     return false;
 
   s_speed_250_warned = true;
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
   // DIAGNOSTIC (alpha-20): which fix drove the cap + the tracker index, to pin the
   // premature-200kt bug (LP403 issued at COLLO). Remove once the LFLP looping-RNAV
   // enforcement is fixed.
@@ -8081,8 +8079,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
   }
 
   const auto &defaults = flight_phase::get_ifr_defaults();
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
 
   // ── Sub-phase 1.7: filed FL step changes ───────────────────────────────
   // When the FPL contains explicit "<FIX>/N<spd>F<FL>" step markers,
@@ -9142,8 +9139,7 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
   }
   s_sector_checkin_pending = true;
   if (out_text) {
-    const std::string &cs = atc_state_machine::session_callsign();
-    const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+    const std::string callsign = spoken_callsign(ctx);
     char buf[160];
     std::snprintf(buf, sizeof(buf), "%s, contact %s on %.3f.", callsign.c_str(),
                   new_label.c_str(), new_mhz);
@@ -9232,8 +9228,7 @@ bool poll_altitude_compliance(const xplane_context::XPlaneContext &ctx, float dt
     return false;
   s_alt_comp_sent = true;
   if (out_text) {
-    const std::string &cs = atc_state_machine::session_callsign();
-    const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+    const std::string callsign = spoken_callsign(ctx);
     char buf[160];
     // Two different situations, and only one of them is about a vertical
     // movement the pilot was asked to make:
@@ -9383,8 +9378,7 @@ static bool poll_descend_to_enter_tma(const xplane_context::XPlaneContext &ctx,
     return false;
   s_descent_tma_target_ft = target_ft;
   s_enroute_cleared_alt_ft = target_ft; // re-arms poll_altitude_compliance
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
   const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
   const std::string clr =
       format_alt_clearance(target_ft, AltHint::Auto, ctx.qnh_hpa, ta);
@@ -9746,6 +9740,74 @@ static bool vectoring_active() {
          s_vtf_leg == VecLeg::Axis;
 }
 
+// ── Spoken callsign ───────────────────────────────────────────────────────────
+// First contact with a controller: the registration IN FULL. Afterwards he
+// abbreviates. The plugin never did -- "November One One One Romeo Charlie" went
+// out 17 times in one flight (2026-08-16) -- because every site used
+// settings::pilot_callsign() verbatim.
+//
+// ICAO abbreviates a REGISTRATION callsign to its first element plus the last two
+// ("November One One One Romeo Charlie" -> "November Romeo Charlie"), which is
+// what the pilot reads back himself. An OPERATOR callsign (airline name + flight
+// number, "Speedbird One Two Three") is NEVER abbreviated -- dropping part of a
+// flight number would name a different flight. So abbreviate only when every word
+// after the first is a NATO letter or a spoken digit; anything else is an
+// operator callsign and stays whole.
+//
+// The full form returns on each new frequency: a new controller has not addressed
+// this aircraft yet. [C. P. Potter]
+static std::string s_callsign_full_said_on; // frequency the full form was used on
+
+static bool is_registration_callsign(const std::vector<std::string> &w) {
+  static const std::unordered_set<std::string> kSpoken = {
+      "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+      "india", "juliet", "juliett", "kilo", "lima", "mike", "november", "oscar",
+      "papa", "quebec", "romeo", "sierra", "tango", "uniform", "victor",
+      "whiskey", "xray", "x-ray", "yankee", "zulu", "zero", "one", "two",
+      "three", "four", "five", "six", "seven", "eight", "nine", "niner"};
+  // A registration is spoken entirely in NATO letters and digits, and it must
+  // contain at least one LETTER. Without that second test "Speedbird One Two
+  // Three" passes as a registration and gets abbreviated to "Speedbird Two
+  // Three" -- a different flight number, which is precisely why ICAO forbids
+  // abbreviating operator callsigns.
+  static const std::unordered_set<std::string> kDigits = {
+      "zero", "one", "two",   "three", "four",
+      "five", "six", "seven", "eight", "nine", "niner"};
+  bool has_letter = false;
+  for (std::size_t i = 1; i < w.size(); ++i) {
+    std::string low = w[i];
+    for (char &c : low)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (kSpoken.find(low) == kSpoken.end())
+      return false;
+    if (kDigits.find(low) == kDigits.end())
+      has_letter = true;
+  }
+  return has_letter;
+}
+
+static std::string spoken_callsign(const xplane_context::XPlaneContext &ctx) {
+  const std::string &cs = atc_state_machine::session_callsign();
+  const std::string full = cs.empty() ? settings::pilot_callsign() : cs;
+
+  const float mhz = (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
+  char key[16];
+  std::snprintf(key, sizeof(key), "%.3f", static_cast<double>(mhz));
+  if (s_callsign_full_said_on != key) {
+    s_callsign_full_said_on = key;
+    return full; // first call on this frequency -- full registration
+  }
+
+  std::vector<std::string> w;
+  std::istringstream iss(full);
+  std::string tok;
+  while (iss >> tok)
+    w.push_back(tok);
+  if (w.size() < 4 || !is_registration_callsign(w))
+    return full;
+  return w.front() + " " + w[w.size() - 2] + " " + w.back();
+}
+
 bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                           std::string *out_text, bool *out_requires_readback) {
   using AS = atc_state_machine::ATCState;
@@ -9770,8 +9832,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       (faf.lat == 0.0 && faf.lon == 0.0))
     return false; // no axis to vector onto
 
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
   const double course = static_cast<double>(faf.final_track_deg);
   double s = 0.0, y = 0.0;
   vec_frame(ctx, faf, &s, &y);
@@ -10536,8 +10597,7 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
   s_descent_final_target_ft = 0;      // consumed
   s_enroute_cleared_alt_ft = target;  // re-arms poll_altitude_compliance
   if (out_text) {
-    const std::string &cs = atc_state_machine::session_callsign();
-    const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+    const std::string callsign = spoken_callsign(ctx);
     const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
     const std::string clr =
         format_alt_clearance(target, AltHint::Auto, ctx.qnh_hpa, ta);
@@ -10613,8 +10673,7 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
     if (cc.valid && cc.off_course && cc.dist_nm > 3.0) {
       s_enroute_course_cooldown = 180.0f;
       if (out_text) {
-        const std::string &cs = atc_state_machine::session_callsign();
-        const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+        const std::string callsign = spoken_callsign(ctx);
         char buf[176];
         std::snprintf(buf, sizeof(buf),
                       "%s, confirm direct %s, you appear tracking heading "
@@ -11027,8 +11086,7 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
   // 2026-08-14). [C. P. Potter]
   arm_direct_settle(pick.ident);
 
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
   if (out_text)
     *out_text = callsign + ", direct " + pick.ident + ", when able.";
   if (out_requires_readback)
@@ -11103,8 +11161,7 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
   if (poll_descend_to_enter_tma(ctx, out_text, out_requires_readback))
     return true;
 
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
 
   // ── TMA/CTR boundary → Approach frequency handoff ────────────────────
   // PRIMARY: openair_db TMA/CTR boundary crossing (exact airspace geometry
@@ -13679,8 +13736,7 @@ bool poll_ground_runway_change(const xplane_context::XPlaneContext &ctx,
   if (!out_text)
     return true;
 
-  const std::string &cs = atc_state_machine::session_callsign();
-  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const std::string callsign = spoken_callsign(ctx);
   char buf[192];
 
   // AFIS field (airport+.json "info" role): AFIS gives INFORMATION only -- it issues
