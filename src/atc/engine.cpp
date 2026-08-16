@@ -7282,6 +7282,8 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
 // (an ATC vector) -- distinct from check_course, which tracks the next ROUTE-fix bearing.
 // The caller sets the threshold + reaction; the vector-compliance monitor uses it, and it
 // folds into the unified monitor later (feedback_refactor_unify #2). [C. P. Potter]
+static bool vectoring_active(); // defined with the vectoring state machine
+
 static double heading_error_deg(double heading_mag, double assigned_mag) {
   double d = std::fabs(heading_mag - assigned_mag);
   if (d > 180.0) d = 360.0 - d;
@@ -8869,7 +8871,8 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
   // coarse 5 NM cross-track check above (heading-vs-bearing, not offset).
   s_enroute_course_cooldown = std::max(0.0f, s_enroute_course_cooldown - dt);
   if (s_enroute_course_cooldown <= 0.0f) {
-    const CourseCheck cc = check_course(ctx, 25.0);
+    const CourseCheck cc =
+        vectoring_active() ? CourseCheck{} : check_course(ctx, 25.0);
     if (cc.valid && cc.off_course && cc.dist_nm > 3.0) {
       s_enroute_course_cooldown = 180.0f;
       if (out_text) {
@@ -9656,6 +9659,17 @@ static std::string vec_turn_phrase(bool left, double hdg) {
   return buf;
 }
 
+// True while a radar-vectoring sequence owns the aircraft's heading. Every
+// off-route challenge must be silent then: the aircraft is flying ATC's OWN
+// vectors, and faulting it for leaving the route is both wrong and confusing --
+// "confirm route, you appear tracking heading 027, expected 066 to BAMSU" landed
+// right after ATC had said "turn left heading 027". [C. P. Potter]
+static bool vectoring_active() {
+  return s_vtf_leg == VecLeg::Displace || s_vtf_leg == VecLeg::Downwind ||
+         s_vtf_leg == VecLeg::Base || s_vtf_leg == VecLeg::Intercept ||
+         s_vtf_leg == VecLeg::Axis;
+}
+
 bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                           std::string *out_text, bool *out_requires_readback) {
   using AS = atc_state_machine::ATCState;
@@ -9711,16 +9725,24 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     }
     // Join from the side the aircraft is already on: never cross the axis.
     s_vtf_turn_left = (y >= 0.0); // right of the axis -> left-hand pattern
-    // An aircraft joining near the centreline has NO lateral offset to fly a
-    // downwind from -- the reciprocal keeps y at zero and the base turn then
-    // degenerates into a reversal. Open away from the axis first; only start on
-    // the downwind proper once the offset exists. (This is what the first
-    // implementation got wrong: it went straight to the reciprocal and the
-    // distance to the FAF grew until the feasibility test aborted.)
+    // Everything follows from two facts: the axis of the runway in service, and
+    // where the aircraft is relative to it (user, 2026-08-16). There is no fixed
+    // pattern to fly through -- pick the shortest shape that ends aligned.
+    //
+    //   room to close |y| at 30 deg already?   -> INTERCEPT straight away
+    //   essentially on the axis?               -> DISPLACE to build a few miles
+    //   otherwise                              -> DOWNWIND to gain axis distance
+    //
+    // The earlier version always flew downwind then base, which on an aircraft
+    // arriving from the side sent it AWAY from the field for no reason.
     const double turn0 = s_vtf_turn_left ? -1.0 : 1.0;
-    if (std::fabs(y) < kVecOffsetNm - 1.0) {
+    if (std::fabs(y) < 2.0) {
       s_vtf_leg = VecLeg::Displace;
       s_vtf_hdg = std::fmod(course + 180.0 - kVecDisplaceDeg * turn0 + 360.0, 360.0);
+    } else if (s >= vec_required_s(y) + 2.0) {
+      s_vtf_leg = VecLeg::Intercept;
+      s_vtf_hdg =
+          std::fmod(course + kVecInterceptDeg * turn0 + 360.0, 360.0);
     } else {
       s_vtf_leg = VecLeg::Downwind;
       s_vtf_hdg = std::fmod(course + 180.0, 360.0);
@@ -9742,8 +9764,10 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     *out_text = txt;
     if (out_requires_readback)
       *out_requires_readback = true;
-    logging::info("[vector] leg %s hdg %03d, alt %d (s=%.1f y=%.1f, offset %.0f)",
-                  s_vtf_leg == VecLeg::Displace ? "A0 displace" : "A downwind",
+    logging::info("[vector] first leg %s hdg %03d, alt %d (s=%.1f y=%.1f, offset %.0f)",
+                  s_vtf_leg == VecLeg::Displace  ? "displace"
+                  : s_vtf_leg == VecLeg::Intercept ? "INTERCEPT (direct)"
+                                                   : "downwind",
                   static_cast<int>(s_vtf_hdg), s_vtf_cleared_ft, s, y,
                   kVecOffsetNm);
     return true;
@@ -9788,15 +9812,18 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   const double turn_sign = s_vtf_turn_left ? -1.0 : 1.0;
 
   if (s_vtf_leg == VecLeg::Displace) {
-    // Opening leg: hold it until the offset exists, then join the downwind.
-    if (std::fabs(y) >= kVecOffsetNm) {
-      s_vtf_leg = VecLeg::Downwind;
-      s_vtf_hdg = std::fmod(course + 180.0, 360.0);
+    // Opening leg: only needed for an aircraft sitting on the centreline. Hold it
+    // until there is an offset to intercept from, then join at 30 degrees --
+    // there is no reason to fly a downwind as well.
+    const double turn1 = s_vtf_turn_left ? -1.0 : 1.0;
+    if (std::fabs(y) >= kVecOffsetNm || s <= vec_required_s(y) + 2.0) {
+      s_vtf_leg = VecLeg::Intercept;
+      s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn1 + 360.0, 360.0);
       s_vtf_nudged = false;
       *out_text = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg) + ".";
       if (out_requires_readback)
         *out_requires_readback = true;
-      logging::info("[vector] leg A downwind hdg %03d (s=%.1f y=%.1f)",
+      logging::info("[vector] intercept hdg %03d after displace (s=%.1f y=%.1f)",
                     static_cast<int>(s_vtf_hdg), s, y);
       return true;
     }
@@ -9806,17 +9833,16 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   if (s_vtf_leg == VecLeg::Downwind) {
     // Fly outbound until far enough back that the intercept lands the aircraft on
     // the axis about kVecFinalNm before the FAF.
-    if (s >= kVecFinalNm +
-                 kVecOffsetNm / std::tan(kVecInterceptDeg * M_PI / 180.0)) {
-      s_vtf_leg = VecLeg::Base;
-      s_vtf_hdg = std::fmod(course + 90.0 * turn_sign + 360.0, 360.0);
+    if (s >= vec_required_s(y) + 2.0) {
+      s_vtf_leg = VecLeg::Intercept;
+      s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
       *out_text = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg) +
                   ", reduce speed 180 knots.";
       if (out_requires_readback)
         *out_requires_readback = true;
-      logging::info("[vector] leg B base hdg %03d, speed 180 (s=%.1f y=%.1f)",
-                    static_cast<int>(s_vtf_hdg), s, y);
+      logging::info("[vector] intercept hdg %03d after downwind, speed 180 "
+                    "(s=%.1f y=%.1f)", static_cast<int>(s_vtf_hdg), s, y);
       return true;
     }
     return false;
@@ -10465,7 +10491,8 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
   // it needs the leg-track refinement (see the consolidation roadmap).
   s_enroute_course_cooldown = std::max(0.0f, s_enroute_course_cooldown - dt);
   if (s_enroute_course_cooldown <= 0.0f) {
-    const CourseCheck cc = check_course(ctx, 25.0);
+    const CourseCheck cc =
+        vectoring_active() ? CourseCheck{} : check_course(ctx, 25.0);
     if (cc.valid && cc.off_course && cc.dist_nm > 3.0) {
       s_enroute_course_cooldown = 180.0f;
       if (out_text) {
@@ -11173,7 +11200,8 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
   // (ARRIVAL is mutually exclusive with en-route/descent).
   s_enroute_course_cooldown = std::max(0.0f, s_enroute_course_cooldown - dt);
   if (s_enroute_course_cooldown <= 0.0f) {
-    const CourseCheck cc = check_course(ctx, 25.0);
+    const CourseCheck cc =
+        vectoring_active() ? CourseCheck{} : check_course(ctx, 25.0);
     if (cc.valid && cc.off_course && cc.dist_nm > 3.0) {
       s_enroute_course_cooldown = 180.0f;
       if (out_text) {
@@ -13285,7 +13313,8 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
   if (state != AS::IFR_APPROACH_TOWER && state != AS::IFR_LANDING_CLEARED) {
     s_approach_course_cooldown = std::max(0.0f, s_approach_course_cooldown - dt);
     if (s_approach_course_cooldown <= 0.0f) {
-      const CourseCheck cc = check_course(ctx, 25.0);
+      const CourseCheck cc =
+        vectoring_active() ? CourseCheck{} : check_course(ctx, 25.0);
       if (cc.valid && cc.off_course && cc.dist_nm > 2.0) {
         s_approach_course_cooldown = 90.0f;
         if (out_text) {

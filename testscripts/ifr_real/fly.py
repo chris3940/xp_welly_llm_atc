@@ -165,6 +165,7 @@ class Pilot:
         self.callsign = callsign
         self.cleared_ft = None
         self.vector_hdg = None   # steered heading while under radar vectors
+        self.finished = False    # established on final: stop flying
         self.events = []
 
     def react(self, lines, where, alt):
@@ -198,6 +199,14 @@ class Pilot:
                 self.vector_hdg = float(m.group(2))
             if RE_RESUME.search(msg):
                 self.vector_hdg = None
+            if re.search(r"report established", msg, re.I):
+                # The vectoring sequence is over: the aircraft is on the final
+                # approach course and flies the procedure. Without this the
+                # driver kept dead-reckoning on the axis heading and flew across
+                # Europe -- Kaliningrad, Riga, Tallinn -- which looked like an
+                # engine runaway and was purely the harness.
+                self.vector_hdg = None
+                self.finished = True
 
             m = RE_FL.search(msg)
             if m:
@@ -278,6 +287,12 @@ def main():
             pt = path[idx]
             idx += 1
         leg = nm(prev, pt)
+        if pilot.vector_hdg is not None:
+            actual = bearing(prev, pt)
+            err = (actual - pilot.vector_hdg + 540.0) % 360.0 - 180.0
+            if abs(err) > 1.0:
+                print("  [dr] assigned %.0f actual %.0f err %+.0f"
+                      % (pilot.vector_hdg, actual, err))
         flown += leg
         # Fly toward the cleared level -- never below it, never ahead of it.
         if pilot.cleared_ft is not None:
@@ -295,6 +310,8 @@ def main():
         repl.send("track %.4f %.4f %d %d" % (pt[0], pt[1], int(alt), dt))
         pilot.react(repl.sync(), pt, int(alt))
         prev = pt
+        if pilot.finished:
+            break
         if pilot.vector_hdg is not None and flown > 900.0:
             break  # runaway guard: a vector that is never cancelled
 
