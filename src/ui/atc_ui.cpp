@@ -95,6 +95,25 @@
 #include <sstream>
 #include <vector>
 
+#include <cstdarg>
+
+// ImGui::SetTooltip() does not wrap: every hint came out as one endless line
+// running off the screen (user, 2026-08-16). Wrap at a readable measure -- 34
+// times the font size is about 60 characters, which is what a paragraph wants --
+// and keep the printf-style call sites unchanged.
+static void tooltip(const char *fmt, ...) {
+  if (!ImGui::BeginTooltip())
+    return;
+  ImGui::PushTextWrapPos(ImGui::GetFontSize() * 34.0f);
+  va_list args;
+  va_start(args, fmt);
+  ImGui::TextV(fmt, args);
+  va_end(args);
+  ImGui::PopTextWrapPos();
+  ImGui::EndTooltip();
+}
+
+
 namespace atc_ui {
 
 // ── State ────────────────────────────────────────────────────────
@@ -1314,7 +1333,7 @@ static void draw_whisper_stt_combo() {
     backends::loader::start();
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip(
+    tooltip(
         "WhisperATC (base.en, ATC fine-tuned) improves recognition of\n"
         "fix names, squawk codes, and ICAO callsigns.\n"
         "Download it first in the Models tab.");
@@ -1388,7 +1407,7 @@ static void draw_settings_tab() {
     atc_session::reset_atis_cooldown();
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("%s", ui_strings::tr("tooltip.backend"));
+    tooltip("%s", ui_strings::tr("tooltip.backend"));
   }
   const std::string active_backend_key =
       backend_mode_keys[backend_mode_selection];
@@ -1686,7 +1705,7 @@ static void draw_settings_tab() {
     region_feedback_timer = 3.0f;
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("%s", ui_strings::tr("tooltip.region"));
+    tooltip("%s", ui_strings::tr("tooltip.region"));
   }
   if (region_feedback_timer > 0.0f) {
     ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s",
@@ -1707,7 +1726,7 @@ static void draw_settings_tab() {
     settings::save();
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("%s", ui_strings::tr("tooltip.start_mode"));
+    tooltip("%s", ui_strings::tr("tooltip.start_mode"));
   }
 
   // Debug logging
@@ -1725,7 +1744,7 @@ static void draw_settings_tab() {
     settings::set_debug_text_input(text_in);
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("%s", ui_strings::tr("tooltip.debug_text_input"));
+    tooltip("%s", ui_strings::tr("tooltip.debug_text_input"));
   }
 
   // Skip radio power check (workaround for exotic aircraft)
@@ -1735,7 +1754,7 @@ static void draw_settings_tab() {
     settings::set_skip_radio_power_check(skip_power);
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("%s", ui_strings::tr("tooltip.skip_radio_power"));
+    tooltip("%s", ui_strings::tr("tooltip.skip_radio_power"));
   }
 
   // ATC state recovery timing
@@ -1749,7 +1768,7 @@ static void draw_settings_tab() {
     settings::set_auto_correction_factor(acf);
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("%s", ui_strings::tr("tooltip.recovery"));
+    tooltip("%s", ui_strings::tr("tooltip.recovery"));
   }
 
   // Phraseology hints toggle
@@ -1758,7 +1777,7 @@ static void draw_settings_tab() {
     settings::set_show_phraseology_hints(hints);
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("%s", ui_strings::tr("tooltip.show_hints"));
+    tooltip("%s", ui_strings::tr("tooltip.show_hints"));
   }
 
   // Disable Default X-Plane ATC
@@ -1779,7 +1798,7 @@ static void draw_settings_tab() {
     settings::set_traffic_features_enabled(traffic_on);
   }
   if (ImGui::IsItemHovered()) {
-    ImGui::SetTooltip("%s", ui_strings::tr("tooltip.enable_traffic"));
+    tooltip("%s", ui_strings::tr("tooltip.enable_traffic"));
   }
 
   // ── Voices per ATC role ─────────────────────────────────────────
@@ -2127,7 +2146,7 @@ static void draw_pilot_actions(const xplane_context::XPlaneContext &ctx,
       XPLMDebugString("[xp_wellys_atc] Manual disregard\n");
     }
     if (ImGui::IsItemHovered()) {
-      ImGui::SetTooltip("%s", ui_strings::tr("tooltip.disregard"));
+      tooltip("%s", ui_strings::tr("tooltip.disregard"));
     }
   }
   ImGui::TextDisabled(ui_strings::tr("hints.state_phase_format"),
@@ -2176,7 +2195,7 @@ static void draw_pilot_actions(const xplane_context::XPlaneContext &ctx,
         // Tooltip: full spoken phraseology with phonetic callsign
         if (ImGui::IsItemHovered()) {
           std::string spoken = atc_templates::fill(phrase_tmpl, vars_spoken);
-          ImGui::SetTooltip(ui_strings::tr("hints.say_format"), spoken.c_str());
+          tooltip(ui_strings::tr("hints.say_format"), spoken.c_str());
         }
       } else {
         const char *label = intent_display_label(key);
@@ -2288,7 +2307,7 @@ static void draw_airport_tab(const xplane_context::XPlaneContext &ctx) {
         xplane_context::set_standby_freq(af.freq_khz);
       }
       if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(ui_strings::tr("tooltip.set_standby_format"),
+        tooltip(ui_strings::tr("tooltip.set_standby_format"),
                           ctx.active_com, freq_mhz);
       }
 
@@ -2386,7 +2405,7 @@ static void draw_enroute_tab(const xplane_context::XPlaneContext &ctx) {
           xplane_context::set_standby_freq(freq);
         }
         if (ImGui::IsItemHovered()) {
-          ImGui::SetTooltip(ui_strings::tr("tooltip.set_standby_format"),
+          tooltip(ui_strings::tr("tooltip.set_standby_format"),
                             ctx.active_com, freq_mhz);
         }
 
@@ -2550,14 +2569,14 @@ static void draw_ifr_tab() {
     if (ImGui::Checkbox("HOLD", &hold_on))
       settings::set_hold_enabled(hold_on);
     if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("When ON, ATC may issue a published holding pattern at a STAR "
+      tooltip("When ON, ATC may issue a published holding pattern at a STAR "
                         "fix (random, once per arrival). Turn OFF to never be held.");
 
     bool sc_always = settings::shortcut_always();
     if (ImGui::Checkbox("SHORTCUTS ALWAYS", &sc_always))
       settings::set_shortcut_always(sc_always);
     if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("When ON, every eligible ATC shortcut (direct to SID exit "
+      tooltip("When ON, every eligible ATC shortcut (direct to SID exit "
                         "fix, en-route fix, or the nearest approach IAF) fires at "
                         "100%% instead of the default ~20%% chance. Directs still "
                         "respect track saving and a max 3-degree descent.");
@@ -2566,7 +2585,7 @@ static void draw_ifr_tab() {
     if (ImGui::Checkbox("FORCE ILS IF AVAILABLE", &force_ils))
       settings::set_force_ils(force_ils);
     if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("When ON, ATC assigns the ILS whenever the ARRIVAL RUNWAY "
+      tooltip("When ON, ATC assigns the ILS whenever the ARRIVAL RUNWAY "
                         "has one published, ignoring the weather-gated choice in "
                         "airport+.json and the RNAV-first ranking -- you will hear "
                         "\"expect ILS ... approach runway NN\". A runway with no "
@@ -2583,7 +2602,7 @@ static void draw_ifr_tab() {
     if (ImGui::Checkbox("ALLOW VECTORING", &allow_vec))
       settings::set_allow_vectoring(allow_vec);
     if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("When ON, ATC MAY vector you when it makes operational "
+      tooltip("When ON, ATC MAY vector you when it makes operational "
                         "sense -- recovering a route deviation, a reversal that "
                         "cannot be flown, or sequencing. ATC decides. Turn OFF "
                         "to never be vectored.");
@@ -2596,7 +2615,7 @@ static void draw_ifr_tab() {
     // tooltip to the label instead -- and only on the airports where the label
     // appears, which is the hardest kind of UI bug to notice.
     if (ImGui::IsItemHovered())
-      ImGui::SetTooltip("Instruction mode: EVERY arrival is vectored instead of "
+      tooltip("Instruction mode: EVERY arrival is vectored instead of "
                         "flying the published transition. Two manoeuvres exist -- "
                         "vectors to final where terrain and geometry allow, and "
                         "vectors to the IAF where they do not (Innsbruck). Every "
@@ -2612,7 +2631,7 @@ static void draw_ifr_tab() {
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.15f, 1.0f),
                            "DISABLED: NO MSA");
         if (ImGui::IsItemHovered())
-          ImGui::SetTooltip("No MSA sector data covers %s, so ATC has no altitude "
+          tooltip("No MSA sector data covers %s, so ATC has no altitude "
                             "protection to vector you with and will refuse. The "
                             "published procedure is flown instead. Your setting is "
                             "kept.",
@@ -2761,7 +2780,7 @@ static void draw_ifr_tab() {
                   if (ImGui::SmallButton(btn))
                     xplane_context::set_standby_freq(khz);
                   if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(ui_strings::tr("tooltip.set_standby_format"),
+                    tooltip(ui_strings::tr("tooltip.set_standby_format"),
                                       ctx.active_com, of);
                 }
               }
@@ -2802,7 +2821,7 @@ static void draw_ifr_tab() {
           if (ImGui::SmallButton(btn))
             xplane_context::set_standby_freq(freq);
           if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(ui_strings::tr("tooltip.set_standby_format"),
+            tooltip(ui_strings::tr("tooltip.set_standby_format"),
                               ctx.active_com, freq_mhz);
           any_atc = true;
         }
