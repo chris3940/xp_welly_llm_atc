@@ -9911,6 +9911,12 @@ static std::string vec_turn_phrase(double current_hdg, double target_hdg) {
   std::snprintf(buf, sizeof(buf), "turn %s heading %03d",
                 delta < 0.0 ? "left" : "right",
                 static_cast<int>(std::fmod(target_hdg + 360.0, 360.0)));
+  // Logged so a "wrong turn" report can be settled on evidence: the direction is
+  // only meaningful next to the heading it was computed from.
+  logging::info("[vector] turn word: hdg %03d -> %03d, delta %+.0f -> %s",
+                static_cast<int>(std::fmod(current_hdg + 360.0, 360.0)),
+                static_cast<int>(std::fmod(target_hdg + 360.0, 360.0)), delta,
+                delta < 0.0 ? "LEFT" : "RIGHT");
   return buf;
 }
 
