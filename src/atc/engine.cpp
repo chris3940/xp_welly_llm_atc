@@ -7658,7 +7658,23 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
                        : fc.alt_is_fl                 ? AltHint::FlightLevel
                                                       : AltHint::Auto;
   const std::string clr = format_alt_clearance(issue_ft, hint, ctx.qnh_hpa, ta);
-  *out_text = callsign + ", descend " + clr + ".";
+  // If the profile is already steep, SAY SO when issuing the level rather than
+  // leaving the pilot to discover it (user, 2026-08-16: "si la pente de descente
+  // est trop forte n'oublie pas que le controle peut limiter la vitesse et/ou
+  // indiquer expedite descent"). The existing expedite monitor only reacts to an
+  // aircraft descending too SLOWLY; this is the other half -- ATC knows the
+  // gradient it is asking for at the moment it asks.
+  //
+  // kDescentSlopeFtPerNm is the 2.5 degree reference; beyond ~1.35x of it the
+  // clearance is steep enough to be worth naming. ICAO form: EXPEDITE DESCENT TO
+  // (level).
+  const double need_ftnm =
+      fc.dist_nm > 1.0 ? (alt_now - issue_ft) / fc.dist_nm : 0.0;
+  const bool steep = need_ftnm > kDescentSlopeFtPerNm * 1.35;
+  *out_text = callsign + (steep ? ", expedite descent to " : ", descend ") + clr + ".";
+  if (steep)
+    logging::info("[dbg prof] steep: %.0f ft/NM needed to %s in %.1f NM -- "
+                  "expedite worded", need_ftnm, clr.c_str(), fc.dist_nm);
   if (settings::debug_logging())
     logging::info("[dbg prof] crossing %s -> descend %s @ PA %.0f (%.1f NM, TOD %.1f NM, "
                   "lose %.0f ft, st=%d)",
