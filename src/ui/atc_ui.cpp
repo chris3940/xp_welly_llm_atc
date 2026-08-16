@@ -2607,6 +2607,13 @@ static void draw_ifr_tab() {
           vofp.valid ? vofp.destination_icao : std::string();
       const bool no_msa =
           !vdest.empty() && msa_db::ready() && msa_db::records_for(vdest).empty();
+      // The manoeuvre itself is not built yet: today the engine only LOGS which
+      // mode an arrival would get. Say so, rather than leaving a checkbox that
+      // silently does nothing -- a pilot who ticks it and then flies a normal
+      // arrival has no way to tell the difference from a bug.
+      ImGui::SameLine();
+      ImGui::TextColored(ImVec4(0.60f, 0.60f, 0.60f, 1.0f),
+                         "NOT ACTIVE YET (decision logged only)");
       if (no_msa) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.15f, 1.0f),
