@@ -28,27 +28,38 @@ It also gives the acceptance test, measurable without flying: at the moment
 `cleared <approach>, report established` is issued, the heading error to the
 final course must be < 5° and the distance to the FAF ≥ 3 NM.
 
-### When the rule cannot be evaluated: curved finals
+### When the rule cannot be evaluated: no axis after the FAF
 
-The rule assumes a **straight** final approach axis. An approach whose final
-segment is flown as an arc has no axis to align with: neither the last vector's
-heading nor the `< 5 deg` test means anything on it.
+The rule assumes a **straight** final approach axis. The precise test (user,
+2026-08-16) is **whether there is a straight axis AFTER the FAF** -- not merely
+whether the procedure contains an arc somewhere.
 
-This is not hypothetical -- it is LOWI, the very airport the existing IAF
-teardrop was built for. Measured in the reference CIFP:
-
-```
-R08-Z  WI752  RF        <- radius-to-fix: a curved final
-R08-Z  WI754  RF
-```
-
-So **FORCE APP VECTORING must refuse on any approach whose final segment
-contains an RF (or AF) leg**, and hand back the published procedure. The test is
-data-driven: scan the chosen approach's final segment `path_term` column for
-`RF`/`AF` before arming.
+LOWI R08-Z shows why the distinction matters. Read from the reference CIFP:
 
 ```
-[vector] refused: R08-Z has a curved final (RF legs) -- no straight axis, keeping the published procedure
+seq  fix     desc    path_term
+020  WI749   E  F    IF     <- the FAF (4th descriptor char = F)
+021  WI751           TF
+022  WI752           RF     <- arc, AFTER the FAF
+024  WI753           TF
+027  WI754           RF     <- arc, AFTER the FAF
+030  RW08    GY M    TF     <- threshold
+```
+
+The legs leading *into* the FAF (ELMEM -> WI749) are straight, so alignment 3 NM
+before the FAF would be geometrically achievable. But the path **after** the FAF
+curves, so there is no final axis to be established on, and neither the last
+vector's heading nor the `< 5 deg` test means anything.
+
+So **FORCE APP VECTORING must refuse when the segment after the FAF is not a
+straight track**, and hand back the published procedure. Data-driven test: walk
+the chosen approach's final segment from the FAF towards the threshold and look
+for a non-straight `path_term` (`RF`, `AF`). An earlier draft of this document
+tested for `RF` anywhere in the approach, which is too broad -- an arc in the
+*intermediate* segment does not prevent a straight final.
+
+```
+[vector] refused: R08-Z has no straight axis after FAF WI749 (RF legs) -- keeping the published procedure
 ```
 
 Related known defect: the existing alignment check already assumes a straight
