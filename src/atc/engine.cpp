@@ -613,6 +613,13 @@ static std::vector<uint32_t> s_approach_visited_sector_freqs;
 // Distinct from s_enroute_deviation_cooldown_sec (airway/sector off-track, en-route only).
 static float s_expedite_cooldown       = 0.0f;  // counts down; fires when <= 0
 static int   s_expedite_last_cleared_ft = 0;    // altitude of last issued step-down
+// The FIX that level is tied to, when it came from a crossing constraint. The
+// monitor used the distance to the AIRPORT as a proxy ("proxy for time to
+// cleared fix", its own comment) -- but a level tied to a point must be judged
+// against THAT point, which can be far short of the field (user, 2026-08-16).
+// Empty ident = no fix, fall back to the airport as before.
+static std::string s_expedite_fix_ident;
+static double s_expedite_fix_lat = 0.0, s_expedite_fix_lon = 0.0;
 // Lateral-deviation monitor (after FAF, Tower state): cross-track from runway centerline.
 static float s_alignment_cooldown = 0.0f;
 // DirectMonitor course-deviation cooldowns (en-route + approach sites). SID has
@@ -7649,6 +7656,17 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
     return false; // not yet at the top of descent for this crossing
   s_descent_cifp_target_ft = issue_ft;
   s_enroute_cleared_alt_ft = issue_ft; // coordinates with the walker
+  // Remember WHICH fix this level belongs to, so the expedite monitor can judge
+  // the rate against the point rather than against the airport.
+  s_expedite_fix_ident = fc.ident;
+  s_expedite_fix_lat = 0.0;
+  s_expedite_fix_lon = 0.0;
+  for (const auto &rf : s_route_fixes)
+    if (rf.ident == fc.ident && (rf.lat != 0.0 || rf.lon != 0.0)) {
+      s_expedite_fix_lat = rf.lat;
+      s_expedite_fix_lon = rf.lon;
+      break;
+    }
   const std::string callsign = spoken_callsign(ctx);
   const int ta = (ctx.transition_alt_ft > 0) ? ctx.transition_alt_ft : 5000;
   // An intermediate rung is not the constraint, so let the formatter decide FL vs
@@ -12359,6 +12377,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
     s_approach_has_visual_final = false;
     s_expedite_cooldown        = 0.0f;
     s_expedite_last_cleared_ft = 0;
+    s_expedite_fix_ident.clear();
     s_pending_route_direct.clear();
     s_approach_sector_freq_khz  = 0;
     s_approach_sector_ceiling_ft = 0;
@@ -13704,8 +13723,16 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       ctx.pressure_alt_ft > static_cast<float>(s_expedite_last_cleared_ft) + 300.0f) {
     s_expedite_cooldown -= dt;
     if (s_expedite_cooldown <= 0.0f) {
-      const double dist_apt = traffic_geometry::distance_nm(
+      // Distance to the FIX the level is tied to when there is one; the airport
+      // only as a fallback. A level to be reached at a point 20 NM ahead is a
+      // very different rate from the same level "by the field".
+      double dist_apt = traffic_geometry::distance_nm(
           ctx.latitude, ctx.longitude, ctx.airport_lat, ctx.airport_lon);
+      if (!s_expedite_fix_ident.empty() &&
+          (s_expedite_fix_lat != 0.0 || s_expedite_fix_lon != 0.0))
+        dist_apt = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
+                                                 s_expedite_fix_lat,
+                                                 s_expedite_fix_lon);
       if (dist_apt < 60.0) {
         const float gs = ctx.groundspeed_kts > 60.0f ? ctx.groundspeed_kts : 200.0f;
         const float alt_diff =
