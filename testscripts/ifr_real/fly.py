@@ -171,6 +171,14 @@ class Pilot:
     def react(self, lines, where, alt):
         for raw in lines:
             line = raw.rstrip("\n")
+            # Phase transitions belong in the timeline. They were printed by the
+            # REPL all along and I read past them: a vectored arrival stayed in
+            # IFR/DESCENT for its whole length because the ARRIVAL and APPROACH
+            # triggers both live on the STAR, which vectors leave (2026-08-16).
+            if ">> STATE" in line and "->" in line:
+                st = line.split(">> STATE", 1)[1].split("@")[0].strip()
+                self.events.append((where, alt, "STATE  " + " ".join(st.split())))
+                continue
             if "ATC [" not in line:
                 continue
             msg = line.split("ATC [", 1)[1]
