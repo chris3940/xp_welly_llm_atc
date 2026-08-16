@@ -7693,12 +7693,24 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   if (steep)
     logging::info("[dbg prof] steep: %.0f ft/NM needed to %s in %.1f NM -- "
                   "expedite worded", need_ftnm, clr.c_str(), fc.dist_nm);
-  if (settings::debug_logging())
-    logging::info("[dbg prof] crossing %s -> descend %s @ PA %.0f (%.1f NM, TOD %.1f NM, "
-                  "lose %.0f ft, st=%d)",
+  // Always logged, not only under debug: this one line explains WHY a level was
+  // given and when, which is the first question asked of any descent in a flight
+  // log ("tu peux mettre ce qui declenche la descente au FL100 ?", user
+  // 2026-08-16). It names the constraining fix, the level actually transmitted,
+  // whether that level is a LADDER RUNG on the way to a lower target, and the
+  // top-of-descent arithmetic that fired it.
+  if (issue_ft != fc.alt_target_ft)
+    logging::info("IFR descent: %s -> rung %s (target %d ft at %s) @ PA %.0f, "
+                  "%.1f NM to go, TOD %.1f NM, %.0f ft to lose",
+                  fc.ident.c_str(), clr.c_str(), fc.alt_target_ft,
+                  fc.ident.c_str(), static_cast<double>(ctx.pressure_alt_ft),
+                  fc.dist_nm, tod_dist, alt_to_lose);
+  else
+    logging::info("IFR descent: %s -> %s @ PA %.0f, %.1f NM to go, TOD %.1f NM, "
+                  "%.0f ft to lose",
                   fc.ident.c_str(), clr.c_str(),
                   static_cast<double>(ctx.pressure_alt_ft), fc.dist_nm, tod_dist,
-                  alt_to_lose, static_cast<int>(atc_state_machine::get_state()));
+                  alt_to_lose);
   return true;
 }
 
