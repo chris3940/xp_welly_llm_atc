@@ -9676,10 +9676,14 @@ static constexpr double kVecFloorNm       = 15.0; // below this, do not start
 static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
 static constexpr double kVecFinalNm       = 6.0;  // aimed length of the final
 static constexpr double kVecDisplaceDeg   = 40.0; // opening angle to build the offset
-// Track the aircraft spends reacting and rolling into the assigned heading, during
-// which it closes the FAF without closing the axis. 2 NM was not enough: the first
-// real flight lost 8.2 NM of margin to it. [C. P. Potter]
-static constexpr double kVecTurnAllowNm   = 8.0;
+// Slack kept when deciding a direct intercept is flyable. Deliberately SMALL: it
+// only has to cover the roll into the turn. Widening it to 8 NM after the first
+// flight's abandon was the wrong lesson -- it pushed an aircraft arriving straight
+// in onto a pointless downwind, flying it AWAY from the field, when a 30 deg
+// intercept from 28 NM out aligns 8 NM before the FAF (user, 2026-08-16). The
+// abandon was cured by not judging the geometry until the turn is established,
+// which is where that guard belongs. [C. P. Potter]
+static constexpr double kVecTurnAllowNm   = 3.0;
 static constexpr float  kVecNudgeSecs     = 30.0f;
 static constexpr double kVecNudgeDeg      = 20.0;
 
@@ -9873,26 +9877,33 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   }
 
   // ── compliance ────────────────────────────────────────────────────────────
+  // A controller does NOT give up because the aircraft has not turned yet -- he
+  // ASKS (user, 2026-08-16): "confirm left turn heading 027". Abandoning belongs
+  // to the geometry test above, which is the only thing that can make the
+  // manoeuvre impossible; dropping a live vector for non-compliance leaves the
+  // aircraft pointing nowhere, which is what happened on the flown arrival.
+  // So this queries, repeatedly, and never abandons. [C. P. Potter]
   const double herr = heading_error_deg(ctx.heading_mag, s_vtf_hdg);
   if (herr > kVecNudgeDeg) {
     s_vtf_nudge_secs += dt;
     if (s_vtf_nudge_secs > kVecNudgeSecs) {
       s_vtf_nudge_secs = 0.0f;
-      if (s_vtf_nudged) {
-        s_vtf_leg = VecLeg::Refused;
-        logging::info("[vector] abandoned: hdg err %.0f deg for %.0f s -- resume "
-                      "own navigation", herr, kVecNudgeSecs);
-        s_vtf_abandoned = true;
-        apply_direct_to(faf.ident); // see the note on the other abandon path
-        *out_text = callsign + ", resume own navigation direct " + faf.ident + ".";
-        return true;
-      }
       s_vtf_nudged = true;
-      *out_text = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg) + ".";
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), ", confirm %s turn heading %03d.",
+                    s_vtf_turn_left ? "left" : "right",
+                    static_cast<int>(std::fmod(s_vtf_hdg + 360.0, 360.0)));
+      *out_text = callsign + buf;
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      logging::info("[vector] hdg err %.0f deg after %.0f s -- confirming the "
+                    "turn to %03d (not abandoning)",
+                    herr, kVecNudgeSecs, static_cast<int>(s_vtf_hdg));
       return true;
     }
   } else {
     s_vtf_nudge_secs = 0.0f;
+    s_vtf_nudged = false;
   }
 
   // ── leg transitions ───────────────────────────────────────────────────────
