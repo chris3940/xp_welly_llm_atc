@@ -7140,14 +7140,20 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
       break;
     }
   }
-  // The fix the fallback promotes is the first approach fix that actually FORCES a
-  // descent -- a ceiling / "at" / block-ceiling constraint. NOT merely the first
-  // approach fix: at EDLW the platform DOR publishes "at or above 3000", a FLOOR,
-  // which can never bust from above and so would leave the aircraft exactly as high
-  // as before. The fix that forces the descent there is the FAF KOLOT at 2500, and
-  // it was being suppressed as "beyond the platform". This mirrors what ATC actually
-  // does -- ONE descent to the platform altitude -- and it is the same figure the
-  // pre-TOD target already takes from approach_faf(). [C. P. Potter]
+  // RULE (user's ruling, 2026-08-16): when the STAR publishes no altitude
+  // constraint, the level assigned is the one of the FIRST POINT OF THE CLEARED
+  // APPROACH. Not the first fix that happens to force a descent, and not the FAF.
+  // The single exception is radar vectoring to the FAF, which assigns its own
+  // levels and does not come through here.
+  //
+  // This overrides an earlier reading of mine. I had skipped a first point whose
+  // constraint is "at or above" -- EDLW's DOR publishes +3000, a FLOOR, which under
+  // the ordinary bust test can never trigger from above -- and promoted the FAF
+  // instead. That is wrong operationally: the first approach point is what a
+  // controller assigns, whatever the sign of its published constraint. So the fix is
+  // chosen purely by POSITION, and its altitude is treated as an ASSIGNMENT rather
+  // than as a constraint to be busted (see the platform_assign branch below).
+  // [C. P. Potter]
   int fallback_app_idx = -1;
   if (!star_has_alt_ahead) {
     for (int i = std::max(0, s_route_fix_idx);
@@ -7155,11 +7161,8 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
       const auto &f = s_route_fixes[i];
       if (!f.is_approach_proc || f.alt.feet <= 0)
         continue;
-      const bool forces_descent = !f.is_floor || f.floor_ft > 0; // ceiling/at/block
-      if (forces_descent) {
-        fallback_app_idx = i;
-        break;
-      }
+      fallback_app_idx = i; // FIRST approach point carrying a level, full stop
+      break;
     }
   }
   for (int i = std::max(0, s_route_fix_idx);
@@ -7196,7 +7199,14 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
     // Altitude bust: the aircraft will not satisfy the fix's altitude band. Suppressed
     // for approach-proc fixes BEYOND the platform -- the pilot flies those published
     // altitudes (no ATC step-down); only the platform (1st approach fix) is ATC-issued.
-    if (!app_beyond_platform) {
+    // The promoted first approach point is an ASSIGNMENT: if the aircraft is above
+    // it, that is the level to give, even when the published constraint is an
+    // at-or-above floor which the ordinary tests below would never trigger on.
+    if (platform_fallback && pa > static_cast<float>(f.alt.feet) + 200.0f) {
+      c.alt_bust = true;
+      c.alt_target_ft = f.alt.feet;
+      c.alt_is_fl = f.alt.is_fl;
+    } else if (!app_beyond_platform) {
     if (f.floor_ft > 0) { // block "B": must be within [floor, ceiling]
       if (pa > static_cast<float>(f.alt.feet) + 200.0f) {
         // ABOVE the block ceiling (descent case) -> target the CEILING, i.e. the

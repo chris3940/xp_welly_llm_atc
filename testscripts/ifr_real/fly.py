@@ -178,7 +178,7 @@ class Pilot:
                 # Tune FIRST, then check in -- the gate wants the call on the NEW
                 # frequency, and a check-in sent on the old one is simply lost.
                 self.repl.send("set com " + freq)
-                self.repl.sync()
+                self.react(self.repl.sync(), where, alt)
                 self.repl.send(
                     "say %s with you, %s" % (self.callsign, self._level_words(alt))
                 )
@@ -261,8 +261,12 @@ def main():
             elif alt < pilot.cleared_ft:
                 alt = min(pilot.cleared_ft, alt + leg * ft_per_nm)
         dt = max(5, int(leg / gs * 3600.0))
+        # EVERY sync's output must go through the pilot. ATC lines do not always
+        # land in the sync that follows the command which produced them -- on a long
+        # route they slip into the next one, and any sync whose result is discarded
+        # silently eats them (13-fix DIK -> EDLW: 8 ATC calls emitted, 0 collected).
         repl.send("set heading %.0f" % bearing(prev, pt))
-        repl.sync()
+        pilot.react(repl.sync(), prev, int(alt))
         repl.send("track %.4f %.4f %d %d" % (pt[0], pt[1], int(alt), dt))
         pilot.react(repl.sync(), pt, int(alt))
         prev = pt
