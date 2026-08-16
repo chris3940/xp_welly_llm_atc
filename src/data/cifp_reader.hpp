@@ -366,6 +366,21 @@ HoldSpec published_hold(const std::string &cifp_dir, const std::string &fix,
 //      cifp_dir) to get exact lat/lon.
 // Returns an empty FafFix when approach or FAF is not found.
 // Result is cached per (icao, designator) — call clear_cache() on airport change.
+// Ordered (ident, path_term) pairs for the legs of the named approach's FINAL
+// segment that lie AFTER faf_ident, i.e. the track the aircraft flies from the FAF
+// to the threshold. Used to answer one question: is that track STRAIGHT?
+//
+// A path_term of "RF" (radius-to-fix) or "AF" (arc-to-fix) means the final is
+// flown as an arc, so there is no axis to be established on -- LOWI R08-Z carries
+// two of them after its FAF WI749. The distinction matters: an arc in the
+// INTERMEDIATE segment does not prevent a straight final, so this deliberately
+// starts AFTER the FAF rather than scanning the whole approach.
+// Empty when the approach, the FAF, or CIFP is not found. [C. P. Potter]
+std::vector<std::pair<std::string, std::string>>
+approach_final_leg_terms(const std::string &cifp_dir, const std::string &icao,
+                         const std::string &approach_designator,
+                         const std::string &faf_ident);
+
 FafFix approach_faf(const std::string &cifp_dir,
                     const std::string &icao,
                     const std::string &approach_designator);

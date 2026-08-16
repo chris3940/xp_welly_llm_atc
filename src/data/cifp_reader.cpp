@@ -1909,6 +1909,65 @@ approach_transition_idents(const std::string &cifp_dir,
 
 // ── approach_faf ─────────────────────────────────────────────────────────
 
+std::vector<std::pair<std::string, std::string>>
+approach_final_leg_terms(const std::string &cifp_dir, const std::string &icao,
+                         const std::string &approach_designator,
+                         const std::string &faf_ident) {
+  std::vector<std::pair<std::string, std::string>> out;
+  if (cifp_dir.empty() || icao.empty() || approach_designator.empty() ||
+      faf_ident.empty())
+    return out;
+
+  std::ifstream in(cifp_dir + "/" + icao + ".dat");
+  if (!in.good())
+    return out;
+
+  // Collect the final segment in sequence order, then keep what follows the FAF.
+  // Reading the whole segment first (rather than starting to record on the FAF)
+  // keeps this correct whatever order the file happens to be in.
+  std::vector<std::pair<int, std::pair<std::string, std::string>>> legs;
+  int map_seq = -1; // everything at or beyond the MAP is the missed approach
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.size() < 6 || line.compare(0, 6, "APPCH:") != 0)
+      continue;
+    auto f = split_csv(line);
+    if (f.size() < 13)
+      continue;
+    const std::string rt = trim(f[1]);
+    if (rt == "A")
+      continue; // a transition, not the final segment
+    if (trim(f[2]) != approach_designator)
+      continue;
+    const int seq = std::atoi(line.c_str() + 6);
+    // f[11] is the path terminator (TF / RF / AF / IF ...), f[8] the waypoint
+    // description whose 4th character marks the MAP.
+    const std::string desc = trim(f[8]);
+    const bool is_map = desc.size() >= 4 && desc[3] == 'M';
+    legs.push_back({seq, {trim(f[4]), trim(f[11])}});
+    if (is_map)
+      map_seq = (map_seq < 0 || seq < map_seq) ? seq : map_seq;
+  }
+  std::sort(legs.begin(), legs.end(),
+            [](const auto &a, const auto &b) { return a.first < b.first; });
+
+  bool past_faf = false;
+  for (const auto &l : legs) {
+    // Stop at the missed-approach point. The missed approach is flown only on a
+    // go-around and routinely contains arcs (LOWI loops back to the RTT hold);
+    // counting them would disqualify approaches whose FINAL is perfectly straight.
+    if (map_seq >= 0 && l.first >= map_seq)
+      break;
+    if (!past_faf) {
+      if (l.second.first == faf_ident)
+        past_faf = true;
+      continue; // the FAF leg itself is the entry, not part of the track after it
+    }
+    out.push_back(l.second);
+  }
+  return out;
+}
+
 FafFix approach_faf(const std::string &cifp_dir,
                     const std::string &icao,
                     const std::string &approach_designator) {

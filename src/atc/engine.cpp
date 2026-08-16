@@ -26,6 +26,7 @@
 #include "data/airspace_db.hpp"
 #include "data/airport_overrides.hpp"
 #include "data/cifp_reader.hpp"
+#include "data/msa_db.hpp"
 #include "data/openair_db.hpp"
 #include "data/simbrief_ofp.hpp"
 #include "data/traffic_context.hpp"
@@ -198,6 +199,7 @@ static float s_descent_arrival_check_sec = 0.0f; // throttle DESCENT->ARRIVAL po
 // clearance (poll_descent_second_step) issues it once the aircraft nears FL200.
 // 0 = no deferral pending (cruise was already <= FL200, or single-step). The
 // freq change is DECOUPLED -- poll_acc_sector_change fires at the real boundary.
+static bool s_vector_mode_logged = false;    // vectoring-mode decision, once per arrival
 static int  s_descent_final_target_ft = 0;    // ultimate STAR-entry target when stepped
 static int  s_descent_first_step_ft   = 0;    // FL of the first (TMA-top) step
 static bool s_descent_second_step_issued = false;
@@ -738,6 +740,7 @@ void reset() {
   s_jump_no_enroute_descent = false;
   s_descent_timer = 0.0f;
   s_descent_final_target_ft = 0;
+  s_vector_mode_logged = false;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
@@ -867,6 +870,7 @@ void training_jump_enroute(int cleared_alt_ft) {
   // more robust but currently also clears s_route_fixes that the en-route jump relies
   // on -- revisit. (user 2026-07-30)
   s_descent_final_target_ft = 0;
+  s_vector_mode_logged = false;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
@@ -5957,6 +5961,7 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   // boundary, NOT tied to this altitude step (the Ljubljana FIR runs to FL660,
   // so there is no guaranteed FL195 freq cut). [[project_stepped_descent]]
   s_descent_final_target_ft = 0;
+  s_vector_mode_logged = false;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   // Restricted to a real STAR arrival (star_name set): the no-STAR direct-to-IAF
@@ -7630,9 +7635,18 @@ bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
 // the shared s_enroute_cleared_alt_ft, so nothing double-fires. The altitude
 // reference is correct per constraint (pressure-alt vs FL, QNH/feet vs feet,
 // TL-aware) because every check routes through check_next_fix / current_cleared.
+// Defined further down (it needs the approach statics); declared here because
+// poll_profile_enforcement is the per-frame hook it runs from.
+static void log_vector_mode_decision(const xplane_context::XPlaneContext &ctx);
+
 bool poll_profile_enforcement(const xplane_context::XPlaneContext &ctx, float dt,
                               std::string *out_text,
                               bool *out_requires_readback) {
+  // Log-only vectoring-mode verdict. Placed here because this poll runs EVERY
+  // frame in every airborne IFR phase: hanging it off the FAF-resolution block in
+  // poll_approach meant it never ran on arrivals that never reach that state.
+  log_vector_mode_decision(ctx);
+
   using AS = atc_state_machine::ATCState;
   const AS st = atc_state_machine::get_state();
   const bool airborne_ifr =
@@ -9450,6 +9464,95 @@ static bool approach_needs_reversal_vector(const xplane_context::XPlaneContext &
   return turn >= kVectorMinTurnDeg;
 }
 
+
+// ── Vectoring mode selection (LOG ONLY -- issues nothing) ─────────────────────
+// First step of docs/force-app-vectoring.md, deliberately inert: it decides which
+// of the two manoeuvres this arrival WOULD get and writes the verdict to Log.txt,
+// so the decision can be checked against real flights before anything is built on
+// top of it.
+//
+//   vectors to final   the four-leg pattern, established on the axis 3 NM before
+//                      the FAF
+//   vectors to the IAF radar guidance onto the IAF, then the published procedure
+//
+// Two independent tests; failing either selects vectors-to-the-IAF.
+//
+// TERRAIN. Note what is NOT used: comparing the MSA against the platform altitude,
+// which the first draft of the spec proposed, refuses EDLW as well as LOWI --
+//     LOWI  MSA 14300 vs platform 13000 -> refuse
+//     EDLW  MSA  3700 vs platform  3000 -> refuse TOO
+// and Dortmund is vectored every day. The error is conceptual: an MSA is a 25 NM
+// emergency sector minimum, NOT a minimum vectoring altitude, and we have no MVA
+// data at all. What separates the two airports is how far the terrain sits above
+// the FIELD (lowest approach-sector MSA minus aerodrome elevation):
+//     LOWI 10700 - 1905 = 8795 ft      LFLP 6500 - 1520 = 4980 ft
+//     LFMN  3100 -   12 = 3088 ft      EDLW 2800 -  425 = 2375 ft
+// LOWI stands clear. The threshold below is therefore an ADMITTED HEURISTIC, which
+// is precisely why this function only logs: the verdicts have to be watched over
+// real arrivals before they gate anything. [C. P. Potter]
+static constexpr int kVectorTerrainMarginFt = 6000;
+
+static void log_vector_mode_decision(const xplane_context::XPlaneContext &ctx) {
+  if (s_vector_mode_logged)
+    return;
+  if (!settings::force_app_vectoring() && !settings::allow_vectoring())
+    return;
+  if (s_assigned_dest_icao.empty() || s_assigned_approach_designator.empty() ||
+      ctx.cifp_dir.empty())
+    return; // not enough known yet -- try again next frame
+  // Resolve the FAF here rather than reading s_approach_faf: that member is only
+  // populated inside poll_approach, so depending on it made this decision fire
+  // solely on arrivals that reach the approach state -- i.e. never during the
+  // descent, which is when the mode actually has to be known.
+  const std::string &dest = s_assigned_dest_icao;
+  const auto faf = cifp_reader::approach_faf(ctx.cifp_dir, dest,
+                                             s_assigned_approach_designator);
+  if (faf.ident.empty())
+    return;
+  s_vector_mode_logged = true;
+
+  // Test 1 -- terrain, from the LOWEST approach-sector MSA above field elevation.
+  const auto recs = msa_db::records_for(dest);
+  int msa_min = 0;
+  for (const auto &r : recs)
+    for (const auto &sec : r.sectors)
+      if (sec.altitude_ft > 0 && (msa_min == 0 || sec.altitude_ft < msa_min))
+        msa_min = sec.altitude_ft;
+  if (msa_min == 0) {
+    logging::info("[vector] %s: no MSA sector data -- vectoring refused "
+                  "(DISABLED: NO MSA)", dest.c_str());
+    return;
+  }
+  const int field_ft =
+      xplane_context::airport_elevation_known(dest)
+          ? static_cast<int>(xplane_context::airport_elevation_ft(dest))
+          : 0;
+  const int above_field = msa_min - field_ft;
+  const bool terrain_ok = above_field <= kVectorTerrainMarginFt;
+
+  // Test 2 -- geometry: is there a STRAIGHT axis AFTER the FAF? An arc there
+  // leaves nothing to be established on, so the governing rule cannot be met.
+  bool axis_ok = true;
+  std::string curved_at;
+  const auto legs = cifp_reader::approach_final_leg_terms(
+      ctx.cifp_dir, dest, s_assigned_approach_designator, faf.ident);
+  for (const auto &l : legs)
+    if (l.second == "RF" || l.second == "AF") {
+      axis_ok = false;
+      curved_at = l.first;
+      break;
+    }
+
+  const char *mode = (terrain_ok && axis_ok) ? "vectors to FINAL" : "vectors to IAF";
+  logging::info("[vector] %s %s: MSA min %d ft, field %d ft (+%d), terrain %s; "
+                "axis after FAF %s%s%s -> WOULD USE %s",
+                dest.c_str(), s_assigned_approach_designator.c_str(), msa_min,
+                field_ft, above_field, terrain_ok ? "OK" : "TOO HIGH",
+                axis_ok ? "straight" : "CURVED",
+                curved_at.empty() ? "" : " at ", curved_at.c_str(), mode);
+}
+
+
 static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, float dt,
                                      std::string *out_text, bool *out_rb) {
   // Diagnostic: log WHY the vector-to-intercept declines to arm, once per changed
@@ -9923,6 +10026,7 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
   if (already_cleared > 0 && target >= already_cleared) {
     s_descent_second_step_issued = true;
     s_descent_final_target_ft = 0;
+  s_vector_mode_logged = false;
     logging::info("IFR descent: stepped-descent target %d ft DROPPED -- already "
                   "cleared to %d ft (would have been a climb)",
                   target, already_cleared);

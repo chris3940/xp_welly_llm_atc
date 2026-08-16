@@ -29,6 +29,14 @@ bool debug_logging() { return std::getenv("XP_ATC_DEBUG") != nullptr; }
 bool hold_enabled() { return std::getenv("XP_ATC_NO_HOLD") == nullptr; }
 bool shortcut_always() { return std::getenv("XP_ATC_SHORTCUT_ALWAYS") != nullptr; }
 void set_shortcut_always(bool) {}
+// Vectoring. allow_vectoring defaults TRUE like the real setting, so a headless
+// replay exercises the same path the plugin does unless told otherwise.
+bool allow_vectoring() { return std::getenv("XP_ATC_NO_VECTORING") == nullptr; }
+void set_allow_vectoring(bool) {}
+bool force_app_vectoring() {
+  return std::getenv("XP_ATC_FORCE_VECTORING") != nullptr;
+}
+void set_force_app_vectoring(bool) {}
 bool force_ils() { return std::getenv("XP_ATC_FORCE_ILS") != nullptr; }
 void set_force_ils(bool) {}
 
