@@ -302,6 +302,12 @@ static std::string resolve_approach_iaf(const xplane_context::XPlaneContext &ctx
 static void build_sid_route_table(const xplane_context::XPlaneContext &ctx); // departure half of the route table
 static std::string approach_clearance_phrase(
     const xplane_context::XPlaneContext &ctx); // "RNAV Zulu approach runway 08"; defined near poll_approach
+// Fix positions resolved with the airport as the proximity reference -- see the
+// definition for why every lookup must carry one.
+static std::unordered_map<std::string, std::pair<double, double>>
+lookup_fix_positions_near(const xplane_context::XPlaneContext &ctx,
+                          const std::vector<std::string> &idents,
+                          const std::string &icao);
 // Full registration on first contact with a controller, abbreviated afterwards
 // (registration callsigns only -- an operator callsign is never abbreviated).
 static std::string spoken_callsign(const xplane_context::XPlaneContext &ctx);
@@ -2864,8 +2870,7 @@ void process_transcript(Input in, Done done) {
             if (iaf_ids.size() == 1) {
               iaf_ns = iaf_ids[0];
             } else {
-              auto iaf_pos = cifp_reader::lookup_fix_positions(
-                  ctx.cifp_dir, iaf_ids, s_assigned_dest_icao);
+              auto iaf_pos = lookup_fix_positions_near(ctx, iaf_ids, s_assigned_dest_icao);
               double best_d = 1e9;
               for (const auto &id : iaf_ids) {
                 auto it = iaf_pos.find(id);
@@ -6097,8 +6102,7 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
         dist_aircraft_to_iaf = traffic_geometry::distance_nm(
             ctx.latitude, ctx.longitude, ctx.airport_lat, ctx.airport_lon);
       } else {
-        auto iaf_pos = cifp_reader::lookup_fix_positions(
-            ctx.cifp_dir, iaf_idents, ofp.destination_icao);
+        auto iaf_pos = lookup_fix_positions_near(ctx, iaf_idents, ofp.destination_icao);
         double best_dist_ac = 1e9;
         for (const auto &id : iaf_idents) {
           auto it = iaf_pos.find(id);
@@ -7319,6 +7323,25 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
 // (an ATC vector) -- distinct from check_course, which tracks the next ROUTE-fix bearing.
 // The caller sets the threshold + reaction; the vector-compliance monitor uses it, and it
 // folds into the unified monitor later (feedback_refactor_unify #2). [C. P. Potter]
+// lookup_fix_positions() disambiguates cross-world homonyms by PROXIMITY, but only
+// when it is given the reference position -- and almost every call site passed the
+// ICAO alone. The cost is not theoretical: at EDLW the approach fix CF06 resolved
+// to (11.74 N, 9.20 E), in Africa, 2390 NM away. Every distance and course built
+// on it was nonsense, which is how "expect vectors for ILS approach runway 06"
+// came out at 4456 ft on short final (real flight 2026-08-16).
+//
+// This wrapper always supplies the airport's own position, so the near fix wins.
+// [C. P. Potter]
+static std::unordered_map<std::string, std::pair<double, double>>
+lookup_fix_positions_near(const xplane_context::XPlaneContext &ctx,
+                          const std::vector<std::string> &idents,
+                          const std::string &icao) {
+  const auto ap = xplane_context::airport_pos_for(icao);
+  return cifp_reader::lookup_fix_positions(ctx.cifp_dir, idents, icao, ap.first,
+                                           ap.second);
+}
+
+
 static bool vectoring_active(); // defined with the vectoring state machine
 
 static double heading_error_deg(double heading_mag, double assigned_mag) {
@@ -8596,7 +8619,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
             for (const auto &w : star_all)
               want.push_back(w.ident);
             const auto pos =
-                cifp_reader::lookup_fix_positions(ctx.cifp_dir, want, dest_icao);
+                lookup_fix_positions_near(ctx, want, dest_icao);
             for (const auto &w : star_all) {
               bool already = false;
               for (const auto &c : chain)
@@ -10878,7 +10901,7 @@ static void rebuild_route_direct_to_iaf(const xplane_context::XPlaneContext &ctx
     if (!wp.ident.empty())
       idents.push_back(wp.ident);
   const auto pos_map =
-      cifp_reader::lookup_fix_positions(ctx.cifp_dir, idents, s_assigned_dest_icao);
+      lookup_fix_positions_near(ctx, idents, s_assigned_dest_icao);
   const auto dpos = xplane_context::airport_pos_for(s_assigned_dest_icao);
 
   // PREPEND the IAF itself as the current target. approach_procedure_waypoints SKIPS
@@ -10998,7 +11021,7 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
       ctx.cifp_dir, dest, s_assigned_approach_designator);
   if (iaf_idents.empty())
     return false;
-  auto iaf_pos = cifp_reader::lookup_fix_positions(ctx.cifp_dir, iaf_idents, dest);
+  auto iaf_pos = lookup_fix_positions_near(ctx, iaf_idents, dest);
 
   // IAF at-or-below altitude for the descent gate: scan the STAR fixes (a
   // block-constrained IAF like COLLO carries its block there) then the route
@@ -11662,7 +11685,7 @@ static void build_sid_route_table(const xplane_context::XPlaneContext &ctx) {
     for (const auto &wp : sw)
       if (!wp.ident.empty())
         idents.push_back(wp.ident);
-    const auto pos = cifp_reader::lookup_fix_positions(ctx.cifp_dir, idents, dep);
+    const auto pos = lookup_fix_positions_near(ctx, idents, dep);
     for (const auto &wp : sw) {
       if (wp.ident.empty() || seen.count(wp.ident))
         continue;
@@ -12246,8 +12269,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       if (iaf_ids.size() == 1) {
         best_iaf_poll = iaf_ids[0];
       } else {
-        auto iaf_pos = cifp_reader::lookup_fix_positions(
-            ctx.cifp_dir, iaf_ids, s_assigned_dest_icao);
+        auto iaf_pos = lookup_fix_positions_near(ctx, iaf_ids, s_assigned_dest_icao);
         double best_d = 1e9;
         for (const auto &id : iaf_ids) {
           auto it = iaf_pos.find(id);
@@ -12808,8 +12830,30 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         // Never promise vectors again once a live sequence was given up.
         const bool reversal =
             !s_vtf_abandoned && approach_needs_reversal_vector(ctx);
-        if (reversal && !s_vec_expect_issued && !s_sector_checkin_pending &&
-            routed_distance_to_fix_idx(ctx, iaf_idx) > 5.0) {
+        // Do not promise vectors there is no room to fly. The old bound was
+        // 5 NM from the IAF, which is meaningless: the user was told "expect
+        // vectors for ILS approach runway 06" at 4456 ft, a few miles from the
+        // field and already being descended by the arrival controller (real
+        // flight 2026-08-16: "on est presque au FAF, y a plus de vectoring").
+        // Below the distance the manoeuvre itself refuses to start there is
+        // nothing to announce -- reuse that floor rather than invent a second
+        // number. [C. P. Potter]
+        double room_nm = routed_distance_to_fix_idx(ctx, iaf_idx);
+        {
+          const auto faf_now = vtf_faf(ctx, s_assigned_dest_icao,
+                                       s_assigned_approach_designator);
+          if (!faf_now.ident.empty() && (faf_now.lat != 0.0 || faf_now.lon != 0.0))
+            room_nm = std::min(room_nm,
+                               traffic_geometry::distance_nm(
+                                   ctx.latitude, ctx.longitude, faf_now.lat,
+                                   faf_now.lon));
+        }
+        // General rule (user, 2026-08-16): once the aircraft has been brought to
+        // the final vectoring point, the vectoring is OVER -- nothing further is
+        // announced, whatever the geometry says.
+        const bool vec_over = s_vtf_leg == VecLeg::Done || s_vtf_abandoned;
+        if (reversal && !vec_over && !s_vec_expect_issued &&
+            !s_sector_checkin_pending && room_nm > kVecFloorNm) {
           s_vec_expect_issued = true;
           const std::string ph = approach_clearance_phrase(ctx);
           *out_text = cs + ", expect vectors for " +
