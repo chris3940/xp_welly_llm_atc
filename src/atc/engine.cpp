@@ -7467,6 +7467,12 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
       }
     }
   }
+  // Under radar vectors the legs assign their own levels, each floored by the
+  // sector MSA -- including the FAF/glide-intercept altitude on the axis leg,
+  // which is exactly the figure the published-transition rule forbids. Two
+  // sources of descent clearances at once would contradict each other.
+  if (vectoring_active())
+    return false;
   // Wide window: check_next_fix returns the governing constrained fix regardless
   // of proximity; the REAL trigger is the top-of-descent distance below.
   const FixCompliance fc = check_next_fix(ctx, 900.0);
@@ -9390,6 +9396,12 @@ static void apply_direct_to(const std::string &fix_ident) {
 // with the same STAR/approach gap benefits -- no per-field exception. [C. P. Potter]
 static bool poll_connector_direct(const xplane_context::XPlaneContext &ctx,
                                   std::string *out_text, bool *out_rb) {
+  // A shortcut is meaningless while ATC is vectoring: the aircraft is off the
+  // route by instruction, and "direct <fix>, when able" would contradict the
+  // heading it was just given. [C. P. Potter]
+  if (vectoring_active())
+    return false;
+
   if (s_connector_direct_issued || ctx.cifp_dir.empty() ||
       s_assigned_star_name.empty() || s_assigned_approach_designator.empty() ||
       s_assigned_dest_icao.empty())
@@ -9926,6 +9938,13 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
 
 static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, float dt,
                                      std::string *out_text, bool *out_rb) {
+  // The IAF teardrop is the continuation of the vectors-to-the-IAF mode, never a
+  // competitor to vectors-to-final. It cannot normally arm during a vectoring
+  // sequence (it needs the published transition), but state it rather than rely
+  // on that.
+  if (vectoring_active())
+    return false;
+
   // Diagnostic: log WHY the vector-to-intercept declines to arm, once per changed
   // reason (never armed on the LOWI R08-Z ELMEM reversal in-sim -- real vol
   // 2026-07-31/08-01 -- and poll_vector logged nothing, so the bail cause was
@@ -10448,6 +10467,12 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
 bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
                   std::string *out_text,
                   bool *out_requires_readback) {
+  // A shortcut is meaningless while ATC is vectoring: the aircraft is off the
+  // route by instruction, and "direct <fix>, when able" would contradict the
+  // heading it was just given. [C. P. Potter]
+  if (vectoring_active())
+    return false;
+
   using AS = atc_state_machine::ATCState;
 
   if (atc_state_machine::get_state() != AS::IFR_DESCENT) {
@@ -10737,6 +10762,12 @@ static void rebuild_route_direct_to_iaf(const xplane_context::XPlaneContext &ctx
 static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
                                std::string *out_text,
                                bool *out_requires_readback) {
+  // A shortcut is meaningless while ATC is vectoring: the aircraft is off the
+  // route by instruction, and "direct <fix>, when able" would contradict the
+  // heading it was just given. [C. P. Potter]
+  if (vectoring_active())
+    return false;
+
   if (s_star_shortcut_offered)         return false; // one-shot per arrival
   if (s_approach_cleared_issued)       return false; // already cleared for approach
   if (!s_no_star_direct_iaf.empty())   return false; // no-STAR path already directs
@@ -11790,6 +11821,11 @@ std::string poll_route_tracker(const xplane_context::XPlaneContext &ctx) {
   }
 
   if (s_route_fixes.empty()) return {};
+  // FROZEN under radar vectors. The aircraft is off the route by instruction, so
+  // letting the tracker keep crediting fixes it merely passes near would leave it
+  // pointing somewhere meaningless when own navigation resumes -- and it is the
+  // tracker that feeds the distances every descent decision reads.
+  if (vectoring_active()) return {};
   if (s_route_fix_idx >= static_cast<int>(s_route_fixes.size())) return {};
 
   // FREEZE the walker while actively holding: the aircraft is orbiting the hold fix,
