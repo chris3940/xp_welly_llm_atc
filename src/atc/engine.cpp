@@ -10022,6 +10022,15 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     *out_text = txt;
     if (out_requires_readback)
       *out_requires_readback = true;
+    // Being vectored FOR the approach is the arrival phase. The state machine
+    // normally reaches ARRIVAL on the STAR entry and APPROACH on the approach
+    // handoff -- but a vectored aircraft has left the STAR, so neither trigger
+    // ever fires and the whole arrival stayed in DESCENT (user, from Log(19):
+    // "pourquoi quand le vectoring commence le STATE n'est pas IFR/APPROACH ou
+    // ARRIVAL ?"). Several polls gate on the phase, so leaving it behind is not
+    // cosmetic. [C. P. Potter]
+    if (st == AS::IFR_DESCENT)
+      atc_state_machine::set_state(AS::IFR_ARRIVAL);
     logging::info("[vector] first leg %s hdg %03d, alt %d (s=%.1f y=%.1f, offset %.0f)",
                   s_vtf_leg == VecLeg::Displace  ? "displace"
                   : s_vtf_leg == VecLeg::Intercept ? "INTERCEPT (direct)"
@@ -10190,6 +10199,10 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       if (out_requires_readback)
         *out_requires_readback = true;
       s_approach_cleared_issued = true;
+      // The axis leg clears the approach, so this IS the approach phase.
+      if (atc_state_machine::get_state() == AS::IFR_ARRIVAL ||
+          atc_state_machine::get_state() == AS::IFR_DESCENT)
+        atc_state_machine::set_state(AS::IFR_APPROACH_CONTACT);
       // The two figures the governing rule is about, so the acceptance test can
       // be run against a real flight log and not only against the replay.
       logging::info("[vector] leg D AXIS hdg %03d, alt %d, %.1f NM to FAF %s",
