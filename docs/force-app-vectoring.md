@@ -28,7 +28,42 @@ It also gives the acceptance test, measurable without flying: at the moment
 `cleared <approach>, report established` is issued, the heading error to the
 final course must be < 5° and the distance to the FAF ≥ 3 NM.
 
-### When the rule cannot be evaluated: no axis after the FAF
+## Two modes, not one (user, 2026-08-16)
+
+Radar vectoring is not all-or-nothing. There are two distinct manoeuvres, and
+LOWI is the case that makes the difference obvious:
+
+| mode | what ATC does | when |
+|---|---|---|
+| **vectors to final** | the four legs below, established on the axis 3 NM before the FAF | terrain permits AND there is a straight axis after the FAF |
+| **vectors to the IAF** | radar guidance onto the IAF, then the published procedure | terrain, or no axis after the FAF — **LOWI** |
+
+The second is **not a degraded fallback**: it is what a real controller does
+there. *"Il y a trop de relief a LOWI pour avoir un guidage radar vers le FAF"*
+— the guidance is to the IAF, and the aircraft flies the published procedure
+from it. This is what makes the decision to keep `poll_vector_to_intercept` the
+right one: the IAF teardrop is the natural CONTINUATION of mode 2, not a spare
+wheel.
+
+### Choosing the mode
+
+Two tests, both data-driven; failing either selects vectors-to-the-IAF.
+
+**1. Terrain.** The pattern must be flyable at its own leg altitudes. Compare
+the sector MSA over the pattern area against the altitudes the legs require. At
+LOWI:
+
+```
+LOWI sector 270 : MSA    14300 ft
+IAF ELMEM publishes      13000 ft
+```
+
+The MSA sits **above** the platform altitude, so the aircraft cannot descend
+into the pattern at all — vectors to final are impossible, whatever the
+procedure geometry says. This is finally a real job for `msa_db` rather than
+only a guard.
+
+**2. Geometry: no axis after the FAF**
 
 The rule assumes a **straight** final approach axis. The precise test (user,
 2026-08-16) is **whether there is a straight axis AFTER the FAF** -- not merely
@@ -51,15 +86,17 @@ before the FAF would be geometrically achievable. But the path **after** the FAF
 curves, so there is no final axis to be established on, and neither the last
 vector's heading nor the `< 5 deg` test means anything.
 
-So **FORCE APP VECTORING must refuse when the segment after the FAF is not a
-straight track**, and hand back the published procedure. Data-driven test: walk
+So **FORCE APP VECTORING must select vectors-to-the-IAF when the segment after
+the FAF is not a straight track**, rather than vectors to final. Data-driven
+test: walk
 the chosen approach's final segment from the FAF towards the threshold and look
 for a non-straight `path_term` (`RF`, `AF`). An earlier draft of this document
 tested for `RF` anywhere in the approach, which is too broad -- an arc in the
 *intermediate* segment does not prevent a straight final.
 
 ```
-[vector] refused: R08-Z has no straight axis after FAF WI749 (RF legs) -- keeping the published procedure
+[vector] R08-Z has no straight axis after FAF WI749 (RF legs) -- vectoring to IAF ELMEM instead
+[vector] LOWI MSA 14300 > platform 13000 -- terrain forbids vectors to final, vectoring to IAF
 ```
 
 Related known defect: the existing alignment check already assumes a straight
