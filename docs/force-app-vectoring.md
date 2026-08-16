@@ -399,3 +399,30 @@ must be DESCENT, ARRIVAL or an approach state, never ENROUTE_CRUISE. On the
 measured arrival this changes nothing (the aircraft was in DESCENT ~60 NM before
 the vectors armed), so it is a structural rail rather than a behaviour change:
 it makes the case impossible instead of merely unlikely.
+
+---
+
+## Future: en-route vectoring (not implemented)
+
+Recorded at the user's request, 2026-08-16. Everything in this document is
+APPROACH vectoring -- positioning an aircraft onto a final approach course. A
+separate manoeuvre exists: vectors given by the EN-ROUTE controller, for
+spacing, traffic or weather, with no approach involved.
+
+They differ in every respect that matters here:
+
+| | approach vectoring | en-route vectoring |
+|---|---|---|
+| target | the final approach course | rejoining the cleared route |
+| ends with | "cleared approach, report established" | "resume own navigation direct FIX" |
+| altitude floor | sector MSA around the procedure | grid MORA / the cleared level |
+| phase | terminal only -- never in the filed cruise segment | cruise, by definition |
+
+The phase rail added for approach vectoring (arming requires the arrival
+descent to have started) is exactly what keeps the two from colliding: an
+en-route vector must NOT be produced by poll_vector_to_final.
+
+Note that the off-route recovery already sketched elsewhere is the same
+manoeuvre seen from the other side -- an aircraft that has drifted is vectored
+back onto its route. If both are built, they should share one implementation
+rather than grow two.
