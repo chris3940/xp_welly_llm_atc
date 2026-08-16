@@ -201,6 +201,9 @@ static float s_descent_arrival_check_sec = 0.0f; // throttle DESCENT->ARRIVAL po
 // 0 = no deferral pending (cruise was already <= FL200, or single-step). The
 // freq change is DECOUPLED -- poll_acc_sector_change fires at the real boundary.
 static bool s_vector_mode_logged = false;    // vectoring-mode decision, once per arrival
+// Frequency the FULL registration was last spoken on; empty means the next call
+// is a first contact. See spoken_callsign().
+static std::string s_callsign_full_said_on;
 // Radar-vectoring state machine (docs/force-app-vectoring.md).
 enum class VecLeg { None, Displace, Downwind, Base, Intercept, Axis, Done, Refused };
 static VecLeg s_vtf_leg          = VecLeg::None;
@@ -777,6 +780,9 @@ void reset() {
   s_descent_timer = 0.0f;
   s_descent_final_target_ft = 0;
   s_vector_mode_logged = false;
+  // A jump or a reset is a FIRST CONTACT: the controller has not addressed
+  // this aircraft yet, so the next call gives the registration in full.
+  s_callsign_full_said_on.clear();
   s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
   s_vtf_leg = VecLeg::None;
@@ -915,6 +921,9 @@ void training_jump_enroute(int cleared_alt_ft) {
   // on -- revisit. (user 2026-07-30)
   s_descent_final_target_ft = 0;
   s_vector_mode_logged = false;
+  // A jump or a reset is a FIRST CONTACT: the controller has not addressed
+  // this aircraft yet, so the next call gives the registration in full.
+  s_callsign_full_said_on.clear();
   s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
   s_vtf_leg = VecLeg::None;
@@ -9756,8 +9765,6 @@ static bool vectoring_active() {
 //
 // The full form returns on each new frequency: a new controller has not addressed
 // this aircraft yet. [C. P. Potter]
-static std::string s_callsign_full_said_on; // frequency the full form was used on
-
 static bool is_registration_callsign(const std::vector<std::string> &w) {
   static const std::unordered_set<std::string> kSpoken = {
       "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
