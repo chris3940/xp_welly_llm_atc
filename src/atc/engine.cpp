@@ -223,6 +223,10 @@ static bool   s_vtf_nudged       = false; // re-issued once already
 // 2026-08-16 abandoned at 18:39 and then heard "expect vectors for ILS approach
 // runway 06" from the next controller at 23:05. [C. P. Potter]
 static bool   s_vtf_abandoned    = false;
+// Lateral deviation at the previous check, and a cooldown, for the localiser
+// intercept monitor on the AXIS leg.
+static double s_vtf_prev_y       = 0.0;
+static float  s_vtf_recut_secs   = 0.0f;
 // FAF memo. approach_faf() caches only SUCCESSFUL lookups, so an unresolved
 // position makes every call re-read earth_fix.dat -- 15 MB. Called once per frame
 // that cost 106 ms of a 106 ms flight loop in flight (2026-08-16). Resolve once
@@ -801,6 +805,8 @@ void reset() {
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_prev_y = 0.0;
+  s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
@@ -942,6 +948,8 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_prev_y = 0.0;
+  s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
@@ -6038,6 +6046,8 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_prev_y = 0.0;
+  s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   // Restricted to a real STAR arrival (star_name set): the no-STAR direct-to-IAF
@@ -8685,7 +8695,20 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
           acc_nm += traffic_geometry::distance_nm(prev_lat, prev_lon, c.lat, c.lon);
           prev_lat = c.lat;
           prev_lon = c.lon;
-          consider(c.src, c.ident, c.alt_ft, acc_nm);
+          // Under radar vectors the aircraft does NOT fly the published path: it
+          // is cut across, so the track available to lose the altitude is the
+          // DIRECT distance, not the routed one (user, 2026-08-16). Measured on
+          // this arrival the routed chain to KOLOT was ~92 NM while the direct
+          // track was ~72 -- the profile was planned with 20 NM it would never
+          // get, which is why the descent ended up needing more than 2000 fpm.
+          // The shorter distance is more binding, so it moves the TOD EARLIER.
+          double d_used = acc_nm;
+          if (settings::force_app_vectoring()) {
+            const double direct = traffic_geometry::distance_nm(
+                ctx.latitude, ctx.longitude, c.lat, c.lon);
+            d_used = std::min(d_used, direct);
+          }
+          consider(c.src, c.ident, c.alt_ft, d_used);
         }
         // alert = NM to lose the altitude at the shared descent slope
         // (kDescentSlopeFtPerNm = 265 ft/NM = 2.5 deg, matching the crossing/navlog-step
@@ -9945,6 +9968,8 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     s_vtf_nudge_secs = 0.0f;
     s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_prev_y = 0.0;
+  s_vtf_recut_secs = 0.0f;
     const int want = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
     s_vtf_cleared_ft = vec_leg_altitude_ft(ctx, dest, want);
     std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
@@ -10037,6 +10062,8 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn1 + 360.0, 360.0);
       s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_prev_y = 0.0;
+  s_vtf_recut_secs = 0.0f;
       *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) + ".";
       if (out_requires_readback)
         *out_requires_readback = true;
@@ -10055,6 +10082,8 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_prev_y = 0.0;
+  s_vtf_recut_secs = 0.0f;
       *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) +
                   ", reduce speed 180 knots.";
       if (out_requires_readback)
@@ -10075,6 +10104,8 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_prev_y = 0.0;
+  s_vtf_recut_secs = 0.0f;
       const int want = faf.alt_ft > 0 ? faf.alt_ft + 1000 : 4000;
       const int lvl = vec_leg_altitude_ft(ctx, dest, want);
       std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
@@ -10099,8 +10130,12 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     if (std::fabs(y) <= kVecEstabNm) {
       s_vtf_leg = VecLeg::Axis;
       s_vtf_hdg = course;
+      s_vtf_prev_y = y;
+      s_vtf_recut_secs = 0.0f;
       s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_prev_y = 0.0;
+  s_vtf_recut_secs = 0.0f;
       const int want = faf.alt_ft > 0 ? faf.alt_ft : 3000;
       const int lvl = vec_leg_altitude_ft(ctx, dest, want);
       std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
@@ -10130,6 +10165,45 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
 
   if (s_vtf_leg == VecLeg::Axis) {
     const double err = heading_error_deg(ctx.heading_mag, course);
+
+    // Localiser intercept monitor. The axis leg used to be the last word: once
+    // "cleared approach, report established" went out, nothing watched whether
+    // the aircraft actually joined. A pilot who overshoots gets no correction at
+    // all (user, 2026-08-16). While still off the axis, if the deviation is
+    // GROWING -- overshot, or drifting -- send him back with a fresh intercept.
+    // ICAO names the situation, so say it: "you have passed through the
+    // localiser". Cooldown so it corrects rather than nags.
+    s_vtf_recut_secs -= dt;
+    const bool off_axis = std::fabs(y) > kVecEstabNm;
+    const bool diverging = std::fabs(y) > std::fabs(s_vtf_prev_y) + 0.05;
+    const bool crossed = (y * s_vtf_prev_y < 0.0) && std::fabs(y) > kVecEstabNm;
+    if (off_axis && (diverging || crossed) && s > kVecAlignNm &&
+        s_vtf_recut_secs <= 0.0f) {
+      s_vtf_recut_secs = 25.0f;
+      s_vtf_prev_y = y;
+      // Turn back toward the axis: y > 0 means right of it, so intercept from
+      // the right by taking a heading LEFT of the course.
+      const double sign = (y > 0.0) ? -1.0 : 1.0;
+      const double hdg =
+          std::fmod(course + kVecInterceptDeg * sign + 360.0, 360.0);
+      s_vtf_hdg = hdg;
+      s_vtf_nudged = false;
+      *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, hdg) +
+                  (crossed ? ", you have passed through the localiser, "
+                             "closing from the "
+                           : ", closing from the ") +
+                  ((y > 0.0) ? "right." : "left.");
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      logging::info("[vector] re-intercept: %.1f NM %s of the axis (%s), "
+                    "heading %03d, %.1f NM to FAF",
+                    std::fabs(y), y > 0.0 ? "right" : "left",
+                    crossed ? "passed through" : "diverging",
+                    static_cast<int>(hdg), s);
+      return true;
+    }
+    s_vtf_prev_y = y;
+
     if (err < 5.0 && s >= kVecAlignNm - 0.5) {
       s_vtf_leg = VecLeg::Done;
       logging::info("[vector] established: hdg err %.0f deg, %.1f NM to FAF -- OK",
@@ -10645,6 +10719,8 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_prev_y = 0.0;
+  s_vtf_recut_secs = 0.0f;
     logging::info("IFR descent: stepped-descent target %d ft DROPPED -- already "
                   "cleared to %d ft (would have been a climb)",
                   target, already_cleared);

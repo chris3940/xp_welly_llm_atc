@@ -352,3 +352,36 @@ Existing bricks: `heading_error_deg`, `approach_needs_reversal_vector`,
 
 - Does `force_app_vectoring` replace `poll_vector_to_intercept` (the IAF teardrop,
   armed at 2.5 NM for >=100 deg reversals) or coexist with it?
+
+---
+
+## Planning the descent on the vectored track (and what it assumes)
+
+When vectoring is CERTAIN, the descent must be planned on the track the aircraft
+will actually fly, which is the direct one -- not the published route. Measured
+on the DIK -> EDLW arrival: the routed chain to the FAF was ~92 NM while the
+direct track was ~72. Planning on 92 NM handed the profile 20 NM it was never
+going to get, and the aircraft ended up needing more than 2000 fpm to make the
+platform (user, 2026-08-16). Before the fix the descent clearance came at 70 NM
+when the top of descent was 96; after it, at 97 NM, which is 2.8 degrees instead
+of 4.1.
+
+**The assumption this rests on, stated plainly.** An en-route controller may only
+plan a descent on a shortened track if he already knows the terminal unit is
+going to vector -- that is a COORDINATION, normally standing between the two
+units rather than negotiated per flight. Announcing "expect vectors" is how the
+pilot is told the published transition will not be flown.
+
+So the shortcut is applied ONLY under `force_app_vectoring`, where vectoring is
+certain by construction. Under `allow_vectoring` -- where ATC merely *may*
+vector -- the descent stays planned on the ROUTED distance, because an en-route
+controller cannot assume a shortcut he has not agreed. That asymmetry is
+deliberate, and it is why the two settings are separate rather than one.
+
+**To verify before the public release** (not yet checked against source
+material): how the transfer conditions between an ACC and a terminal unit are
+normally fixed -- level, transfer point, and whether vectoring is pre-agreed --
+and whether the phraseology used to tell the pilot differs from the "expect
+vectors" heads-up already implemented. If the real convention turns out to be
+narrower than assumed here, the shortcut belongs behind whatever condition that
+convention actually specifies.
