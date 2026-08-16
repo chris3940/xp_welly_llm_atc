@@ -1,7 +1,10 @@
 # Candidate — the transfer-floor clamp must check it is clamping a *terminal* area
 
-Status: **not applied.** Measured, understood, and deliberately held back
-(2026-08-15) because it touches a guard shared by several arrival phases.
+Status: **APPLIED 2026-08-16.** Held back on 2026-08-15 for lack of evidence
+from a real flight; Log(19) then showed it suppressing a real descent
+("crossing DOR -> 3000 ft SUPPRESSED: below inner-TMA transfer floor 66000 ft"),
+which settled it. The LFLP regression it was feared to reopen did not appear:
+the AFIS suite (35 PASS) and the STAR tracker suite are unchanged.
 
 ## What happens today
 

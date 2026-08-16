@@ -6797,6 +6797,26 @@ static int sector_transfer_floor_ft(const xplane_context::XPlaneContext &ctx,
       resolve_tma_controller(lower.name, nullptr, &lf) &&
       std::fabs(cf - lf) < 0.005f)
     return 0;
+  // The clamp protects an INNER TERMINAL controller's airspace, so the volume
+  // below must plausibly BE one. Without this an enroute/upper block becomes an
+  // "inner TMA" and its ceiling an unreachable floor: at EDLW the generic
+  // 10000-66000 ft slab produced "below inner-TMA transfer floor 66000 ft",
+  // which suppresses EVERY descent. Seen in a REAL flight (Log(19),
+  // 2026-08-16) suppressing "crossing DOR -> 3000 ft", not only in replay --
+  // I had wrongly told the user the flight never needed this.
+  //
+  // A terminal area does not top out in the flight levels and is not tens of
+  // thousands of feet thick; anything that is, is enroute structure and owes no
+  // transfer. [C. P. Potter]
+  constexpr int kMaxTerminalCeilingFt = 25000;
+  constexpr int kMaxTerminalThicknessFt = 15000;
+  if (lower.ceiling_ft > kMaxTerminalCeilingFt ||
+      (lower.ceiling_ft - lower.floor_ft) > kMaxTerminalThicknessFt) {
+    logging::debug("[DBG] transfer-floor clamp IGNORED: '%s' %d-%d ft is enroute "
+                   "structure, not a terminal area",
+                   lower.name.c_str(), lower.floor_ft, lower.ceiling_ft);
+    return 0;
+  }
   return lower.ceiling_ft; // inner controller owns everything below this
 }
 
