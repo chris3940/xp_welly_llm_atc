@@ -385,3 +385,17 @@ and whether the phraseology used to tell the pilot differs from the "expect
 vectors" heads-up already implemented. If the real convention turns out to be
 narrower than assumed here, the shortcut belongs behind whatever condition that
 convention actually specifies.
+
+### Vectors cannot start before the filed cruise ends
+
+"Je ne pense pas que le vectoring cela peut etre avant notre dernier segment au
+FL230 qui est accepte par eurocontrol" (user, 2026-08-16). Vectors belong to the
+TERMINAL phase: the last filed level is agreed with the network, and an approach
+controller does not reach up into a cruise segment the flight plan was accepted
+on.
+
+Arming therefore requires the arrival descent to have started -- the ATC state
+must be DESCENT, ARRIVAL or an approach state, never ENROUTE_CRUISE. On the
+measured arrival this changes nothing (the aircraft was in DESCENT ~60 NM before
+the vectors armed), so it is a structural rail rather than a behaviour change:
+it makes the case impossible instead of merely unlikely.

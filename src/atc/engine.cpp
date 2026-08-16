@@ -9922,6 +9922,20 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   if (s_vtf_leg == VecLeg::None) {
     if (!s_vector_mode_final_known)
       return false; // the mode decision has not been taken yet this arrival
+    // Vectors belong to the TERMINAL phase. They cannot begin while the aircraft
+    // is still flying the cruise segment its flight plan was accepted on -- the
+    // last filed level is agreed with the network, and an approach controller
+    // does not reach up into it (user, 2026-08-16: "je ne pense pas que le
+    // vectoring cela peut etre avant notre dernier segment au FL230 qui est
+    // accepte par eurocontrol"). Require the arrival descent to have started.
+    {
+      const auto st_now = atc_state_machine::get_state();
+      const bool in_arrival_descent =
+          st_now == AS::IFR_DESCENT || st_now == AS::IFR_ARRIVAL ||
+          st_now == AS::IFR_APPROACH_CONTACT || st_now == AS::IFR_APPROACH_DESCENT;
+      if (!in_arrival_descent)
+        return false;
+    }
     if (!s_vtf_to_final) {
       s_vtf_leg = VecLeg::Refused; // mode 2 keeps the published procedure
       return false;
