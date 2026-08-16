@@ -63,6 +63,30 @@ into the pattern at all — vectors to final are impossible, whatever the
 procedure geometry says. This is finally a real job for `msa_db` rather than
 only a guard.
 
+**MSA is authoritative here; MORA must NOT be used to choose the mode.**
+(user, 2026-08-16: *"LFLP 18200 c'est juste dans un secteur donne"*.) A MORA
+cell is 1 degree, roughly 60 NM, so near mountains it reports terrain that is
+nowhere near the approach. Measured on the reference data:
+
+| | MORA cell / neighbourhood | MSA sectors around the approach point |
+|---|---|---|
+| LFLP | 18200 / 18200 | CBY: **6500 / 7200 / 9700** |
+| LFMN | 12100 / 15900 | LFMN: **3100 / 3200 / 5600**, 12500 to the east |
+| LOWI | 14000 / 15700 | ELMEM: 10700 / 11400 / **13100 / 14300** |
+| EDLW | 3700 / 4400 | DOR: **2800 / 3700** |
+
+At Annecy the MORA sits 8000-11000 ft above the actual approach sectors -- it is
+reporting Mont Blanc, 40 NM away. Selecting the mode on MORA would forbid
+vectoring at Annecy and Nice for terrain that is not on the flight path. LOWI is
+refused on its MSA alone (14300 against ELMEM's 13000); MORA is not needed to
+reach that verdict.
+
+So the precedence is: **MSA decides. MORA is only the last-resort floor when the
+MSA is silent** (outside the sector radius, or an airport that publishes none),
+and it is expected to be pessimistic near terrain -- acceptable for a floor,
+wrong for a decision.
+
+
 **2. Geometry: no axis after the FAF**
 
 The rule assumes a **straight** final approach axis. The precise test (user,
