@@ -211,6 +211,11 @@ static double s_vtf_hdg          = 0.0;   // heading currently assigned
 static int    s_vtf_cleared_ft   = 0;     // level currently assigned on the pattern
 static float  s_vtf_nudge_secs   = 0.0f;  // compliance timer for the current leg
 static bool   s_vtf_nudged       = false; // re-issued once already
+// Set only when a LIVE sequence is given up (not when arming simply declines).
+// After that, ATC must not promise vectors again on this arrival: the flight of
+// 2026-08-16 abandoned at 18:39 and then heard "expect vectors for ILS approach
+// runway 06" from the next controller at 23:05. [C. P. Potter]
+static bool   s_vtf_abandoned    = false;
 // FAF memo. approach_faf() caches only SUCCESSFUL lookups, so an unresolved
 // position makes every call re-read earth_fix.dat -- 15 MB. Called once per frame
 // that cost 106 ms of a 106 ms flight loop in flight (2026-08-16). Resolve once
@@ -776,6 +781,7 @@ void reset() {
   s_vtf_cleared_ft = 0;
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
+  s_vtf_abandoned = false;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
@@ -913,6 +919,7 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_vtf_cleared_ft = 0;
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
+  s_vtf_abandoned = false;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
@@ -6011,6 +6018,7 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   s_vtf_cleared_ft = 0;
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
+  s_vtf_abandoned = false;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   // Restricted to a real STAR arrival (star_name set): the no-STAR direct-to-IAF
@@ -7491,7 +7499,7 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   // sector MSA -- including the FAF/glide-intercept altitude on the axis leg,
   // which is exactly the figure the published-transition rule forbids. Two
   // sources of descent clearances at once would contradict each other.
-  if (vectoring_active())
+  if (vectoring_active() || s_vtf_abandoned)
     return false;
   // Wide window: check_next_fix returns the governing constrained fix regardless
   // of proximity; the REAL trigger is the top-of-descent distance below.
@@ -9813,6 +9821,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     }
     s_vtf_nudge_secs = 0.0f;
     s_vtf_nudged = false;
+  s_vtf_abandoned = false;
     const int want = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
     s_vtf_cleared_ft = vec_leg_altitude_ft(ctx, dest, want);
     std::string txt = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg);
@@ -9851,6 +9860,11 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       logging::info("[vector] cannot align %.0f NM before FAF %s (s=%.1f needs "
                     "%.1f) -- abandoning, resume own navigation",
                     kVecAlignNm, faf.ident.c_str(), s, vec_required_s(y));
+      // Say it AND do it. The abandon told the pilot "direct KOLOT" and then
+      // challenged him ten seconds later for not tracking BAMSU, because the
+      // intermediate fixes were never neutralised (real flight 2026-08-16).
+      s_vtf_abandoned = true;
+      apply_direct_to(faf.ident);
       *out_text = callsign + ", resume own navigation direct " + faf.ident + ".";
       if (out_requires_readback)
         *out_requires_readback = true;
@@ -9868,6 +9882,8 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
         s_vtf_leg = VecLeg::Refused;
         logging::info("[vector] abandoned: hdg err %.0f deg for %.0f s -- resume "
                       "own navigation", herr, kVecNudgeSecs);
+        s_vtf_abandoned = true;
+        apply_direct_to(faf.ident); // see the note on the other abandon path
         *out_text = callsign + ", resume own navigation direct " + faf.ident + ".";
         return true;
       }
@@ -9891,6 +9907,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_leg = VecLeg::Intercept;
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn1 + 360.0, 360.0);
       s_vtf_nudged = false;
+  s_vtf_abandoned = false;
       *out_text = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg) + ".";
       if (out_requires_readback)
         *out_requires_readback = true;
@@ -9908,6 +9925,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_leg = VecLeg::Intercept;
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
+  s_vtf_abandoned = false;
       *out_text = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg) +
                   ", reduce speed 180 knots.";
       if (out_requires_readback)
@@ -9927,6 +9945,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_leg = VecLeg::Intercept;
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
+  s_vtf_abandoned = false;
       const int want = faf.alt_ft > 0 ? faf.alt_ft + 1000 : 4000;
       const int lvl = vec_leg_altitude_ft(ctx, dest, want);
       std::string txt = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg);
@@ -9952,6 +9971,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_leg = VecLeg::Axis;
       s_vtf_hdg = course;
       s_vtf_nudged = false;
+  s_vtf_abandoned = false;
       const int want = faf.alt_ft > 0 ? faf.alt_ft : 3000;
       const int lvl = vec_leg_altitude_ft(ctx, dest, want);
       std::string txt = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg);
@@ -10495,6 +10515,7 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
   s_vtf_cleared_ft = 0;
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
+  s_vtf_abandoned = false;
     logging::info("IFR descent: stepped-descent target %d ft DROPPED -- already "
                   "cleared to %d ft (would have been a climb)",
                   target, already_cleared);
@@ -12691,7 +12712,9 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         // clearance so the VECTOR owns it. Without the defer the straight clearance fires
         // at ~7 NM and advances the tracker PAST the IAF, killing the vector (real vol
         // LOWI R08-Z 2026-08-02). The FAF "vectors to final" case is separate. [CPP]
-        const bool reversal = approach_needs_reversal_vector(ctx);
+        // Never promise vectors again once a live sequence was given up.
+        const bool reversal =
+            !s_vtf_abandoned && approach_needs_reversal_vector(ctx);
         if (reversal && !s_vec_expect_issued && !s_sector_checkin_pending &&
             routed_distance_to_fix_idx(ctx, iaf_idx) > 5.0) {
           s_vec_expect_issued = true;
