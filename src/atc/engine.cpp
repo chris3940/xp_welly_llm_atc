@@ -90,6 +90,24 @@ static std::string s_pending_departure_label;
 // actually still being emitted by the PREVIOUS controller (e.g. a wrong-freq
 // reminder on the old sector's frequency).
 static std::string s_pending_controller_label;
+// Rolling set of controller names ATC has used, newest first. Feeds the STT bias
+// so a name is biased from the moment it is SPOKEN, not once the handoff has
+// completed. See recent_controller_labels().
+static std::vector<std::string> s_recent_controller_labels;
+
+static void remember_controller_label(const std::string &lbl) {
+  if (lbl.empty())
+    return;
+  auto &v = s_recent_controller_labels;
+  for (auto it = v.begin(); it != v.end(); ++it)
+    if (*it == lbl) {
+      v.erase(it);
+      break;
+    }
+  v.insert(v.begin(), lbl);
+  if (v.size() > 4)
+    v.resize(4);
+}
 // Frequency (MHz) the pilot was last asked to switch to. Used by
 // check_handoff_reissue() to re-state the instruction when the pilot calls
 // back on the old frequency.
@@ -774,6 +792,7 @@ void reset() {
   s_current_controller_label.clear();
   s_pending_departure_label.clear();
   s_pending_controller_label.clear();
+  s_recent_controller_labels.clear();
   s_pending_handoff_freq_mhz = 0.0f;
   s_enroute_timer = 0.0f;
   s_sector_checkin_pending = false;
@@ -4425,6 +4444,7 @@ bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
   // the approach -> Tower handoff below. [C. P. Potter]
   if (!controller_label.empty())
     s_pending_controller_label = controller_label;
+  remember_controller_label(controller_label);
   s_pending_handoff_freq_mhz = freq;
   logging::debug("[DBG] pending_handoff_freq=%.3f [dept-freq-handoff ctrl=%s]",
                  freq, controller_label.c_str());
@@ -4927,6 +4947,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
           *out_text = buf;
         }
         s_pending_controller_label = lbl;
+  remember_controller_label(lbl);
         s_pending_handoff_freq_mhz = mhz;
         s_sector_checkin_pending = true;
         s_sid_upper_handoff_issued = true;
@@ -5016,6 +5037,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
           *out_text = buf;
         }
         s_pending_controller_label = lbl;
+  remember_controller_label(lbl);
         s_pending_handoff_freq_mhz = mhz;
         s_sector_checkin_pending = true;
         s_sid_pending_climb_ft = sid_cruise_ft_ph29; // FIR clears cruise on check-in
@@ -6971,6 +6993,7 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
   // Geneva Approach ..." while still on Marseille) -- LIMx->LFLP 2026-07-12.
   auto speak_contact = [&]() {
     s_pending_controller_label = app_label;
+  remember_controller_label(app_label);
     s_pending_handoff_freq_mhz = app_freq;
     if (out_text) {
       char buf[200];
@@ -8018,7 +8041,8 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
             // Sector changed -> issue handoff, wait for the pilot to check in.
             s_enroute_visited_sector_freqs.push_back(s_enroute_sector_freq_khz);
             s_enroute_sector_freq_khz = new_freq_khz;
-            s_pending_controller_label = new_label; // deferred label switch
+            s_pending_controller_label = new_label;
+  remember_controller_label(new_label); // deferred label switch
             const float new_freq_mhz = static_cast<float>(new_freq_khz) / 1000.0f;
             s_pending_handoff_freq_mhz = new_freq_mhz;
             const float active_com_now =
@@ -9184,6 +9208,7 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
   s_acc_visited_sector_freqs.push_back(s_acc_sector_freq_khz);
   s_acc_sector_freq_khz = new_freq_khz;
   s_pending_controller_label = new_label;
+  remember_controller_label(new_label);
   s_pending_handoff_freq_mhz = new_mhz;
   const float active_com_now =
       (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
@@ -11571,6 +11596,10 @@ const std::string &assigned_landing_runway() { return s_assigned_landing_runway;
 // The controller the pilot is being handed TO (set on a handoff, before the
 // pilot switches frequency). Biased into the STT context so the readback of
 // "contact <X>" transcribes the target name correctly.
+std::vector<std::string> recent_controller_labels() {
+  return s_recent_controller_labels;
+}
+
 const std::string &pending_controller_label() {
   return s_pending_controller_label;
 }
@@ -12660,6 +12689,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           float new_mhz = static_cast<float>(new_freq_khz) / 1000.0f;
           // Defer label switch — see s_pending_controller_label comment.
           s_pending_controller_label = new_label;
+  remember_controller_label(new_label);
           s_pending_handoff_freq_mhz = new_mhz;
           // Also update the "active approach freq" gate so the check-in
           // handler (engine.cpp line ~820) doesn't accept a call on the
@@ -13338,6 +13368,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           // controller on 118.200" instead of "still with Chambery Approach, contact
           // Tower on 118.200" (LFLP 2026-07-17).
           s_pending_controller_label = ctrl_label;
+  remember_controller_label(ctrl_label);
           s_pending_handoff_freq_mhz = tower_mhz;
           s_sector_checkin_pending   = true;
         } else {

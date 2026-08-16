@@ -271,6 +271,14 @@ bool poll_approach_alignment(const xplane_context::XPlaneContext &ctx, float dt,
 const std::string &current_controller_label();
 const std::string &pending_controller_label();
 
+// Controller names ATC has used recently, most recent first (max 4). The STT
+// bias needs the name the controller JUST said, not only the one already in
+// effect: on the flight of 2026-08-16 "Hannover" was garbled to "1 over"
+// because it had not reached the bias when the pilot read it back, and the
+// retry a few seconds later -- by which time it had -- was transcribed
+// correctly. [C. P. Potter]
+std::vector<std::string> recent_controller_labels();
+
 // Store a controller label without triggering a full handoff (used by
 // ground_operations when the departure contact is embedded in the takeoff
 // clearance — so the label is set before poll_departure_handoff() runs).

@@ -33,6 +33,7 @@
 #include "data/airspace_db.hpp"
 #include "data/cifp_reader.hpp"
 #include "data/simbrief_ofp.hpp"
+#include "data/traffic_geometry.hpp"
 #include "persistence/model_manifest.hpp"
 #include "persistence/model_paths.hpp"
 #include "data/airport_overrides.hpp"
@@ -1704,10 +1705,37 @@ static void submit_recording_to_stt() {
           add("direct " + id);
         }
         if (!prune_navlog) {
+          // Only fixes still AHEAD. The loop used to take the first eight of the
+          // navlog whatever the aircraft's position, so in cruise the bias was
+          // filled with points long since overflown -- "VENAT, direct VENAT,
+          // MOLUS, direct MOLUS, GILIR, direct GILIR ..." (user, 2026-08-16),
+          // sixteen dead entries crowding out what mattered. On that flight
+          // "Hannover" was garbled to "1 over" on the first readback and came
+          // out right on the retry, once the controller's name had made it in.
+          //
+          // A fix is ahead when it is CLOSER to the destination than the
+          // aircraft is. Cheap, needs no tracker, and right for an en-route
+          // leg. [C. P. Potter]
+          double ac_to_dest = 0.0;
+          double dest_lat = 0.0, dest_lon = 0.0;
+          if (!ofp.navlog.empty()) {
+            dest_lat = ofp.navlog.back().lat;
+            dest_lon = ofp.navlog.back().lon;
+            if (dest_lat != 0.0 || dest_lon != 0.0)
+              ac_to_dest = traffic_geometry::distance_nm(ctx_for_whisper.latitude,
+                                                         ctx_for_whisper.longitude,
+                                                         dest_lat, dest_lon);
+          }
           int nfix = 0;
           for (const auto &f : ofp.navlog) {
             if (f.ident.empty())
               continue;
+            if (ac_to_dest > 0.0 && (f.lat != 0.0 || f.lon != 0.0)) {
+              const double fix_to_dest = traffic_geometry::distance_nm(
+                  f.lat, f.lon, dest_lat, dest_lon);
+              if (fix_to_dest >= ac_to_dest)
+                continue; // already behind the aircraft
+            }
             // Skip SimBrief SID/STAR fixes here -- ENROUTE fixes only. The STAR
             // arrival fixes (LSE/GOVNA/PIRUV) are is_sid_star=1 and were leaking into
             // the DEPARTURE/climb bias (user 2026-08-03: "LSE, direct LSE, GOVNA..."
