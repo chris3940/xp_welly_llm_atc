@@ -1,0 +1,157 @@
+# FORCE APP VECTORING — specification
+
+Status: **specification only, nothing implemented.** Agreed with the user
+2026-08-16, before the public release.
+
+---
+
+## The governing rule
+
+> **The last vector assigns the FINAL APPROACH COURSE, and the aircraft must be
+> established on that axis AT LEAST 2–3 NM BEFORE THE FAF.**
+
+This is not a refinement of the sequence — it is the constraint that
+*dimensions* the whole manoeuvre. Everything below is derived from it.
+
+Two consequences that must be implemented as such:
+
+1. The final vector's heading **is the axis**, not a 30° intercept heading.
+   The intercept leg ends before it; the last leg is flown aligned.
+2. It is a **feasibility test evaluated continuously**, not just a sequence
+   step. At every moment the algorithm must be able to answer: *can I still
+   align the aircraft 3 NM before the FAF?* If the answer becomes no, the
+   manoeuvre does not degrade into a late steep intercept — it either extends
+   the downwind by one leg, or abandons vectoring and hands back the published
+   procedure.
+
+It also gives the acceptance test, measurable without flying: at the moment
+`cleared <approach>, report established` is issued, the heading error to the
+final course must be < 5° and the distance to the FAF ≥ 3 NM.
+
+---
+
+## The two settings
+
+| setting | meaning |
+|---|---|
+| `allow_vectoring` | ATC *may* vector when it makes sense: off-route recovery, an impractical reversal, sequencing. ATC decides. |
+| `force_app_vectoring` | *Every* arrival is vectored; the published transition is ignored. Instruction mode. |
+
+---
+
+## Where the manoeuvre starts
+
+Measured backwards from the FAF, never forwards from the aircraft:
+
+```
+D_start = offset + 2.6  +  1.73 x offset  +  0.5  +  3
+          \_base+turns_/   \__intercept__/  \roll/  \_ALIGNED_/
+```
+
+- `1.73 x offset` — closing a lateral offset at 30° costs `offset / tan 30°`
+- `0.5` — roll-out from the intercept heading onto the axis
+- `3` — **the aligned segment before the FAF: the rule above**
+- `2.6` — two ~90° turns; at 200 kt / 25° bank the radius is ~1.25 NM, so ~2 NM
+  of arc each
+
+| offset | trigger | aligned segment |
+|---|---|---|
+| 5 NM | ~20 NM | 3 NM |
+| **8 NM (proposed default, TBM)** | **~28 NM** | 3 NM |
+| 10 NM | ~33 NM | 3 NM |
+
+Distance to the FAF is **great-circle, not routed**: under vectors the aircraft
+has left the route and the legs are straight.
+
+**Hard floor ~15 NM**, and it is a *consequence*, not a chosen number: below it
+the geometry cannot deliver alignment 3 NM before the FAF even at a minimal
+offset. Under the floor, ATC refuses to vector and keeps the published
+procedure — an explicit refusal, never a degraded vector.
+
+---
+
+## The four legs
+
+```
+A  downwind   "turn left heading 210, descend 5000 feet QNH 1013,
+               vectoring for ILS approach runway 06"
+B  base       "turn left heading 120, reduce speed 180 knots"
+C  intercept  "turn left heading 090"                      <- 30 deg max
+D  axis       "turn left heading 060, descend 2500 feet,
+               cleared ILS approach runway 06, report established"
+                                                           <- THE AXIS COURSE
+```
+
+Then `contact Tower on <freq>` on "established". If abandoned:
+`resume own navigation direct <fix>`.
+
+Turn side: whichever avoids crossing the final course — the aircraft always
+joins from the outside.
+
+---
+
+## Altitudes
+
+Each leg is cleared to `max(sector MSA, leg altitude)`:
+
+| leg | altitude |
+|---|---|
+| downwind | platform + 2000 |
+| base | platform + 1000 |
+| axis | **the glide-intercept altitude** (2500 ft at EDLW) |
+
+This closes the rule settled on 2026-08-16
+(`coding_last_assigned_altitude`): the FAF altitude is **wrong** on a published
+transition — there the assignment is the *first point of the cleared approach*
+— and **right** under vectors. Vectoring is precisely the exception that rule
+carves out.
+
+**Non-negotiable guard.** `msa_db::minimum_ft()` returns 0 when it has nothing
+to say (outside the sector radius, or no record). Zero does not mean "no
+minimum". In that case do not descend below the last cleared level. There is no
+secondary net today — no MORA reader exists — so either one is written
+(`earth_mora.dat` is present in the user's data) or ATC refuses to vector where
+the MSA is silent. **Recommended: write the MORA reader**, otherwise instruction
+mode is simply unavailable over uncovered areas.
+
+---
+
+## What must be suppressed while vectoring
+
+The part that is easy to forget and breaks everything:
+
+- the direct-to-IAF shortcut and `direct XX, when able` — meaningless under vectors
+- the off-route monitor, or ATC will fault the aircraft for flying ATC's own vectors
+- the "first point of the cleared approach" assignment rule (see above)
+- the route tracker, which must be frozen rather than re-synced
+
+---
+
+## Compliance
+
+`heading_error_deg` already exists. If the error exceeds 20° for 30 s, re-issue
+once; if it persists, abandon cleanly with `resume own navigation`. Without
+this, a pilot who does not follow ends up vectored into nowhere.
+
+---
+
+## Work breakdown
+
+| item | note |
+|---|---|
+| MORA reader | new, small — prerequisite for the altitude guard |
+| wire `msa_db` | written but currently called from nowhere — prerequisite |
+| 2 settings + UI | small |
+| `poll_vector_to_final` (4-state machine) | the bulk |
+| the suppressions above | highest regression risk |
+
+Existing bricks: `heading_error_deg`, `approach_needs_reversal_vector`,
+`poll_vector_to_intercept` — note the last is a *teardrop reversal at the IAF*
+(armed at 2.5 NM, ≥100° turns only), not radar vectoring; decide whether
+`force_app_vectoring` replaces it or coexists with it.
+
+## Open decisions
+
+1. Default downwind offset — proposed 8 NM for the TBM.
+2. Behaviour when MSA data is missing — **recommended: refuse to vector**, the
+   only choice that rests on no assumption.
