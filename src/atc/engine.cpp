@@ -9557,12 +9557,30 @@ static bool approach_needs_reversal_vector(const xplane_context::XPlaneContext &
       break;
     }
   if (nxt == nullptr || (iaf_fix.lat == 0.0 && iaf_fix.lon == 0.0)) return false;
-  const double course_true =
+
+  // A reversal is a property of the PROCEDURE -- how sharply the track turns AT
+  // the IAF -- not of the aircraft's attitude. Comparing the inbound course with
+  // ctx.heading_mag measured whatever heading the aircraft happened to hold at
+  // that instant, so any turn en route could read as a reversal: at EDLW, a
+  // straight-in ILS 06 on a flat field, it announced "expect vectors for ILS
+  // approach runway 06" at 3200 ft on short final (real flight 2026-08-16, and
+  // the user had to report it twice before I looked at the right code).
+  //
+  // Compare instead the course INTO the IAF with the course OUT of it, both
+  // taken from the route. That is stable, and it is what "reversal" means.
+  const RouteFix *prv = nullptr;
+  for (int i = iaf_idx - 1; i >= 0; --i)
+    if (s_route_fixes[i].lat != 0.0 || s_route_fixes[i].lon != 0.0) {
+      prv = &s_route_fixes[i];
+      break;
+    }
+  if (prv == nullptr)
+    return false; // nothing to turn FROM -- cannot be a reversal
+  const double course_in =
+      traffic_geometry::bearing_deg(prv->lat, prv->lon, iaf_fix.lat, iaf_fix.lon);
+  const double course_out =
       traffic_geometry::bearing_deg(iaf_fix.lat, iaf_fix.lon, nxt->lat, nxt->lon);
-  const double magvar =
-      static_cast<double>(ctx.heading_true) - static_cast<double>(ctx.heading_mag);
-  double inbound = std::fmod(course_true - magvar + 360.0, 360.0);
-  double turn = std::fabs(inbound - static_cast<double>(ctx.heading_mag));
+  double turn = std::fabs(course_out - course_in);
   if (turn > 180.0) turn = 360.0 - turn;
   return turn >= kVectorMinTurnDeg;
 }
