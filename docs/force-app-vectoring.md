@@ -162,6 +162,44 @@ The part that is easy to forget and breaks everything:
 
 ---
 
+## Logging (user, 2026-08-16)
+
+Everything above must be traceable in `Log.txt`, not only visible in the UI --
+the flight is diagnosed from the logs afterwards, and a refusal that leaves no
+trace is indistinguishable from a bug. `XPLMDebugString`, plain ASCII (0x20-0x7E).
+
+One line when the mode is evaluated for the destination, whichever way it goes:
+
+```
+[vector] FORCE APP VECTORING armed for EDLW: MSA ok (2 records), offset 8 NM, trigger 28 NM
+[vector] FORCE APP VECTORING DISABLED: NO MSA for EDLW -- vectoring refused
+```
+
+One line per decision, so the sequence can be reconstructed without the transcript:
+
+```
+[vector] leg A downwind hdg 210, alt 5000 (MSA 4300, platform+2000)
+[vector] leg B base     hdg 120, speed 180
+[vector] leg C intercept hdg 090 (30 deg to axis 060)
+[vector] leg D AXIS     hdg 060, alt 2500, 4.2 NM to FAF KOLOT   <- the rule, measured
+[vector] established: hdg err 2 deg, 3.8 NM to FAF -- OK
+```
+
+And every refusal or abandonment states its reason and its numbers:
+
+```
+[vector] refused: 12.4 NM to FAF, below the 15 NM floor -- keeping the published procedure
+[vector] cannot align 3 NM before FAF -- extending downwind by one leg
+[vector] abandoned: hdg err 34 deg for 30 s -- resume own navigation
+[vector] MSA silent at 51.42,7.81 -- holding 5000, no further descent
+```
+
+The `leg D` and `established` lines carry the two numbers the governing rule is
+about, so the acceptance test can be run against a real flight log and not only
+against the replay.
+
+---
+
 ## Compliance
 
 `heading_error_deg` already exists. If the error exceeds 20° for 30 s, re-issue
