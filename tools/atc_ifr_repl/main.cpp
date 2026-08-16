@@ -56,6 +56,14 @@ std::pair<double, double> airport_pos_for(const std::string &icao) {
     return {45.929, 6.099};
   if (icao == "LOWI")
     return {47.260, 11.344};
+  if (icao == "EDLW")
+    return {51.518, 7.612}; // Dortmund
+  if (icao == "LFMN")
+    return {43.658, 7.216}; // Nice
+  if (icao == "LIMF")
+    return {45.201, 7.650}; // Turin
+  if (icao == "LFLU")
+    return {44.891, 4.968}; // Valence
   return {0.0, 0.0};
 }
 } // namespace xplane_context

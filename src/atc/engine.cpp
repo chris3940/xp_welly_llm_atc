@@ -3945,8 +3945,13 @@ static std::string openair_sector_label(const std::string &name) {
       first = first.substr(0, sp);
     for (char &c : first)
       c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    // "AIRSPACE"/"CLASS": the export's generic blocks ("AIRSPACE CLASS C", a
+    // 10000-66000 ft slab over Germany) were spoken as "contact Airspace class c"
+    // on the DIK -> EDLW replay. "FREE": free-route designators ("FREE RT ASPC
+    // MAASTRICHT UAC") are not controllers either -- and rejecting them recovers
+    // the right name anyway, since atc.dat calls that volume MAASTRICHT.
     for (const char *g : {"CTA", "TMA", "CTR", "FIR", "UIR", "SECTOR", "SEC",
-                          "ACC", "APP", "AREA"})
+                          "ACC", "APP", "AREA", "AIRSPACE", "CLASS", "FREE"})
       if (first == g)
         return "";
   }

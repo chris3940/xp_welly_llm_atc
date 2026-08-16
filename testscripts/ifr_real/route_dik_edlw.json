@@ -1,0 +1,27 @@
+{
+  "_comment": "LFLP -> EDLW arrival, replayed from DIK (Diekirch VOR), 114 NM out. The route and the SimBrief step altitudes are the ones actually filed on the 2026-08-15 flight; ADEM3A publishes no constraint, which is what makes this arrival the interesting one.",
+  "dest": "EDLW",
+  "runway": "06",
+  "cruise_ft": 27000,
+  "start_ft": 27000,
+  "com": "118.750",
+  "gs_kt": 280,
+  "navlog": [
+    ["DIK",   49.8613, 6.1298, 27000, "CRZ", 0],
+    ["ERUKI", 50.6083, 6.7526, 23000, "DSC", 0],
+    ["BAMSU", 51.1888, 7.3090, 17400, "DSC", 1],
+    ["PADBA", 51.3117, 7.6786, 10400, "DSC", 1],
+    ["HEFME", 51.3872, 7.7703,  7800, "DSC", 1],
+    ["BARAG", 51.4186, 7.8086,  6900, "DSC", 1],
+    ["ADEMI", 51.4828, 7.8886,  4800, "DSC", 1]
+  ],
+  "path": [
+    [49.8613, 6.1298],
+    [50.6083, 6.7526],
+    [51.1888, 7.3090],
+    [51.3117, 7.6786],
+    [51.3872, 7.7703],
+    [51.4186, 7.8086],
+    [51.4828, 7.8886]
+  ]
+}
