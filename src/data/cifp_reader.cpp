@@ -354,6 +354,8 @@ static const char *approach_type_str(char t) {
 
 static std::unordered_map<std::string, ApproachInfo> g_approach_cache;
 static std::unordered_map<std::string, FafFix>      g_faf_cache;
+// Failed position lookups, counted per key -- see the note in approach_faf().
+static std::unordered_map<std::string, int> g_faf_retries;
 
 // ── sid_last_fix ───────────────────────────────────────────────────────
 
@@ -2080,10 +2082,19 @@ FafFix approach_faf(const std::string &cifp_dir,
                 icao.c_str(), approach_designator.c_str(),
                 faf_ident.c_str(), faf_lat, faf_lon, faf_alt_ft, faf_track_deg);
 
-  // Only cache successful lookups — a lat=0/lon=0 result means earth_fix.dat
-  // parsing failed (e.g. Navigraph leading-space format) and should be retried.
+  // Successful lookups are cached outright. A lat=0/lon=0 result means the fix
+  // position could not be read (e.g. the leading-space format some navdata uses)
+  // and is worth retrying -- but only a few times: each retry re-reads
+  // earth_fix.dat, 15 MB, and a caller polling this every frame turned a flight
+  // loop into 106 ms of which 106 ms was the plugin (measured in flight,
+  // 2026-08-16). After kFafRetries the failure is cached like any other answer.
+  // [C. P. Potter]
+  static constexpr int kFafRetries = 3;
+  std::lock_guard<std::mutex> lk(g_alt_cache_mutex);
   if (faf_lat != 0.0 || faf_lon != 0.0) {
-    std::lock_guard<std::mutex> lk(g_alt_cache_mutex);
+    g_faf_cache[cache_key] = result;
+    g_faf_retries.erase(cache_key);
+  } else if (++g_faf_retries[cache_key] >= kFafRetries) {
     g_faf_cache[cache_key] = result;
   }
   return result;

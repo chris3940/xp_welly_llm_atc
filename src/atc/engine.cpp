@@ -211,6 +211,23 @@ static double s_vtf_hdg          = 0.0;   // heading currently assigned
 static int    s_vtf_cleared_ft   = 0;     // level currently assigned on the pattern
 static float  s_vtf_nudge_secs   = 0.0f;  // compliance timer for the current leg
 static bool   s_vtf_nudged       = false; // re-issued once already
+// FAF memo. approach_faf() caches only SUCCESSFUL lookups, so an unresolved
+// position makes every call re-read earth_fix.dat -- 15 MB. Called once per frame
+// that cost 106 ms of a 106 ms flight loop in flight (2026-08-16). Resolve once
+// per (destination, approach) and hold it. [C. P. Potter]
+static std::string s_vtf_faf_key;
+static cifp_reader::FafFix s_vtf_faf;
+
+static const cifp_reader::FafFix &
+vtf_faf(const xplane_context::XPlaneContext &ctx, const std::string &dest,
+        const std::string &designator) {
+  const std::string key = dest + "|" + designator;
+  if (key != s_vtf_faf_key) {
+    s_vtf_faf_key = key;
+    s_vtf_faf = cifp_reader::approach_faf(ctx.cifp_dir, dest, designator);
+  }
+  return s_vtf_faf;
+}
 static int  s_descent_final_target_ft = 0;    // ultimate STAR-entry target when stepped
 static int  s_descent_first_step_ft   = 0;    // FL of the first (TMA-top) step
 static bool s_descent_second_step_issued = false;
@@ -752,6 +769,7 @@ void reset() {
   s_descent_timer = 0.0f;
   s_descent_final_target_ft = 0;
   s_vector_mode_logged = false;
+  s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
   s_vtf_leg = VecLeg::None;
   s_vtf_hdg = 0.0;
@@ -888,6 +906,7 @@ void training_jump_enroute(int cleared_alt_ft) {
   // on -- revisit. (user 2026-07-30)
   s_descent_final_target_ft = 0;
   s_vector_mode_logged = false;
+  s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
   s_vtf_leg = VecLeg::None;
   s_vtf_hdg = 0.0;
@@ -5985,6 +6004,7 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   // so there is no guaranteed FL195 freq cut). [[project_stepped_descent]]
   s_descent_final_target_ft = 0;
   s_vector_mode_logged = false;
+  s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
   s_vtf_leg = VecLeg::None;
   s_vtf_hdg = 0.0;
@@ -8485,9 +8505,16 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
             worst_lateness = lateness;
             descent_target = alt_ft;
             tod_binding_dist_nm = d_nm;
-            logging::debug("[DBG] pre-TOD candidate %s %s %d ft: needs %.0f NM, "
-                           "%.0f NM routed (%.0f late) -> binding",
-                           what, ident.c_str(), alt_ft, need_nm, d_nm, lateness);
+            // Only when the BINDING fix changes: this ran 3499 times in one
+            // flight, and a log line is not free either.
+            static std::string s_last_binding;
+            const std::string tag = std::string(what) + ident;
+            if (tag != s_last_binding) {
+              s_last_binding = tag;
+              logging::debug("[DBG] pre-TOD candidate %s %s %d ft: needs %.0f NM, "
+                             "%.0f NM routed (%.0f late) -> binding",
+                             what, ident.c_str(), alt_ft, need_nm, d_nm, lateness);
+            }
           }
         };
 
@@ -8501,13 +8528,34 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
         // order (the loop included) -> the FAF. The STAR fixes are not in the route
         // table yet at top-of-descent time, which is exactly why SALE3P's LUVOB /
         // GOVNA / PIRUV were being ignored altogether.
+        // CACHED. Building this walks the STAR, resolves fix positions from
+        // earth_fix.dat (15 MB) and re-picks the arrival runway from the CIFP.
+        // Doing that every frame put 3500 rebuilds into one flight and 106 ms
+        // into a 106 ms flight loop -- the sim lost most of its frame rate
+        // (user, 2026-08-16). The chain's GEOMETRY does not change from frame to
+        // frame: only the aircraft's position along it does, and that is
+        // recomputed below for free. Rebuild only when the route index, the
+        // destination, the STAR or the approach actually changes.
+        // [C. P. Potter]
         struct Leg {
           std::string ident;
           double lat = 0.0, lon = 0.0;
           int alt_ft = 0;
           const char *src = "route";
         };
-        std::vector<Leg> chain;
+        static std::vector<Leg> s_chain_cache;
+        static std::string s_chain_key;
+        const std::string chain_key =
+            ofp.destination_icao + "|" + s_assigned_star_name + "|" +
+            s_assigned_approach_designator + "|" + std::to_string(s_route_fix_idx) +
+            "|" + std::to_string(s_route_fixes.size());
+        const bool rebuild = (chain_key != s_chain_key);
+        std::vector<Leg> &chain = s_chain_cache;
+        if (rebuild) {
+          s_chain_key = chain_key;
+          chain.clear();
+        }
+        if (rebuild)
         for (int i = std::max(0, s_route_fix_idx);
              i < static_cast<int>(s_route_fixes.size()); ++i) {
           const RouteFix &rf = s_route_fixes[i];
@@ -8516,7 +8564,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
           chain.push_back({rf.ident, rf.lat, rf.lon, rf.alt.feet, "route"});
         }
 
-        if (!ctx.cifp_dir.empty() && !ofp.destination_icao.empty()) {
+        if (rebuild && !ctx.cifp_dir.empty() && !ofp.destination_icao.empty()) {
           const std::string &dest_icao = ofp.destination_icao;
           // STAR: every fix, constrained or not -- the unconstrained ones still
           // carry the geometry the loop is made of.
@@ -8583,7 +8631,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
           }
         }
 
-        {
+        if (rebuild) {
           std::string dbg;
           for (const auto &c : chain)
             dbg += " " + c.ident + "(" + std::string(c.src) + ")";
@@ -9549,8 +9597,8 @@ static void log_vector_mode_decision(const xplane_context::XPlaneContext &ctx) {
   // solely on arrivals that reach the approach state -- i.e. never during the
   // descent, which is when the mode actually has to be known.
   const std::string &dest = s_assigned_dest_icao;
-  const auto faf = cifp_reader::approach_faf(ctx.cifp_dir, dest,
-                                             s_assigned_approach_designator);
+  const cifp_reader::FafFix &faf =
+      vtf_faf(ctx, dest, s_assigned_approach_designator);
   if (faf.ident.empty())
     return;
   s_vector_mode_logged = true;
@@ -9620,6 +9668,10 @@ static constexpr double kVecFloorNm       = 15.0; // below this, do not start
 static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
 static constexpr double kVecFinalNm       = 6.0;  // aimed length of the final
 static constexpr double kVecDisplaceDeg   = 40.0; // opening angle to build the offset
+// Track the aircraft spends reacting and rolling into the assigned heading, during
+// which it closes the FAF without closing the axis. 2 NM was not enough: the first
+// real flight lost 8.2 NM of margin to it. [C. P. Potter]
+static constexpr double kVecTurnAllowNm   = 8.0;
 static constexpr float  kVecNudgeSecs     = 30.0f;
 static constexpr double kVecNudgeDeg      = 20.0;
 
@@ -9700,8 +9752,8 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     return false;
 
   const std::string &dest = s_assigned_dest_icao;
-  const auto faf = cifp_reader::approach_faf(ctx.cifp_dir, dest,
-                                             s_assigned_approach_designator);
+  const cifp_reader::FafFix &faf =
+      vtf_faf(ctx, dest, s_assigned_approach_designator);
   if (faf.ident.empty() || faf.final_track_deg <= 0 ||
       (faf.lat == 0.0 && faf.lon == 0.0))
     return false; // no axis to vector onto
@@ -9751,7 +9803,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     if (std::fabs(y) < 2.0) {
       s_vtf_leg = VecLeg::Displace;
       s_vtf_hdg = std::fmod(course + 180.0 - kVecDisplaceDeg * turn0 + 360.0, 360.0);
-    } else if (s >= vec_required_s(y) + 2.0) {
+    } else if (s >= vec_required_s(y) + kVecTurnAllowNm) {
       s_vtf_leg = VecLeg::Intercept;
       s_vtf_hdg =
           std::fmod(course + kVecInterceptDeg * turn0 + 360.0, 360.0);
@@ -9786,7 +9838,14 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   }
 
   // ── feasibility, re-tested every frame ────────────────────────────────────
-  if (s_vtf_leg == VecLeg::Base || s_vtf_leg == VecLeg::Intercept) {
+  // NOT while the aircraft is still turning onto the assigned heading. Measured
+  // in flight (2026-08-16, DIK -> EDLW): the sequence armed with 6.9 NM of
+  // margin and abandoned 42 s later at -0.4, because during the turn the
+  // aircraft ate 8.2 NM of axis distance while closing only 0.5 NM laterally.
+  // Judging the geometry before the turn is established makes ATC abandon the
+  // very manoeuvre it has just ordered. [C. P. Potter]
+  const bool settled = heading_error_deg(ctx.heading_mag, s_vtf_hdg) < 15.0;
+  if (settled && (s_vtf_leg == VecLeg::Base || s_vtf_leg == VecLeg::Intercept)) {
     if (s < vec_required_s(y) - 0.5) {
       s_vtf_leg = VecLeg::Refused;
       logging::info("[vector] cannot align %.0f NM before FAF %s (s=%.1f needs "
@@ -9828,7 +9887,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     // until there is an offset to intercept from, then join at 30 degrees --
     // there is no reason to fly a downwind as well.
     const double turn1 = s_vtf_turn_left ? -1.0 : 1.0;
-    if (std::fabs(y) >= kVecOffsetNm || s <= vec_required_s(y) + 2.0) {
+    if (std::fabs(y) >= kVecOffsetNm || s <= vec_required_s(y) + kVecTurnAllowNm) {
       s_vtf_leg = VecLeg::Intercept;
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn1 + 360.0, 360.0);
       s_vtf_nudged = false;
@@ -9845,7 +9904,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   if (s_vtf_leg == VecLeg::Downwind) {
     // Fly outbound until far enough back that the intercept lands the aircraft on
     // the axis about kVecFinalNm before the FAF.
-    if (s >= vec_required_s(y) + 2.0) {
+    if (s >= vec_required_s(y) + kVecTurnAllowNm) {
       s_vtf_leg = VecLeg::Intercept;
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
@@ -10429,6 +10488,7 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
     s_descent_second_step_issued = true;
     s_descent_final_target_ft = 0;
   s_vector_mode_logged = false;
+  s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
   s_vtf_leg = VecLeg::None;
   s_vtf_hdg = 0.0;
