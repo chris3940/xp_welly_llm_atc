@@ -44,6 +44,11 @@ import subprocess
 import sys
 
 REPL = os.environ.get("ATC_REPL", "./build/atc_ifr_repl")
+# Set ATC_RAW=<file> to keep the REPL's full output. The driver only PRINTS the
+# ATC timeline, so without this the engine's own diagnostics -- the ones that say
+# WHY a clearance was withheld -- are read and discarded.
+RAW = os.environ.get("ATC_RAW", "")
+_raw_fh = open(RAW, "w") if RAW else None
 
 # Descent/climb rate. 1800 fpm at 280 kt groundspeed is ~385 ft per NM of track;
 # derived per leg from the actual groundspeed so a slower aircraft descends less
@@ -108,6 +113,8 @@ class Repl:
             if not line:
                 break
             chunks.append(line)
+            if _raw_fh:
+                _raw_fh.write(line)
             waited = 0.0
         return chunks
 
@@ -128,6 +135,8 @@ class Repl:
             if not line:
                 break
             out.append(line)
+            if _raw_fh:
+                _raw_fh.write(line)
             if line.startswith("Region:") or "Region:    " in line:
                 break
         return out

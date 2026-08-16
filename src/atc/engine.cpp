@@ -9897,6 +9897,27 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
   if (hi_ceil > s_descent_final_target_ft + 500 && !on_destination_terminal(ctx))
     return false; // still over a tall enroute TMA -- stay above it
   const int target = s_descent_final_target_ft;
+  // Never re-clear ABOVE what the aircraft already has. s_descent_final_target_ft
+  // is set by build_descent_clearance from the cruise*0.66 heuristic when the STAR
+  // publishes no crossing constraint -- FL270 * 0.66 -> FL170. If a later, better
+  // informed clearance has meanwhile taken the aircraft lower (the approach-platform
+  // fallback issues FL100 on its way to EDLW's 2500 ft), replaying that heuristic
+  // reads on frequency as "descend flight level 170" AFTER "descend flight level
+  // 100" -- a climb dressed as a descent, and then the descent stopped there and
+  // the aircraft held FL170 from 42 NM to the field (DIK -> EDLW replay,
+  // 2026-08-15). Consume the stale target silently instead.
+  // The heuristic itself is still the wrong source; replacing it with the published
+  // -constraint walk is [[project_star_entry_alt_heuristic]], noted in
+  // build_descent_clearance. [C. P. Potter]
+  const int already_cleared = engine::current_cleared_alt_ft();
+  if (already_cleared > 0 && target >= already_cleared) {
+    s_descent_second_step_issued = true;
+    s_descent_final_target_ft = 0;
+    logging::info("IFR descent: stepped-descent target %d ft DROPPED -- already "
+                  "cleared to %d ft (would have been a climb)",
+                  target, already_cleared);
+    return false;
+  }
   s_descent_second_step_issued = true;
   s_descent_final_target_ft = 0;      // consumed
   s_enroute_cleared_alt_ft = target;  // re-arms poll_altitude_compliance
