@@ -202,7 +202,7 @@ static float s_descent_arrival_check_sec = 0.0f; // throttle DESCENT->ARRIVAL po
 // freq change is DECOUPLED -- poll_acc_sector_change fires at the real boundary.
 static bool s_vector_mode_logged = false;    // vectoring-mode decision, once per arrival
 // Radar-vectoring state machine (docs/force-app-vectoring.md).
-enum class VecLeg { None, Downwind, Base, Intercept, Axis, Done, Refused };
+enum class VecLeg { None, Displace, Downwind, Base, Intercept, Axis, Done, Refused };
 static VecLeg s_vtf_leg          = VecLeg::None;
 static bool   s_vtf_to_final     = false; // false = the vectors-to-IAF mode
 static bool   s_vector_mode_final_known = false; // the verdict is in
@@ -9603,6 +9603,8 @@ static constexpr double kVecAlignNm       = 3.0;  // aligned before the FAF
 static constexpr double kVecInterceptDeg  = 30.0; // max intercept angle
 static constexpr double kVecFloorNm       = 15.0; // below this, do not start
 static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
+static constexpr double kVecFinalNm       = 6.0;  // aimed length of the final
+static constexpr double kVecDisplaceDeg   = 40.0; // opening angle to build the offset
 static constexpr float  kVecNudgeSecs     = 30.0f;
 static constexpr double kVecNudgeDeg      = 20.0;
 
@@ -9692,8 +9694,12 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_leg = VecLeg::Refused; // mode 2 keeps the published procedure
       return false;
     }
-    // trigger = base + turns + intercept + roll-out + the aligned segment
-    const double trigger = kVecOffsetNm + 2.6 + vec_required_s(kVecOffsetNm) + 0.5;
+    // Trigger, working backwards from the FAF: the aimed final length, plus the
+    // along-axis distance the 30 deg intercept eats, plus the offset itself and
+    // the two turns.
+    const double trigger =
+        kVecFinalNm + kVecOffsetNm / std::tan(kVecInterceptDeg * M_PI / 180.0) +
+        kVecOffsetNm + 2.6;
     if (s > trigger || s < kVecFloorNm) {
       if (s < kVecFloorNm && s > 0.0) {
         s_vtf_leg = VecLeg::Refused;
@@ -9705,8 +9711,20 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     }
     // Join from the side the aircraft is already on: never cross the axis.
     s_vtf_turn_left = (y >= 0.0); // right of the axis -> left-hand pattern
-    s_vtf_leg = VecLeg::Downwind;
-    s_vtf_hdg = std::fmod(course + 180.0, 360.0);
+    // An aircraft joining near the centreline has NO lateral offset to fly a
+    // downwind from -- the reciprocal keeps y at zero and the base turn then
+    // degenerates into a reversal. Open away from the axis first; only start on
+    // the downwind proper once the offset exists. (This is what the first
+    // implementation got wrong: it went straight to the reciprocal and the
+    // distance to the FAF grew until the feasibility test aborted.)
+    const double turn0 = s_vtf_turn_left ? -1.0 : 1.0;
+    if (std::fabs(y) < kVecOffsetNm - 1.0) {
+      s_vtf_leg = VecLeg::Displace;
+      s_vtf_hdg = std::fmod(course + 180.0 - kVecDisplaceDeg * turn0 + 360.0, 360.0);
+    } else {
+      s_vtf_leg = VecLeg::Downwind;
+      s_vtf_hdg = std::fmod(course + 180.0, 360.0);
+    }
     s_vtf_nudge_secs = 0.0f;
     s_vtf_nudged = false;
     const int want = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
@@ -9724,8 +9742,10 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     *out_text = txt;
     if (out_requires_readback)
       *out_requires_readback = true;
-    logging::info("[vector] leg A downwind hdg %03d, alt %d (s=%.1f y=%.1f)",
-                  static_cast<int>(s_vtf_hdg), s_vtf_cleared_ft, s, y);
+    logging::info("[vector] leg %s hdg %03d, alt %d (s=%.1f y=%.1f, offset %.0f)",
+                  s_vtf_leg == VecLeg::Displace ? "A0 displace" : "A downwind",
+                  static_cast<int>(s_vtf_hdg), s_vtf_cleared_ft, s, y,
+                  kVecOffsetNm);
     return true;
   }
 
@@ -9767,10 +9787,27 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   // ── leg transitions ───────────────────────────────────────────────────────
   const double turn_sign = s_vtf_turn_left ? -1.0 : 1.0;
 
+  if (s_vtf_leg == VecLeg::Displace) {
+    // Opening leg: hold it until the offset exists, then join the downwind.
+    if (std::fabs(y) >= kVecOffsetNm) {
+      s_vtf_leg = VecLeg::Downwind;
+      s_vtf_hdg = std::fmod(course + 180.0, 360.0);
+      s_vtf_nudged = false;
+      *out_text = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg) + ".";
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      logging::info("[vector] leg A downwind hdg %03d (s=%.1f y=%.1f)",
+                    static_cast<int>(s_vtf_hdg), s, y);
+      return true;
+    }
+    return false;
+  }
+
   if (s_vtf_leg == VecLeg::Downwind) {
-    // Turn base once far enough back along the axis to fly the intercept AND the
-    // aligned segment.
-    if (s >= vec_required_s(kVecOffsetNm) + 2.0) {
+    // Fly outbound until far enough back that the intercept lands the aircraft on
+    // the axis about kVecFinalNm before the FAF.
+    if (s >= kVecFinalNm +
+                 kVecOffsetNm / std::tan(kVecInterceptDeg * M_PI / 180.0)) {
       s_vtf_leg = VecLeg::Base;
       s_vtf_hdg = std::fmod(course + 90.0 * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
@@ -9786,8 +9823,10 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   }
 
   if (s_vtf_leg == VecLeg::Base) {
-    // Roll onto the intercept as soon as 30 degrees still closes |y| in time.
-    if (s <= vec_required_s(y) + 1.0) {
+    // Close most of the lateral gap on the base leg, then join at 30 degrees.
+    // Rolling onto the intercept immediately would be geometrically legal but
+    // would produce an implausibly long, shallow final.
+    if (std::fabs(y) <= kVecOffsetNm * 0.6) {
       s_vtf_leg = VecLeg::Intercept;
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
