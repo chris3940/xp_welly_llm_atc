@@ -26,6 +26,7 @@
 #include "data/airspace_db.hpp"
 #include "data/airport_overrides.hpp"
 #include "data/cifp_reader.hpp"
+#include "data/mora_db.hpp"
 #include "data/msa_db.hpp"
 #include "data/openair_db.hpp"
 #include "data/simbrief_ofp.hpp"
@@ -200,6 +201,16 @@ static float s_descent_arrival_check_sec = 0.0f; // throttle DESCENT->ARRIVAL po
 // 0 = no deferral pending (cruise was already <= FL200, or single-step). The
 // freq change is DECOUPLED -- poll_acc_sector_change fires at the real boundary.
 static bool s_vector_mode_logged = false;    // vectoring-mode decision, once per arrival
+// Radar-vectoring state machine (docs/force-app-vectoring.md).
+enum class VecLeg { None, Downwind, Base, Intercept, Axis, Done, Refused };
+static VecLeg s_vtf_leg          = VecLeg::None;
+static bool   s_vtf_to_final     = false; // false = the vectors-to-IAF mode
+static bool   s_vector_mode_final_known = false; // the verdict is in
+static bool   s_vtf_turn_left    = true;  // pattern side
+static double s_vtf_hdg          = 0.0;   // heading currently assigned
+static int    s_vtf_cleared_ft   = 0;     // level currently assigned on the pattern
+static float  s_vtf_nudge_secs   = 0.0f;  // compliance timer for the current leg
+static bool   s_vtf_nudged       = false; // re-issued once already
 static int  s_descent_final_target_ft = 0;    // ultimate STAR-entry target when stepped
 static int  s_descent_first_step_ft   = 0;    // FL of the first (TMA-top) step
 static bool s_descent_second_step_issued = false;
@@ -741,6 +752,12 @@ void reset() {
   s_descent_timer = 0.0f;
   s_descent_final_target_ft = 0;
   s_vector_mode_logged = false;
+  s_vector_mode_final_known = false;
+  s_vtf_leg = VecLeg::None;
+  s_vtf_hdg = 0.0;
+  s_vtf_cleared_ft = 0;
+  s_vtf_nudge_secs = 0.0f;
+  s_vtf_nudged = false;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
@@ -871,6 +888,12 @@ void training_jump_enroute(int cleared_alt_ft) {
   // on -- revisit. (user 2026-07-30)
   s_descent_final_target_ft = 0;
   s_vector_mode_logged = false;
+  s_vector_mode_final_known = false;
+  s_vtf_leg = VecLeg::None;
+  s_vtf_hdg = 0.0;
+  s_vtf_cleared_ft = 0;
+  s_vtf_nudge_secs = 0.0f;
+  s_vtf_nudged = false;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
@@ -5962,6 +5985,12 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   // so there is no guaranteed FL195 freq cut). [[project_stepped_descent]]
   s_descent_final_target_ft = 0;
   s_vector_mode_logged = false;
+  s_vector_mode_final_known = false;
+  s_vtf_leg = VecLeg::None;
+  s_vtf_hdg = 0.0;
+  s_vtf_cleared_ft = 0;
+  s_vtf_nudge_secs = 0.0f;
+  s_vtf_nudged = false;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
   // Restricted to a real STAR arrival (star_name set): the no-STAR direct-to-IAF
@@ -9543,7 +9572,9 @@ static void log_vector_mode_decision(const xplane_context::XPlaneContext &ctx) {
       break;
     }
 
-  const char *mode = (terrain_ok && axis_ok) ? "vectors to FINAL" : "vectors to IAF";
+  s_vtf_to_final = terrain_ok && axis_ok;
+  s_vector_mode_final_known = true;
+  const char *mode = s_vtf_to_final ? "vectors to FINAL" : "vectors to IAF";
   logging::info("[vector] %s %s: MSA min %d ft, field %d ft (+%d), terrain %s; "
                 "axis after FAF %s%s%s -> WOULD USE %s",
                 dest.c_str(), s_assigned_approach_designator.c_str(), msa_min,
@@ -9552,6 +9583,281 @@ static void log_vector_mode_decision(const xplane_context::XPlaneContext &ctx) {
                 curved_at.empty() ? "" : " at ", curved_at.c_str(), mode);
 }
 
+
+
+// ── poll_vector_to_final ──────────────────────────────────────────────────────
+// The radar-vectoring manoeuvre specified in docs/force-app-vectoring.md.
+//
+// GOVERNING RULE: the last vector assigns the FINAL APPROACH COURSE, and the
+// aircraft must be established on that axis at least 3 NM before the FAF. Every
+// number below is derived from it, and it is re-tested every frame -- if
+// alignment can no longer be achieved the manoeuvre does not degrade into a late
+// steep intercept, it abandons and hands back the published procedure.
+//
+// Frame of reference, origin at the FAF, x along the published final track:
+//     s = distance BEFORE the FAF along the axis  (positive = not there yet)
+//     y = signed lateral offset from the axis     (positive = right of it)
+// so "established 3 NM before the FAF" is s >= 3 with |y| ~ 0. [C. P. Potter]
+static constexpr double kVecOffsetNm      = 8.0;  // downwind displacement
+static constexpr double kVecAlignNm       = 3.0;  // aligned before the FAF
+static constexpr double kVecInterceptDeg  = 30.0; // max intercept angle
+static constexpr double kVecFloorNm       = 15.0; // below this, do not start
+static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
+static constexpr float  kVecNudgeSecs     = 30.0f;
+static constexpr double kVecNudgeDeg      = 20.0;
+
+// Along-axis / cross-axis position of the aircraft relative to the FAF.
+static void vec_frame(const xplane_context::XPlaneContext &ctx,
+                      const cifp_reader::FafFix &faf, double *out_s,
+                      double *out_y) {
+  const double d = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
+                                                 faf.lat, faf.lon);
+  const double brg = traffic_geometry::bearing_deg(ctx.latitude, ctx.longitude,
+                                                   faf.lat, faf.lon);
+  // Angle between "where the FAF is" and "where the final track points".
+  const double rel = (brg - static_cast<double>(faf.final_track_deg)) * M_PI / 180.0;
+  *out_s = d * std::cos(rel);  // >0 while the FAF is still ahead along the axis
+  *out_y = -d * std::sin(rel); // >0 when the aircraft is RIGHT of the axis
+}
+
+// The axis distance still needed to close |y| at the intercept angle, plus the
+// aligned segment. This IS the feasibility rule.
+static double vec_required_s(double y) {
+  return kVecAlignNm + std::fabs(y) / std::tan(kVecInterceptDeg * M_PI / 180.0);
+}
+
+// Level for a pattern leg: never below the sector MSA, and never below grid MORA
+// when the MSA has nothing to say. Returns 0 when neither source answers, which
+// the caller must read as "do not descend".
+static int vec_leg_altitude_ft(const xplane_context::XPlaneContext &ctx,
+                               const std::string &dest, int wanted_ft) {
+  int floor_ft = 0;
+  const auto recs = msa_db::records_for(dest);
+  for (const auto &r : recs) {
+    const auto pos = xplane_context::airport_pos_for(dest);
+    const int m = msa_db::minimum_ft(dest, r.centre_ident, pos.first, pos.second,
+                                     ctx.latitude, ctx.longitude);
+    floor_ft = std::max(floor_ft, m);
+  }
+  if (floor_ft == 0)
+    floor_ft = mora_db::minimum_ft_around(ctx.latitude, ctx.longitude);
+  if (floor_ft == 0)
+    return 0; // no protection value available -- caller holds its level
+  return std::max(wanted_ft, ((floor_ft + 99) / 100) * 100);
+}
+
+static std::string vec_turn_phrase(bool left, double hdg) {
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "turn %s heading %03d",
+                left ? "left" : "right",
+                static_cast<int>(std::fmod(hdg + 360.0, 360.0)));
+  return buf;
+}
+
+bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
+                          std::string *out_text, bool *out_requires_readback) {
+  using AS = atc_state_machine::ATCState;
+  if (out_requires_readback)
+    *out_requires_readback = false;
+  if (!out_text || s_vtf_leg == VecLeg::Done || s_vtf_leg == VecLeg::Refused)
+    return false;
+  if (!settings::force_app_vectoring())
+    return false; // ATC-initiated vectoring (allow_vectoring) is a later step
+  const AS st = atc_state_machine::get_state();
+  if (st != AS::IFR_DESCENT && st != AS::IFR_ARRIVAL &&
+      st != AS::IFR_APPROACH_CONTACT && st != AS::IFR_APPROACH_DESCENT)
+    return false;
+  if (s_assigned_dest_icao.empty() || s_assigned_approach_designator.empty() ||
+      ctx.cifp_dir.empty())
+    return false;
+
+  const std::string &dest = s_assigned_dest_icao;
+  const auto faf = cifp_reader::approach_faf(ctx.cifp_dir, dest,
+                                             s_assigned_approach_designator);
+  if (faf.ident.empty() || faf.final_track_deg <= 0 ||
+      (faf.lat == 0.0 && faf.lon == 0.0))
+    return false; // no axis to vector onto
+
+  const std::string &cs = atc_state_machine::session_callsign();
+  const std::string &callsign = cs.empty() ? settings::pilot_callsign() : cs;
+  const double course = static_cast<double>(faf.final_track_deg);
+  double s = 0.0, y = 0.0;
+  vec_frame(ctx, faf, &s, &y);
+
+  // ── arming ────────────────────────────────────────────────────────────────
+  if (s_vtf_leg == VecLeg::None) {
+    if (!s_vector_mode_final_known)
+      return false; // the mode decision has not been taken yet this arrival
+    if (!s_vtf_to_final) {
+      s_vtf_leg = VecLeg::Refused; // mode 2 keeps the published procedure
+      return false;
+    }
+    // trigger = base + turns + intercept + roll-out + the aligned segment
+    const double trigger = kVecOffsetNm + 2.6 + vec_required_s(kVecOffsetNm) + 0.5;
+    if (s > trigger || s < kVecFloorNm) {
+      if (s < kVecFloorNm && s > 0.0) {
+        s_vtf_leg = VecLeg::Refused;
+        logging::info("[vector] refused: %.1f NM to FAF %s, below the %.0f NM "
+                      "floor -- keeping the published procedure",
+                      s, faf.ident.c_str(), kVecFloorNm);
+      }
+      return false;
+    }
+    // Join from the side the aircraft is already on: never cross the axis.
+    s_vtf_turn_left = (y >= 0.0); // right of the axis -> left-hand pattern
+    s_vtf_leg = VecLeg::Downwind;
+    s_vtf_hdg = std::fmod(course + 180.0, 360.0);
+    s_vtf_nudge_secs = 0.0f;
+    s_vtf_nudged = false;
+    const int want = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
+    s_vtf_cleared_ft = vec_leg_altitude_ft(ctx, dest, want);
+    std::string txt = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg);
+    if (s_vtf_cleared_ft > 0) {
+      const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+      txt += ", descend " + format_alt_clearance(s_vtf_cleared_ft, AltHint::Auto,
+                                                 ctx.qnh_hpa, ta);
+      s_enroute_cleared_alt_ft = s_vtf_cleared_ft;
+    }
+    const std::string appr_phrase = approach_clearance_phrase(ctx);
+    txt += appr_phrase.empty() ? ", vectoring for the approach."
+                               : (", vectoring for " + appr_phrase + ".");
+    *out_text = txt;
+    if (out_requires_readback)
+      *out_requires_readback = true;
+    logging::info("[vector] leg A downwind hdg %03d, alt %d (s=%.1f y=%.1f)",
+                  static_cast<int>(s_vtf_hdg), s_vtf_cleared_ft, s, y);
+    return true;
+  }
+
+  // ── feasibility, re-tested every frame ────────────────────────────────────
+  if (s_vtf_leg == VecLeg::Base || s_vtf_leg == VecLeg::Intercept) {
+    if (s < vec_required_s(y) - 0.5) {
+      s_vtf_leg = VecLeg::Refused;
+      logging::info("[vector] cannot align %.0f NM before FAF %s (s=%.1f needs "
+                    "%.1f) -- abandoning, resume own navigation",
+                    kVecAlignNm, faf.ident.c_str(), s, vec_required_s(y));
+      *out_text = callsign + ", resume own navigation direct " + faf.ident + ".";
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      return true;
+    }
+  }
+
+  // ── compliance ────────────────────────────────────────────────────────────
+  const double herr = heading_error_deg(ctx.heading_mag, s_vtf_hdg);
+  if (herr > kVecNudgeDeg) {
+    s_vtf_nudge_secs += dt;
+    if (s_vtf_nudge_secs > kVecNudgeSecs) {
+      s_vtf_nudge_secs = 0.0f;
+      if (s_vtf_nudged) {
+        s_vtf_leg = VecLeg::Refused;
+        logging::info("[vector] abandoned: hdg err %.0f deg for %.0f s -- resume "
+                      "own navigation", herr, kVecNudgeSecs);
+        *out_text = callsign + ", resume own navigation direct " + faf.ident + ".";
+        return true;
+      }
+      s_vtf_nudged = true;
+      *out_text = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg) + ".";
+      return true;
+    }
+  } else {
+    s_vtf_nudge_secs = 0.0f;
+  }
+
+  // ── leg transitions ───────────────────────────────────────────────────────
+  const double turn_sign = s_vtf_turn_left ? -1.0 : 1.0;
+
+  if (s_vtf_leg == VecLeg::Downwind) {
+    // Turn base once far enough back along the axis to fly the intercept AND the
+    // aligned segment.
+    if (s >= vec_required_s(kVecOffsetNm) + 2.0) {
+      s_vtf_leg = VecLeg::Base;
+      s_vtf_hdg = std::fmod(course + 90.0 * turn_sign + 360.0, 360.0);
+      s_vtf_nudged = false;
+      *out_text = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg) +
+                  ", reduce speed 180 knots.";
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      logging::info("[vector] leg B base hdg %03d, speed 180 (s=%.1f y=%.1f)",
+                    static_cast<int>(s_vtf_hdg), s, y);
+      return true;
+    }
+    return false;
+  }
+
+  if (s_vtf_leg == VecLeg::Base) {
+    // Roll onto the intercept as soon as 30 degrees still closes |y| in time.
+    if (s <= vec_required_s(y) + 1.0) {
+      s_vtf_leg = VecLeg::Intercept;
+      s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
+      s_vtf_nudged = false;
+      const int want = faf.alt_ft > 0 ? faf.alt_ft + 1000 : 4000;
+      const int lvl = vec_leg_altitude_ft(ctx, dest, want);
+      std::string txt = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg);
+      if (lvl > 0 && lvl < s_vtf_cleared_ft) {
+        const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+        txt += ", descend " + format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta);
+        s_vtf_cleared_ft = lvl;
+        s_enroute_cleared_alt_ft = lvl;
+      }
+      *out_text = txt + ".";
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      logging::info("[vector] leg C intercept hdg %03d (%.0f deg to axis %03d), "
+                    "alt %d (s=%.1f y=%.1f)", static_cast<int>(s_vtf_hdg),
+                    kVecInterceptDeg, faf.final_track_deg, s_vtf_cleared_ft, s, y);
+      return true;
+    }
+    return false;
+  }
+
+  if (s_vtf_leg == VecLeg::Intercept) {
+    if (std::fabs(y) <= kVecEstabNm) {
+      s_vtf_leg = VecLeg::Axis;
+      s_vtf_hdg = course;
+      s_vtf_nudged = false;
+      const int want = faf.alt_ft > 0 ? faf.alt_ft : 3000;
+      const int lvl = vec_leg_altitude_ft(ctx, dest, want);
+      std::string txt = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg);
+      if (lvl > 0) {
+        const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+        txt += ", descend " + format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta);
+        s_vtf_cleared_ft = lvl;
+        s_enroute_cleared_alt_ft = lvl;
+      }
+      const std::string appr_phrase = approach_clearance_phrase(ctx);
+      txt += appr_phrase.empty()
+                 ? ", cleared approach, report established."
+                 : (", cleared " + appr_phrase + ", report established.");
+      *out_text = txt;
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      s_approach_cleared_issued = true;
+      // The two figures the governing rule is about, so the acceptance test can
+      // be run against a real flight log and not only against the replay.
+      logging::info("[vector] leg D AXIS hdg %03d, alt %d, %.1f NM to FAF %s",
+                    static_cast<int>(course), s_vtf_cleared_ft, s,
+                    faf.ident.c_str());
+      return true;
+    }
+    return false;
+  }
+
+  if (s_vtf_leg == VecLeg::Axis) {
+    const double err = heading_error_deg(ctx.heading_mag, course);
+    if (err < 5.0 && s >= kVecAlignNm - 0.5) {
+      s_vtf_leg = VecLeg::Done;
+      logging::info("[vector] established: hdg err %.0f deg, %.1f NM to FAF -- OK",
+                    err, s);
+    } else if (s < kVecAlignNm - 0.5) {
+      s_vtf_leg = VecLeg::Done;
+      logging::info("[vector] established LATE: hdg err %.0f deg, %.1f NM to FAF "
+                    "(rule wants %.0f)", err, s, kVecAlignNm);
+    }
+    return false;
+  }
+  return false;
+}
 
 static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, float dt,
                                      std::string *out_text, bool *out_rb) {
@@ -10027,6 +10333,12 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
     s_descent_second_step_issued = true;
     s_descent_final_target_ft = 0;
   s_vector_mode_logged = false;
+  s_vector_mode_final_known = false;
+  s_vtf_leg = VecLeg::None;
+  s_vtf_hdg = 0.0;
+  s_vtf_cleared_ft = 0;
+  s_vtf_nudge_secs = 0.0f;
+  s_vtf_nudged = false;
     logging::info("IFR descent: stepped-descent target %d ft DROPPED -- already "
                   "cleared to %d ft (would have been a climb)",
                   target, already_cleared);

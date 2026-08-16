@@ -2259,6 +2259,30 @@ void update() {
     // (altitude-compliance courtesy prompt now folded into
     // poll_profile_enforcement above, so it runs in the approach too.)
 
+    // Radar vectors to final. Runs BEFORE poll_approach: while a vectoring
+    // sequence is live it owns the headings and the levels, and its final leg
+    // issues the approach clearance itself.
+    std::string vec_text;
+    bool vec_rb = false;
+    if (engine::poll_vector_to_final(ctx_now, dt, &vec_text, &vec_rb) &&
+        !vec_text.empty()) {
+      float vfreq = (ctx_now.active_com == 1) ? ctx_now.com1_freq_mhz
+                                              : ctx_now.com2_freq_mhz;
+      char vfreq_str[16];
+      std::snprintf(vfreq_str, sizeof(vfreq_str), "%.3f", vfreq);
+      push_transcript(TranscriptEntry{
+          static_cast<double>(XPLMGetElapsedTime()),
+          TranscriptKind::Tower,
+          vec_text,
+          vfreq_str,
+          engine::current_controller_label(),
+      });
+      speak_response(vec_text, role_for_frequency(ctx_now), 1.0f);
+      if (vec_rb)
+        atc_state_machine::arm_readback(vec_text);
+      return; // one utterance per frame
+    }
+
     // IFR approach STAR constraint management: step-down clearances + final alt.
     std::string approach_text;
     bool approach_rb = false;

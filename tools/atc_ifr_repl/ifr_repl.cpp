@@ -183,6 +183,7 @@ void run_polls(float dt) {
   if (engine::poll_star_clearance_safety_net(ctx, &out, &rb)) { emit("star-net", out); out.clear(); }
   if (engine::poll_descent(ctx, dt, &out, &rb))      { emit("descent", out); out.clear(); }
   if (engine::poll_arrival(ctx, dt, &out, &rb))      { emit("arrival", out); out.clear(); }
+  if (engine::poll_vector_to_final(ctx, dt, &out, &rb)) { emit("vector", out); out.clear(); }
   if (engine::poll_approach(ctx, dt, &out))          { emit("approach", out); out.clear(); }
   if (engine::poll_approach_alignment(ctx, dt, &out)){ emit("align", out); out.clear(); }
   if (engine::poll_readback_reminder(ctx, g_now_secs, &out)) { emit("readback", out); out.clear(); }

@@ -252,6 +252,16 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
 
 // After-FAF lateral deviation monitor (IFR_APPROACH_TOWER). Fires when
 // cross-track error from extended runway centerline exceeds 0.5 NM.
+// Radar vectors to final (FORCE APP VECTORING). Four legs -- downwind, base,
+// intercept, then the AXIS -- ending established on the final approach course at
+// least 3 NM before the FAF, which is the rule the whole manoeuvre is built
+// around. Selects itself only when the arrival's mode decision came out
+// "vectors to final"; the vectors-to-the-IAF case keeps the published procedure.
+// See docs/force-app-vectoring.md. [C. P. Potter]
+bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
+                          std::string *out_text,
+                          bool *out_requires_readback = nullptr);
+
 bool poll_approach_alignment(const xplane_context::XPlaneContext &ctx, float dt,
                               std::string *out_text);
 

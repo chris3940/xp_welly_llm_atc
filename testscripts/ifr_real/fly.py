@@ -155,6 +155,8 @@ RE_CONTACT = re.compile(r"contact ([A-Za-z .'-]+?) on (\d{3}\.\d{2,3})", re.I)
 RE_FL = re.compile(r"(descend|climb)(?: to)? flight level (\d{2,3})", re.I)
 RE_ALT = re.compile(r"(descend|climb)(?: to)? ([\d ,]+) feet", re.I)
 RE_MAINTAIN_FL = re.compile(r"maintain flight level (\d{2,3})", re.I)
+RE_HEADING = re.compile(r"turn (left|right) heading (\d{2,3})", re.I)
+RE_RESUME = re.compile(r"resume own navigation", re.I)
 
 
 class Pilot:
@@ -162,6 +164,7 @@ class Pilot:
         self.repl = repl
         self.callsign = callsign
         self.cleared_ft = None
+        self.vector_hdg = None   # steered heading while under radar vectors
         self.events = []
 
     def react(self, lines, where, alt):
@@ -185,6 +188,16 @@ class Pilot:
                 self.repl.sync()
                 self.events.append((where, alt, ">> pilot: checks in on %s (%s)" % (freq, who)))
                 continue
+
+            m = RE_HEADING.search(msg)
+            if m:
+                # Under vectors the aircraft leaves the route and flies the
+                # assigned heading. Without this the compliance monitor sees a
+                # pilot who never turns, re-issues once and then abandons -- which
+                # is exactly what a fixed path produced on the first run.
+                self.vector_hdg = float(m.group(2))
+            if RE_RESUME.search(msg):
+                self.vector_hdg = None
 
             m = RE_FL.search(msg)
             if m:
@@ -251,7 +264,19 @@ def main():
     repl.send("poll 5")
     pilot.react(repl.sync(), prev, int(alt))
 
-    for pt in path[1:]:
+    idx = 1
+    while idx < len(path):
+        if pilot.vector_hdg is not None:
+            # Dead-reckon along the assigned heading instead of following the
+            # route. 4 NM steps, matching the route interpolation.
+            step = 4.0
+            hdg = math.radians(pilot.vector_hdg)
+            pt = (prev[0] + step * math.cos(hdg) / 60.0,
+                  prev[1] + step * math.sin(hdg) /
+                  (60.0 * math.cos(math.radians(prev[0]))))
+        else:
+            pt = path[idx]
+            idx += 1
         leg = nm(prev, pt)
         flown += leg
         # Fly toward the cleared level -- never below it, never ahead of it.
@@ -270,6 +295,8 @@ def main():
         repl.send("track %.4f %.4f %d %d" % (pt[0], pt[1], int(alt), dt))
         pilot.react(repl.sync(), pt, int(alt))
         prev = pt
+        if pilot.vector_hdg is not None and flown > 900.0:
+            break  # runaway guard: a vector that is never cancelled
 
     repl.close()
 
