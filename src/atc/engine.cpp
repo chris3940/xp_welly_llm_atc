@@ -10205,7 +10205,19 @@ static std::string zulu_hhmm_spoken(float zulu_sec) {
 }
 
 static constexpr double kHoldArmNm     = 8.0;    // roll when within this (routed) of the fix
-static constexpr int    kHoldChancePct = 100;    // probability %  (TEST=100; realistic ~35)
+// Probability that an arrival gets a published hold. 35% is the realistic figure
+// and is what SHIPS; it was pinned at 100 during development so the hold could be
+// exercised on every replay, which would put an aircraft in a holding pattern on
+// every single arrival in a real flight. Tests that need it deterministic set
+// XP_ATC_HOLD_PCT (0 to disable, 100 to force). [C. P. Potter]
+static int hold_chance_pct() {
+  static const int pct = [] {
+    if (const char *v = std::getenv("XP_ATC_HOLD_PCT"))
+      return std::max(0, std::min(100, std::atoi(v)));
+    return 35;
+  }();
+  return pct;
+}
 static constexpr float  kHoldMinSecs   = 180.0f; // 3 min (user 2026-08-01: +1 min)
 static constexpr float  kHoldMaxSecs   = 420.0f; // 7 min
 static bool poll_hold(const xplane_context::XPlaneContext &ctx, float dt,
@@ -10279,7 +10291,7 @@ static bool poll_hold(const xplane_context::XPlaneContext &ctx, float dt,
                     f.ident.c_str());
       return false;
     }
-    const bool hit = (std::rand() % 100) < kHoldChancePct;
+    const bool hit = (std::rand() % 100) < hold_chance_pct();
     s_hold_state = hit ? 1 : 2; // latch -> one decision per arrival
     if (!hit) {
       logging::info("IFR hold: no hold this arrival (roll miss at %s)", f.ident.c_str());
