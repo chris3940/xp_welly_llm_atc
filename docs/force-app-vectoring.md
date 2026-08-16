@@ -37,6 +37,22 @@ final course must be < 5° and the distance to the FAF ≥ 3 NM.
 | `allow_vectoring` | ATC *may* vector when it makes sense: off-route recovery, an impractical reversal, sequencing. ATC decides. |
 | `force_app_vectoring` | *Every* arrival is vectored; the published transition is ignored. Instruction mode. |
 
+### UI requirement (user, 2026-08-16)
+
+When no MSA data is available for the destination, the checkbox must SAY SO
+rather than silently doing nothing. Label beside `FORCE APP VECTORING`:
+
+```
+[x] FORCE APP VECTORING   DISABLED: NO MSA
+```
+
+The setting stays where the user left it -- the label reports why it is inert,
+it does not un-tick the box. Plain ASCII only (ImGui renders UTF-8 as `?`).
+
+Evaluated per destination, since coverage is per airport: the reference data has
+MSA records for LOWI, LFMN, EDLW and LFLP, so absence is the exception, not the
+rule -- but it must be visible when it happens.
+
 ---
 
 ## Where the manoeuvre starts
@@ -53,6 +69,25 @@ D_start = offset + 2.6  +  1.73 x offset  +  0.5  +  3
 - `3` — **the aligned segment before the FAF: the rule above**
 - `2.6` — two ~90° turns; at 200 kt / 25° bank the radius is ~1.25 NM, so ~2 NM
   of arc each
+
+**"Offset" = the LATERAL distance between the downwind leg and the final approach
+axis** — how far to the side the aircraft is flown before turning base:
+
+```
+                  downwind (leg A)
+   <-------------------------------------------------o
+                                                     |
+      offset  |                                      | base (B)
+              v                                      v
+   ====FAF====================RWY 06           o<----o
+        ^                                      |
+        |  3 NM aligned                   intercept 30 deg (C)
+        +----- final course (leg D) -----+
+```
+
+A larger offset means a wider pattern: more room to descend and slow down, but a
+more distant trigger. **8 NM chosen** (user, 2026-08-16) — for a TBM that gives a
+base leg of roughly 3 minutes, comfortable without being tedious.
 
 | offset | trigger | aligned segment |
 |---|---|---|
@@ -150,8 +185,15 @@ Existing bricks: `heading_error_deg`, `approach_needs_reversal_vector`,
 (armed at 2.5 NM, ≥100° turns only), not radar vectoring; decide whether
 `force_app_vectoring` replaces it or coexists with it.
 
-## Open decisions
+## Decisions taken (user, 2026-08-16)
 
-1. Default downwind offset — proposed 8 NM for the TBM.
-2. Behaviour when MSA data is missing — **recommended: refuse to vector**, the
-   only choice that rests on no assumption.
+1. **Downwind offset: 8 NM.**
+2. **MSA missing: refuse to vector**, and say so in the UI —
+   `DISABLED: NO MSA` beside the FORCE APP VECTORING checkbox. Refusing is the
+   only choice that rests on no assumption; announcing it is what stops the
+   refusal from looking like a bug.
+
+## Still open
+
+- Does `force_app_vectoring` replace `poll_vector_to_intercept` (the IAF teardrop,
+  armed at 2.5 NM for >=100 deg reversals) or coexist with it?
