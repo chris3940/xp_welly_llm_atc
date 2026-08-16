@@ -9529,8 +9529,14 @@ static bool poll_connector_direct(const xplane_context::XPlaneContext &ctx,
                                   std::string *out_text, bool *out_rb) {
   // A shortcut is meaningless while ATC is vectoring: the aircraft is off the
   // route by instruction, and "direct <fix>, when able" would contradict the
-  // heading it was just given. [C. P. Potter]
-  if (vectoring_active())
+  // heading it was just given.
+  //
+  // It stays meaningless AFTER an abandon, because the abandon itself hands out
+  // a direct. On the flight of 2026-08-16 the two landed seven seconds apart:
+  //     20:33  resume own navigation direct KOLOT
+  //     20:40  direct DOR, when able
+  // which tells the pilot to go to two different fixes. [C. P. Potter]
+  if (vectoring_active() || s_vtf_abandoned)
     return false;
 
   if (s_connector_direct_issued || ctx.cifp_dir.empty() ||
@@ -10804,8 +10810,14 @@ bool poll_descent(const xplane_context::XPlaneContext &ctx, float dt,
                   bool *out_requires_readback) {
   // A shortcut is meaningless while ATC is vectoring: the aircraft is off the
   // route by instruction, and "direct <fix>, when able" would contradict the
-  // heading it was just given. [C. P. Potter]
-  if (vectoring_active())
+  // heading it was just given.
+  //
+  // It stays meaningless AFTER an abandon, because the abandon itself hands out
+  // a direct. On the flight of 2026-08-16 the two landed seven seconds apart:
+  //     20:33  resume own navigation direct KOLOT
+  //     20:40  direct DOR, when able
+  // which tells the pilot to go to two different fixes. [C. P. Potter]
+  if (vectoring_active() || s_vtf_abandoned)
     return false;
 
   using AS = atc_state_machine::ATCState;
@@ -11098,8 +11110,14 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
                                bool *out_requires_readback) {
   // A shortcut is meaningless while ATC is vectoring: the aircraft is off the
   // route by instruction, and "direct <fix>, when able" would contradict the
-  // heading it was just given. [C. P. Potter]
-  if (vectoring_active())
+  // heading it was just given.
+  //
+  // It stays meaningless AFTER an abandon, because the abandon itself hands out
+  // a direct. On the flight of 2026-08-16 the two landed seven seconds apart:
+  //     20:33  resume own navigation direct KOLOT
+  //     20:40  direct DOR, when able
+  // which tells the pilot to go to two different fixes. [C. P. Potter]
+  if (vectoring_active() || s_vtf_abandoned)
     return false;
 
   if (s_star_shortcut_offered)         return false; // one-shot per arrival
