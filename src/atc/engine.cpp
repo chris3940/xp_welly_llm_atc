@@ -209,7 +209,11 @@ enum class VecLeg { None, Displace, Downwind, Base, Intercept, Axis, Done, Refus
 static VecLeg s_vtf_leg          = VecLeg::None;
 static bool   s_vtf_to_final     = false; // false = the vectors-to-IAF mode
 static bool   s_vector_mode_final_known = false; // the verdict is in
-static bool   s_vtf_turn_left    = true;  // pattern side
+// Which side of the final approach course the aircraft is joining from. NOT a
+// "pattern side": IFR radar vectoring has no circuit -- no downwind, no base,
+// just headings (user, 2026-08-16). It exists only so the vectors never take the
+// aircraft across the axis.
+static bool   s_vtf_turn_left    = true;
 static double s_vtf_hdg          = 0.0;   // heading currently assigned
 static int    s_vtf_cleared_ft   = 0;     // level currently assigned on the pattern
 static float  s_vtf_nudge_secs   = 0.0f;  // compliance timer for the current leg
@@ -9771,11 +9775,17 @@ static int vec_leg_altitude_ft(const xplane_context::XPlaneContext &ctx,
   return std::max(wanted_ft, ((floor_ft + 99) / 100) * 100);
 }
 
-static std::string vec_turn_phrase(bool left, double hdg) {
+// "turn left/right heading NNN" -- the direction is the SHORTEST way round from
+// where the aircraft is pointing NOW, not the side of the pattern. Announcing the
+// pattern side sent "turn left heading 057" to an aircraft on heading 030, which
+// is a 27 degree turn to the RIGHT (real flight 2026-08-16). A wrong turn word is
+// worse than none: the pilot flies the word, not the number.
+static std::string vec_turn_phrase(double current_hdg, double target_hdg) {
+  double delta = std::fmod(target_hdg - current_hdg + 540.0, 360.0) - 180.0;
   char buf[64];
   std::snprintf(buf, sizeof(buf), "turn %s heading %03d",
-                left ? "left" : "right",
-                static_cast<int>(std::fmod(hdg + 360.0, 360.0)));
+                delta < 0.0 ? "left" : "right",
+                static_cast<int>(std::fmod(target_hdg + 360.0, 360.0)));
   return buf;
 }
 
@@ -9909,7 +9919,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       return false;
     }
     // Join from the side the aircraft is already on: never cross the axis.
-    s_vtf_turn_left = (y >= 0.0); // right of the axis -> left-hand pattern
+    s_vtf_turn_left = (y >= 0.0); // right of the axis -> turns are to the left
     // Everything follows from two facts: the axis of the runway in service, and
     // where the aircraft is relative to it (user, 2026-08-16). There is no fixed
     // pattern to fly through -- pick the shortest shape that ends aligned.
@@ -9937,7 +9947,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   s_vtf_abandoned = false;
     const int want = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
     s_vtf_cleared_ft = vec_leg_altitude_ft(ctx, dest, want);
-    std::string txt = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg);
+    std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
     if (s_vtf_cleared_ft > 0) {
       const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
       txt += ", descend " + format_alt_clearance(s_vtf_cleared_ft, AltHint::Auto,
@@ -9998,11 +10008,10 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     if (s_vtf_nudge_secs > kVecNudgeSecs) {
       s_vtf_nudge_secs = 0.0f;
       s_vtf_nudged = true;
-      char buf[96];
-      std::snprintf(buf, sizeof(buf), ", confirm %s turn heading %03d.",
-                    s_vtf_turn_left ? "left" : "right",
-                    static_cast<int>(std::fmod(s_vtf_hdg + 360.0, 360.0)));
-      *out_text = callsign + buf;
+      // Same rule as the instruction itself: the direction is the shortest way
+      // round from the aircraft's CURRENT heading, not the side of the pattern.
+      *out_text = callsign + ", confirm " +
+                  vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) + ".";
       if (out_requires_readback)
         *out_requires_readback = true;
       logging::info("[vector] hdg err %.0f deg after %.0f s -- confirming the "
@@ -10028,7 +10037,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn1 + 360.0, 360.0);
       s_vtf_nudged = false;
   s_vtf_abandoned = false;
-      *out_text = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg) + ".";
+      *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) + ".";
       if (out_requires_readback)
         *out_requires_readback = true;
       logging::info("[vector] intercept hdg %03d after displace (s=%.1f y=%.1f)",
@@ -10046,7 +10055,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
   s_vtf_abandoned = false;
-      *out_text = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg) +
+      *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) +
                   ", reduce speed 180 knots.";
       if (out_requires_readback)
         *out_requires_readback = true;
@@ -10068,7 +10077,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   s_vtf_abandoned = false;
       const int want = faf.alt_ft > 0 ? faf.alt_ft + 1000 : 4000;
       const int lvl = vec_leg_altitude_ft(ctx, dest, want);
-      std::string txt = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg);
+      std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
       if (lvl > 0 && lvl < s_vtf_cleared_ft) {
         const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
         txt += ", descend " + format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta);
@@ -10094,7 +10103,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   s_vtf_abandoned = false;
       const int want = faf.alt_ft > 0 ? faf.alt_ft : 3000;
       const int lvl = vec_leg_altitude_ft(ctx, dest, want);
-      std::string txt = callsign + ", " + vec_turn_phrase(s_vtf_turn_left, s_vtf_hdg);
+      std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
       if (lvl > 0) {
         const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
         txt += ", descend " + format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta);
