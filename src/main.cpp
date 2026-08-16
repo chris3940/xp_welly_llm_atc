@@ -44,6 +44,8 @@
 #include "data/airport_overrides.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/airspace_db.hpp"
+#include "data/mora_db.hpp"
+#include "data/msa_db.hpp"
 #include "data/openair_db.hpp"
 #include "data/traffic_context.hpp"
 #include "persistence/model_paths.hpp"
@@ -200,6 +202,14 @@ PLUGIN_API int XPluginStart(char *name, char *sig, char *desc) {
             ? std::string()
             : model_paths::plugin_root() + "/Resources/airspace+.txt";
     openair_db::init(sys + "Custom Data/airspaces/airspace.txt", overlay);
+    // Altitude protection under radar vectors, in order of precedence: the MSA
+    // sectors published around a procedure, then grid MORA as the worldwide
+    // fallback where no MSA sector covers the position. Both return 0 for "no
+    // value available", never for "no minimum" -- see the headers.
+    // Note the paths: earth_msa.dat and earth_mora.dat sit directly under
+    // Custom Data, NOT under "Earth nav data" like atc.dat.
+    msa_db::init(sys + "Custom Data/earth_msa.dat");
+    mora_db::init(sys + "Custom Data/earth_mora.dat");
   }
   xplane_context::init();
   traffic_context::init();
@@ -269,6 +279,8 @@ PLUGIN_API void XPluginStop() {
   xplane_context::stop();
   airspace_db::stop();
   openair_db::stop();
+  msa_db::stop();
+  mora_db::stop();
   airport_vrps::stop();
   ui_strings::stop();
   phraseology_hints::stop();

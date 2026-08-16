@@ -29,6 +29,8 @@
 #include "data/airport_overrides.hpp"
 #include "data/airport_vrps.hpp"
 #include "data/airspace_db.hpp"
+#include "data/mora_db.hpp"
+#include "data/msa_db.hpp"
 #include "data/openair_db.hpp"
 #include "data/simbrief_ofp.hpp"
 #include "core/xplane_context.hpp"
@@ -184,6 +186,20 @@ int main(int argc, char **argv) {
     }
     if (!ad.empty()) {
       airspace_db::init(ad);
+      // Altitude protection sources, same precedence as the plugin: MSA sectors
+      // first, grid MORA as the worldwide fallback. Both sit directly under
+      // Custom Data, not under "Earth nav data".
+      {
+        std::string msa, mora;
+        if (const char *v = std::getenv("XP_MSA")) msa = v;
+        else if (const char *home = std::getenv("HOME"))
+          msa = std::string(home) + "/X-Plane 12/Custom Data/earth_msa.dat";
+        if (const char *v = std::getenv("XP_MORA")) mora = v;
+        else if (const char *home = std::getenv("HOME"))
+          mora = std::string(home) + "/X-Plane 12/Custom Data/earth_mora.dat";
+        msa_db::init(msa);
+        mora_db::init(mora);
+      }
       for (int i = 0; i < 300 && !airspace_db::enabled(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
       std::fprintf(stderr, "airspace_db: %s (enabled=%d)\n", ad.c_str(),
