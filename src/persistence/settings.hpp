@@ -115,6 +115,24 @@ void set_hold_enabled(bool v);
 bool shortcut_always();
 void set_shortcut_always(bool v);
 
+// Radar vectoring. Two distinct switches -- see docs/force-app-vectoring.md.
+//
+// allow_vectoring: ATC MAY vector when it makes operational sense (off-route
+// recovery, an impractical reversal, sequencing). ATC decides; default true.
+//
+// force_app_vectoring: EVERY arrival is vectored, the published transition is
+// ignored. Instruction mode, for practising the exercise; default false.
+//
+// Vectoring needs altitude protection, so it is refused outright where no MSA
+// sector covers the destination -- the UI says "DISABLED: NO MSA" rather than
+// silently doing nothing. Note that MSA (sectored, centred on the procedure's
+// own points) decides; grid MORA is far too coarse for that job and serves only
+// as a last-resort floor. (C. P. Potter)
+bool allow_vectoring();
+void set_allow_vectoring(bool v);
+bool force_app_vectoring();
+void set_force_app_vectoring(bool v);
+
 // Force the ILS approach whenever the arrival runway has one published: skips
 // both the airport+.json weather gate and the RNAV-first ranking in
 // cifp_reader::best_approach(). Falls through to the normal chain on a runway

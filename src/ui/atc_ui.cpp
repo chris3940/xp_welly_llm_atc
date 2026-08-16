@@ -39,6 +39,7 @@
 #include "data/openair_db.hpp"
 #include "data/simbrief_ofp.hpp"
 #include "data/airport_overrides.hpp"
+#include "data/msa_db.hpp"
 #include "data/traffic_context.hpp"
 #include "persistence/model_manifest.hpp"
 #include "persistence/models_catalog.hpp"
@@ -2570,6 +2571,54 @@ static void draw_ifr_tab() {
                         "airport+.json and the RNAV-first ranking -- you will hear "
                         "\"expect ILS ... approach runway NN\". A runway with no "
                         "ILS is unaffected and keeps the normal selection.");
+
+    // ── Radar vectoring ──────────────────────────────────────────────────
+    // Vectoring needs altitude protection, so it is refused outright where no
+    // MSA sector covers the destination. Say so beside the checkbox instead of
+    // silently doing nothing: a refusal that leaves no trace is
+    // indistinguishable from a bug. The box is NOT un-ticked -- the label
+    // reports why the setting is inert, and the setting stays where the user
+    // put it. Plain ASCII: ImGui renders UTF-8 as '?'.
+    bool allow_vec = settings::allow_vectoring();
+    if (ImGui::Checkbox("ALLOW VECTORING", &allow_vec))
+      settings::set_allow_vectoring(allow_vec);
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("When ON, ATC MAY vector you when it makes operational "
+                        "sense -- recovering a route deviation, a reversal that "
+                        "cannot be flown, or sequencing. ATC decides. Turn OFF "
+                        "to never be vectored.");
+
+    bool force_vec = settings::force_app_vectoring();
+    if (ImGui::Checkbox("FORCE APP VECTORING", &force_vec))
+      settings::set_force_app_vectoring(force_vec);
+    // Tooltip BEFORE the status label: IsItemHovered() refers to the last item
+    // drawn, so testing it after the SameLine() text would attach the checkbox's
+    // tooltip to the label instead -- and only on the airports where the label
+    // appears, which is the hardest kind of UI bug to notice.
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Instruction mode: EVERY arrival is vectored instead of "
+                        "flying the published transition. Two manoeuvres exist -- "
+                        "vectors to final where terrain and geometry allow, and "
+                        "vectors to the IAF where they do not (Innsbruck). Every "
+                        "vector is bounded by the sector MSA.");
+    {
+      const auto &vofp = simbrief_ofp::get();
+      const std::string vdest =
+          vofp.valid ? vofp.destination_icao : std::string();
+      const bool no_msa =
+          !vdest.empty() && msa_db::ready() && msa_db::records_for(vdest).empty();
+      if (no_msa) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.15f, 1.0f),
+                           "DISABLED: NO MSA");
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("No MSA sector data covers %s, so ATC has no altitude "
+                            "protection to vector you with and will refuse. The "
+                            "published procedure is flown instead. Your setting is "
+                            "kept.",
+                            vdest.c_str());
+      }
+    }
   }
   ImGui::Spacing();
 

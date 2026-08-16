@@ -78,6 +78,8 @@ static json default_config() {
       {"traffic_features_enabled", true},
       {"hold_enabled", true},
       {"shortcut_always", false},
+      {"allow_vectoring", true},
+      {"force_app_vectoring", false},
       {"force_ils", false},
       {"simbrief_pilot_id", 0},
       {"start_mode", "engines_running"},
@@ -357,6 +359,10 @@ bool debug_text_input() { return cfg.value("debug_text_input", false); }
 bool hold_enabled() { return cfg.value("hold_enabled", true); }
 
 bool shortcut_always() { return cfg.value("shortcut_always", false); }
+bool allow_vectoring() { return cfg.value("allow_vectoring", true); }
+bool force_app_vectoring() {
+  return cfg.value("force_app_vectoring", false);
+}
 bool force_ils() { return cfg.value("force_ils", false); }
 
 bool traffic_features_enabled() {
@@ -491,6 +497,14 @@ void set_hold_enabled(bool v) {
 }
 void set_shortcut_always(bool v) {
   cfg["shortcut_always"] = v;
+  save();
+}
+void set_allow_vectoring(bool v) {
+  cfg["allow_vectoring"] = v;
+  save();
+}
+void set_force_app_vectoring(bool v) {
+  cfg["force_app_vectoring"] = v;
   save();
 }
 void set_force_ils(bool v) {
