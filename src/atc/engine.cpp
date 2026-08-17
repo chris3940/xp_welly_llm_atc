@@ -7522,6 +7522,12 @@ lookup_fix_positions_near(const xplane_context::XPlaneContext &ctx,
 
 static bool vectoring_active(); // defined with the vectoring state machine
 
+// Length of the vector track still to fly to the FAF, or 0 when not vectoring.
+// OBSERVATION ONLY -- nothing consumes it yet; it is logged beside the routed
+// distance so the two can be compared on a real arrival before any behaviour is
+// changed. See open-questions.md Q1. Defined with the vectoring geometry.
+static double vectored_distance_nm(const xplane_context::XPlaneContext &ctx);
+
 static double heading_error_deg(double heading_mag, double assigned_mag) {
   double d = std::fabs(heading_mag - assigned_mag);
   if (d > 180.0) d = 360.0 - d;
@@ -7831,6 +7837,20 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
                   fc.ident.c_str(), clr.c_str(),
                   static_cast<double>(ctx.pressure_alt_ft), fc.dist_nm, tod_dist,
                   alt_to_lose);
+  // Under vectoring the routed distance degenerates to the straight line to the
+  // FAF (every remaining fix is behind the nose and gets skipped), so the
+  // gradient above is computed against a distance SHORTER than the track that
+  // will actually be flown -- the too-steep clearances reported under vectoring.
+  // Print the vector track beside it so the size of the error is measurable on a
+  // real arrival. OBSERVATION ONLY: nothing consumes this yet. Q1.
+  const double vec_nm = vectored_distance_nm(ctx);
+  if (vec_nm > 0.0)
+    logging::info("IFR descent: vectoring -- routed %.1f NM vs vector track "
+                  "%.1f NM (min), gradient computed on routed: %.0f ft/NM, on "
+                  "vector track: %.0f ft/NM",
+                  fc.dist_nm, vec_nm,
+                  fc.dist_nm > 1.0 ? (alt_now - issue_ft) / fc.dist_nm : 0.0,
+                  (alt_now - issue_ft) / vec_nm);
   return true;
 }
 
@@ -10000,6 +10020,30 @@ static double vec_required_s(double y) {
   return kVecAlignNm + std::fabs(y) / std::tan(kVecInterceptDeg * M_PI / 180.0);
 }
 
+// Track still to fly to the FAF under vectoring, from the current (s, y).
+//
+// Closing a lateral offset |y| at the intercept angle costs |y|/sin(icpt) of
+// track while buying only |y|/tan(icpt) of along-axis progress, so turning in
+// adds |y|*(1-cos)/sin over the along-axis distance -- 0.268*|y| at 30 degrees.
+//
+//   s >= required : there is room to turn in now      -> s + turn_extra
+//   s <  required : the aircraft must first be taken
+//                   outbound to buy the missing room  -> flown twice
+//
+// This is the MINIMUM remaining track: real vectoring adds whatever downwind
+// extension the controller chooses, which is decided reactively and cannot be
+// known in advance. So it is a lower bound on the true figure -- and already
+// strictly greater than the straight line, which is the point.
+static double vec_track_nm(double s, double y) {
+  const double icpt = kVecInterceptDeg * M_PI / 180.0;
+  const double turn_extra =
+      std::fabs(y) * (1.0 - std::cos(icpt)) / std::sin(icpt);
+  const double req = vec_required_s(y);
+  if (s >= req)
+    return s + turn_extra;
+  return (req - s) + req + turn_extra;
+}
+
 // Level for a pattern leg: never below the sector MSA, and never below grid MORA
 // when the MSA has nothing to say. Returns 0 when neither source answers, which
 // the caller must read as "do not descend".
@@ -10049,6 +10093,21 @@ static bool vectoring_active() {
   return s_vtf_leg == VecLeg::Displace || s_vtf_leg == VecLeg::Downwind ||
          s_vtf_leg == VecLeg::Base || s_vtf_leg == VecLeg::Intercept ||
          s_vtf_leg == VecLeg::Axis;
+}
+
+static double vectored_distance_nm(const xplane_context::XPlaneContext &ctx) {
+  if (!vectoring_active() || s_assigned_dest_icao.empty() ||
+      s_assigned_approach_designator.empty())
+    return 0.0;
+  const cifp_reader::FafFix &faf =
+      vtf_faf(ctx, s_assigned_dest_icao, s_assigned_approach_designator);
+  // No FAF position, or no published final track, means no axis to measure
+  // against -- say nothing rather than print a number built on a zero bearing.
+  if ((faf.lat == 0.0 && faf.lon == 0.0) || faf.final_track_deg == 0)
+    return 0.0;
+  double s = 0.0, y = 0.0;
+  vec_frame(ctx, faf, &s, &y);
+  return vec_track_nm(s, y);
 }
 
 // ── Spoken callsign ───────────────────────────────────────────────────────────
