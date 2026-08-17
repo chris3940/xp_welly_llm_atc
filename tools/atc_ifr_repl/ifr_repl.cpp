@@ -235,6 +235,10 @@ void cmd_set(std::string &callsign, const std::string &rest) {
       ctx.heading_mag = ctx.heading_true; // harness: magvar=0 so spoken vectors == true
     } else if (field == "gs") {
       ctx.groundspeed_kts = std::stof(value);
+      // The harness flies in still air, so IAS == groundspeed. Without this
+      // ctx.indicated_airspeed_kts stayed 0 and every rule that reads it -- the
+      // vectoring speed instructions among them -- was silently untestable.
+      ctx.indicated_airspeed_kts = ctx.groundspeed_kts;
     } else if (field == "vs") {
       ctx.vertical_speed_fpm = std::stof(value);
     } else if (field == "cruise") {

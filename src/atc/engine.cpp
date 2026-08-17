@@ -10174,6 +10174,38 @@ static double vec_track_nm(double s, double y) {
 // Level for a pattern leg: never below the sector MSA, and never below grid MORA
 // when the MSA has nothing to say. Returns 0 when neither source answers, which
 // the caller must read as "do not descend".
+// ── speed control on the vectors ──────────────────────────────────────────
+// A vectored approach without speed assignment does not exist in practice: the
+// controller is building a sequence, and speed is how he builds it. EUROCONTROL
+// practice is 160 kt maximum from 8 NM to touchdown, with "160 knots to 4 DME"
+// the standard restriction; the intermediate vectors carry a higher sequencing
+// speed. Verified against ICAO Doc 4444 / EUROCONTROL material, 2026-08-17.
+//
+// It also feeds back into the geometry: the alignment lead is 60 s of lateral
+// closure, so an aircraft still doing 280 kt on the intermediate vector gets a
+// lead of 2.3 NM where one at 160 kt gets 1.3. Vectoring an aircraft that was
+// never slowed sizes the whole manoeuvre on a speed it will not have.
+static constexpr int kVecSpeedIntermediateKt = 210;
+static constexpr int kVecSpeedFinalKt        = 160;
+
+// The instruction, or nothing. NO aircraft-category table -- we do not have the
+// data, and it is not needed: the target is only ever issued when the aircraft
+// is genuinely faster than it, so a light aircraft already at 140 kt is never
+// told to "reduce" to 160. Anchored on the word "speed" so the readback
+// verifier's extract_speed() picks it up without further wiring.
+static std::string vec_speed_phrase(const xplane_context::XPlaneContext &ctx,
+                                    int target_kt) {
+  // Groundspeed as a fallback: IAS is the right quantity for a speed
+  // instruction, but a source that does not publish it must not silently
+  // disable speed control altogether.
+  int ias = static_cast<int>(ctx.indicated_airspeed_kts);
+  if (ias <= 0)
+    ias = static_cast<int>(ctx.groundspeed_kts);
+  if (ias <= 0 || ias <= target_kt + 10)
+    return {};
+  return ", reduce speed to " + std::to_string(target_kt) + " knots";
+}
+
 static int vec_leg_altitude_ft(const xplane_context::XPlaneContext &ctx,
                                const std::string &dest, int wanted_ft) {
   int floor_ft = 0;
@@ -10501,6 +10533,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                                                  ctx.qnh_hpa, ta);
       s_enroute_cleared_alt_ft = s_vtf_cleared_ft;
     }
+    txt += vec_speed_phrase(ctx, kVecSpeedIntermediateKt);
     const std::string appr_phrase = approach_clearance_phrase(ctx);
     txt += appr_phrase.empty() ? ", vectoring for the approach."
                                : (", vectoring for " + appr_phrase + ".");
@@ -10738,6 +10771,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
         s_vtf_cleared_ft = lvl;
         s_enroute_cleared_alt_ft = lvl;
       }
+      txt += vec_speed_phrase(ctx, kVecSpeedFinalKt);
       const std::string appr_phrase = approach_clearance_phrase(ctx);
       txt += appr_phrase.empty()
                  ? ", cleared approach, report established."

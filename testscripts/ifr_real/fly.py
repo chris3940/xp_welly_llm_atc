@@ -166,6 +166,7 @@ RE_ALT = re.compile(r"(descend|climb)(?: to)? ([\d ,]+) feet", re.I)
 RE_MAINTAIN_FL = re.compile(r"maintain flight level (\d{2,3})", re.I)
 RE_HEADING = re.compile(r"turn (left|right) heading (\d{2,3})", re.I)
 RE_RESUME = re.compile(r"resume own navigation", re.I)
+RE_SPEED = re.compile(r"reduce speed(?: to)?,? (\d{3}) knots", re.I)
 # The engine prints the FAF it resolved. Parsing it gives the driver the REAL
 # axis -- position AND published final track -- instead of guessing. Without it
 # the driver flew the last INTERCEPT heading (037) as though it were the
@@ -186,6 +187,7 @@ class Pilot:
         self.runway = ""         # for the "established" report
         self.faf = None          # (lat, lon) of the FAF, from the engine's own log
         self.faf_track = None    # published final approach track
+        self.assigned_kt = None  # speed ATC has assigned, and the pilot flies
         self.events = []
 
     def react(self, lines, where, alt):
@@ -217,6 +219,13 @@ class Pilot:
                 self.repl.sync()
                 self.events.append((where, alt, ">> pilot: checks in on %s (%s)" % (freq, who)))
                 continue
+
+            m = RE_SPEED.search(msg)
+            if m:
+                # A speed instruction is flown, not logged and ignored. Without
+                # this the driver kept cruise-descent speed through the whole
+                # sequence and the geometry was sized on a speed no aircraft has.
+                self.assigned_kt = float(m.group(1))
 
             m = RE_FAF.search(msg)
             if m:
@@ -331,6 +340,8 @@ def main():
         else:
             pt = path[idx]
             idx += 1
+        if pilot.assigned_kt is not None:
+            gs = pilot.assigned_kt
         leg = nm(prev, pt)
         if pilot.vector_hdg is not None:
             actual = bearing(prev, pt)
@@ -350,6 +361,7 @@ def main():
         # land in the sync that follows the command which produced them -- on a long
         # route they slip into the next one, and any sync whose result is discarded
         # silently eats them (13-fix DIK -> EDLW: 8 ATC calls emitted, 0 collected).
+        repl.send("set gs %.0f" % gs)
         repl.send("set heading %.0f" % bearing(prev, pt))
         pilot.react(repl.sync(), prev, int(alt))
         repl.send("track %.4f %.4f %d %d" % (pt[0], pt[1], int(alt), dt))
@@ -386,7 +398,10 @@ def main():
             # arrival at cruise-descent speed, as the route file does, is not a
             # profile any aircraft flies and it skews every distance measured
             # here. [C. P. Potter]
-            gs = 160.0 if d < 8.0 else max(160.0, float(route.get("gs_kt", 280)))
+            # ATC's assigned speed wins; otherwise EUROCONTROL's 160 kt from
+            # 8 NM to touchdown.
+            gs = (pilot.assigned_kt if pilot.assigned_kt is not None
+                  else (160.0 if d < 8.0 else float(route.get("gs_kt", 280))))
             # Steer at the destination once inside 6 NM: the published course and
             # a straight line differ a little, and drifting off it here would look
             # like a lateral deviation the plugin would rightly challenge.
@@ -404,6 +419,7 @@ def main():
             alt = max(500.0, alt - step * 318.0)
             if pilot.cleared_ft is not None:
                 alt = max(alt, float(pilot.cleared_ft) - 100.0)
+            repl.send("set gs %.0f" % gs)
             repl.send("set heading %.0f" % crs_now)
             pilot.react(repl.sync(), prev, int(alt))
             repl.send("track %.4f %.4f %d %d" % (pt[0], pt[1], int(alt),

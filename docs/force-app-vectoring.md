@@ -1,7 +1,6 @@
 # FORCE APP VECTORING — specification
 
-**Spec version:** 2.0 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta (`d7c3f64`,
-package 87)
+**Spec version:** 2.1 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta (`11365b5`)
 
 Status: **implemented and flown twice, neither flight completing the arrival.**
 The manoeuvre itself works — build 85 flew it to the localiser — but the
@@ -492,7 +491,43 @@ rather than grow two.
 
 ---
 
-## Known defects (2026-08-17, build `d7c3f64` / package 87)
+## Speed control (2026-08-17)
+
+A vectored approach without speed assignment does not exist: the controller is
+building a sequence, and speed is how he builds it. EUROCONTROL practice is
+**160 kt maximum from 8 NM to touchdown**, with *"160 knots to 4 DME"* the
+standard restriction; the intermediate vectors carry a higher sequencing speed.
+
+| leg | assigned |
+|---|---|
+| the sequencing vectors | **210 kt** |
+| the alignment vector, with the approach clearance | **160 kt** |
+
+**No aircraft-category table**, because we do not have the data and it is not
+needed: the instruction is issued only when the aircraft is genuinely faster than
+the target, so a light aircraft already at 140 kt is never told to "reduce" to
+160. Anchored on the word *speed*, so the readback verifier picks it up unwired.
+
+It feeds back into the geometry, which is the point. The alignment lead is 60 s
+of lateral closure, so it is a DISTANCE that shrinks with speed:
+
+```
+280 kt -> lead 2.3 NM        210 kt -> lead 1.7 NM        160 kt -> lead 1.3 NM
+```
+
+Vectoring an aircraft that was never slowed sizes the whole manoeuvre on a speed
+it will not have. Measured on the replay: with the 210 kt instruction in place
+the lead drops from 2.3 to 1.7 NM on the same arrival.
+
+**Open:** the alignment rule is expressed in DISTANCE (3 NM before the FAF) while
+the lead is expressed in TIME. Three miles is 39 s at 280 kt and 68 s at 160 kt,
+so the rule is not equally demanding across the speed range and the margin is
+thin at the bottom of it — 2.9 NM measured against a 3 NM target, passing only on
+a 0.5 NM tolerance.
+
+---
+
+## Known defects (2026-08-17, build `11365b5`)
 
 Flown twice on LFLP → EDLW. **Neither flight completed the arrival.**
 
@@ -500,7 +535,7 @@ Flown twice on LFLP → EDLW. **Neither flight completed the arrival.**
 |---|---|---|
 | **The Tower handoff never fires.** On build 85 the manoeuvre worked end to end, the pilot reported *"established as 06"* — and ATC never answered. `[approach] profile enforcement yielded to Tower handoff` was logged 2 400 times: the profile stands aside for a transfer that never comes. | **open**, deferred by the user |
 | **The feasibility margin does not budget the turn.** The sequence armed with 6.7 NM of margin; the turn onto the intercept heading then ate 11 NM of axis distance for 4 NM of lateral closure, at an effective 26° against the 30° assumed. The ICAO floor now absorbs this, but the arithmetic is still wrong. | open |
-| **No speed control anywhere in the manoeuvre.** A vectored approach without speed assignment does not exist in practice. Deliberately deferred: the values depend on aircraft category, which we do not have. | deferred (point 4) |
+| ~~No speed control anywhere in the manoeuvre.~~ | **done** — see *Speed control* above |
 | **The route tracker is re-initialised behind the aircraft** when the approach waypoints are appended, which cancels any direct-to and made the routed distance to the IAF read 24 NM with the aircraft 2 NM from it. | open |
 
 ## Revision history
@@ -508,4 +543,5 @@ Flown twice on LFLP → EDLW. **Neither flight completed the arrival.**
 | version | date | build | change |
 |---|---|---|---|
 | 1.x | 2026-08-16 | — | specification, written before implementation |
+| 2.1 | 2026-08-17 | v4.4.0-beta (`11365b5`) | speed control on the vectors (210 kt sequencing, 160 kt with the approach clearance, EUROCONTROL); no category table -- the target is only issued when the aircraft is faster than it. Records that the lead is a TIME and the alignment rule a DISTANCE, so the margin narrows as speed drops |
 | 2.0 | 2026-08-17 | v4.4.0-beta (`d7c3f64`, pkg 87) | brought to the ICAO Doc 4444 limits after the EDLW flight: 45° / 2.0 NM as the floor with 30° / 3 NM kept as the target; `until established on the localiser` added to the clearance, adapting to the approach type; leg levels derived from the glide path instead of a fixed offset above the FAF, and stepped down as the geometry changes; status corrected from "nothing implemented" |
