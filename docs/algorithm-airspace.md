@@ -4,7 +4,7 @@ Specification of the airspace layer: how the plugin decides what a volume **is**
 which one it considers the aircraft to be **in**, and how it distinguishes a
 terminal area it is merely **transiting** from the destination's **own**.
 
-**Spec version:** 1.3 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
+**Spec version:** 1.4 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
 **Sources:** `Custom Data/airspaces/airspace.txt` (OpenAir) — authoritative;
 `Custom Data/Earth nav data/atc.dat` — fallback and controller names.
 Measured against AIRAC 2606 r1.
@@ -213,11 +213,15 @@ sector caught in passing (Vienna or Munich during the LOWI reversal).
 
 The user reports that these have never given trouble, naming the procedures:
 
-| arrival | STAR | terminal chain |
-|---|---|---|
-| LFLP | `ROMA*A` | Lyon → Chambéry → Annecy |
-| LFLP | `SALEV3P` | Genève → Chambéry → Annecy (from the east) |
-| LFMN | `ABDI*X` | Nice → Cannes |
+| arrival | STAR | entry fix | spoken | terminal chain |
+|---|---|---|---|---|
+| LFLP | `ROMA3P` | ROMAM | "ROMAM Three Papa arrival" | Lyon → Chambéry → Annecy |
+| LFLP | `SALE3P` | SALEV | "SALEV Three Papa arrival" | Genève → Chambéry → Annecy (from the east) |
+| LFMN | `ABDI8R` | ABDIL | — | Nice → Cannes |
+| EDLW | `ADEM3A` | ADEMI | "ADEMI Three Alpha arrival" | the case that fails |
+
+Taken from the flight logs rather than from memory: `STAR entry_fix=... -> STAR=...`
+in `Log.txt`, cross-checked against the spoken form in `transcript.log`.
 
 Measured, that is not luck — it is the naming convention:
 
@@ -310,4 +314,5 @@ the code looked like at the time.
 | 1.0 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | first issue: classification, enclosing volume, transiting vs destination, the EDLW worked example |
 | 1.1 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | section 7 added — the suppressed Düsseldorf handoff, traced to the name comparison running the wrong way rather than to the CTA classification |
 | 1.2 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | sections 8–10: why the French and Swiss arrivals always worked (naming convention is the single root of both defects); the unit-not-volume modelling error; radar vectoring is published on the EDLW chart |
-| 1.3 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | named the validated arrivals — `ROMA*A` and `SALEV3P` into LFLP, `ABDI*X` into LFMN — so the working set is a checkable list rather than "the French ones" |
+| 1.3 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | named the validated arrivals so the working set is a checkable list rather than "the French ones" |
+| 1.4 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | exact STAR designators recovered from the flight logs: `ROMA3P`, `SALE3P`, `ABDI8R`, and `ADEM3A` for the failing case, each with its entry fix and spoken form |
