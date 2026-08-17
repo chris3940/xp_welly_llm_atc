@@ -808,6 +808,36 @@ static bool dest_stack_walk_ok() {
   return false;
 }
 
+// Where the DESTINATION terminal query is anchored.
+//
+// The field is the wrong anchor wherever the terminal area does not sit over the
+// runway. Measured at EDLW on 2026-08-17, the two anchors give different
+// volumes and only one of them is the terminal area:
+//
+//   over the field   DORTMUND                  2000-4500   <- a low sector
+//                    (then a hole to 10000)                   overlapping the CTR
+//   over KOLOT/FAF   DUESSELDORF/COLOGNE-BONN  1500-10000  <- the actual TMA,
+//                                                              class C, topping FL100
+//
+// Taking the field's answer would make the terminal ceiling 4500 and clear an
+// arrival down to 4000 ft to "enter the terminal area" -- 5500 ft below the real
+// one. This is cause 1 of open-questions Q3.
+//
+// Moved ONLY where the stack walk is already enabled: the fields whose export
+// names its TMAs (France, Spain, Italy...) keep the field anchor they were
+// validated on, so this cannot regress them.
+static std::pair<double, double>
+dest_terminal_anchor(const xplane_context::XPlaneContext &ctx,
+                     std::pair<double, double> field_pos) {
+  if (!dest_stack_walk_ok() || s_assigned_approach_designator.empty())
+    return field_pos;
+  const cifp_reader::FafFix &faf =
+      vtf_faf(ctx, s_assigned_dest_icao, s_assigned_approach_designator);
+  if (faf.lat == 0.0 && faf.lon == 0.0)
+    return field_pos; // no FAF resolved -- the field is still better than nothing
+  return {faf.lat, faf.lon};
+}
+
 // Ground runway-change detection: ATC must announce when active runway changes
 // while on the ground.
 static std::string s_ground_last_announced_runway; // last runway ATC announced on ground
@@ -6291,8 +6321,9 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
       dlon = ofp.navlog.back().lon;
     }
     if (dlat != 0.0 || dlon != 0.0) {
-      const int dest_ceil =
-          openair_db::terminal_tma_ceiling(dlat, dlon, dest_stack_walk_ok());
+      const auto danc = dest_terminal_anchor(ctx, {dlat, dlon});
+      const int dest_ceil = openair_db::terminal_tma_ceiling(
+          danc.first, danc.second, dest_stack_walk_ok());
       if (dest_ceil > 1000)
         descend_via_level_ft = ((dest_ceil - 100) / 1000) * 1000;
     }
@@ -6752,11 +6783,12 @@ static bool on_destination_terminal(const xplane_context::XPlaneContext &ctx) {
   // CTR (0-4000) as the innermost over LFLP -- its fragment "ANNECY" != the
   // approach TMA "CHAMBERY", which false-blocked the clearance in-sim (LFLP
   // 2026-07-17). terminal_tma_ceiling() is TMA-class only (skips the CTR).
-  const int tma_ceil = openair_db::terminal_tma_ceiling(
-      dpos.first, dpos.second, dest_stack_walk_ok());
+  const auto anc = dest_terminal_anchor(ctx, dpos);
+  const int tma_ceil = openair_db::terminal_tma_ceiling(anc.first, anc.second,
+                                                        dest_stack_walk_ok());
   const int probe = (tma_ceil > 1500) ? tma_ceil - 500 : 3000;
   const openair_db::AirspaceEntry dest_tma =
-      openair_db::find_enclosing(dpos.first, dpos.second, probe);
+      openair_db::find_enclosing(anc.first, anc.second, probe);
   const openair_db::AirspaceEntry acft_tma = openair_db::find_enclosing(
       ctx.latitude, ctx.longitude, openair_alt(ctx));
   if (dest_tma.name.empty() || acft_tma.name.empty())
@@ -6790,11 +6822,12 @@ static bool dest_terminal_tma_below(const xplane_context::XPlaneContext &ctx) {
   if (dpos.first == 0.0 && dpos.second == 0.0)
     return false;
   // Destination approach-controller fragment (same probe as on_destination_terminal).
-  const int dceil = openair_db::terminal_tma_ceiling(dpos.first, dpos.second,
+  const auto anc = dest_terminal_anchor(ctx, dpos);
+  const int dceil = openair_db::terminal_tma_ceiling(anc.first, anc.second,
                                                      dest_stack_walk_ok());
   const int dprobe = (dceil > 1500) ? dceil - 500 : 3000;
   const openair_db::AirspaceEntry dest_tma =
-      openair_db::find_enclosing(dpos.first, dpos.second, dprobe);
+      openair_db::find_enclosing(anc.first, anc.second, dprobe);
   if (dest_tma.name.empty())
     return false;
   // Terminal TMA directly under the AIRCRAFT -- only meaningful while ABOVE its ceiling
@@ -7691,9 +7724,11 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   int dest_tma_ceil = 0;
   if (openair_db::ready() && !s_assigned_dest_icao.empty()) {
     const auto dp = xplane_context::airport_pos_for(s_assigned_dest_icao);
-    if (dp.first != 0.0 || dp.second != 0.0)
-      dest_tma_ceil = openair_db::terminal_tma_ceiling(dp.first, dp.second,
+    if (dp.first != 0.0 || dp.second != 0.0) {
+      const auto danc = dest_terminal_anchor(ctx, dp);
+      dest_tma_ceil = openair_db::terminal_tma_ceiling(danc.first, danc.second,
                                                        dest_stack_walk_ok());
+    }
   }
   const int issue_ft =
       descent_rung_ft(alt_ref_now, fc.alt_target_ft, dest_tma_ceil);
