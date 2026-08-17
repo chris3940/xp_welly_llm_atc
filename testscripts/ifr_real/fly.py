@@ -166,6 +166,12 @@ RE_ALT = re.compile(r"(descend|climb)(?: to)? ([\d ,]+) feet", re.I)
 RE_MAINTAIN_FL = re.compile(r"maintain flight level (\d{2,3})", re.I)
 RE_HEADING = re.compile(r"turn (left|right) heading (\d{2,3})", re.I)
 RE_RESUME = re.compile(r"resume own navigation", re.I)
+# The engine prints the FAF it resolved. Parsing it gives the driver the REAL
+# axis -- position AND published final track -- instead of guessing. Without it
+# the driver flew the last INTERCEPT heading (037) as though it were the
+# localiser course (057) and diverged, producing a bogus "established LATE".
+RE_FAF = re.compile(
+    r"FAF: ident=(\S+) lat=([-\d.]+) lon=([-\d.]+) alt=(\d+)ft track=(\d+)", re.I)
 
 
 class Pilot:
@@ -178,6 +184,8 @@ class Pilot:
         self.established = False # on the final approach course
         self.final_course = None # course to fly inbound once established
         self.runway = ""         # for the "established" report
+        self.faf = None          # (lat, lon) of the FAF, from the engine's own log
+        self.faf_track = None    # published final approach track
         self.events = []
 
     def react(self, lines, where, alt):
@@ -209,6 +217,11 @@ class Pilot:
                 self.repl.sync()
                 self.events.append((where, alt, ">> pilot: checks in on %s (%s)" % (freq, who)))
                 continue
+
+            m = RE_FAF.search(msg)
+            if m:
+                self.faf = (float(m.group(2)), float(m.group(3)))
+                self.faf_track = float(m.group(5))
 
             m = RE_HEADING.search(msg)
             if m:
@@ -356,7 +369,10 @@ def main():
         pilot.events.append((prev, int(alt), ">> pilot: reports established"))
         repl.send("say %s established runway %s" % (pilot.callsign, pilot.runway))
         pilot.react(repl.sync(), prev, int(alt))
-        crs = pilot.final_course if pilot.final_course is not None else bearing(prev, dest)
+        # The axis is the published final approach track through the FAF, which
+        # the engine logged. The last vector was an INTERCEPT heading, so flying
+        # it onward would take the aircraft across the localiser and off it.
+        crs = pilot.faf_track if pilot.faf_track is not None else bearing(prev, dest)
         for _ in range(40):
             if pilot.finished:
                 break
@@ -365,10 +381,25 @@ def main():
                 pilot.events.append((prev, int(alt), ">> pilot: over the field"))
                 break
             step = min(1.0, d)
+            # EUROCONTROL sequencing: 160 kt maximum from 8 NM to touchdown, and
+            # "160 knots to 4 DME" is the standard restriction. Flying the whole
+            # arrival at cruise-descent speed, as the route file does, is not a
+            # profile any aircraft flies and it skews every distance measured
+            # here. [C. P. Potter]
+            gs = 160.0 if d < 8.0 else max(160.0, float(route.get("gs_kt", 280)))
             # Steer at the destination once inside 6 NM: the published course and
             # a straight line differ a little, and drifting off it here would look
             # like a lateral deviation the plugin would rightly challenge.
-            crs_now = bearing(prev, dest)
+            # Fly the LOCALISER COURSE, not a bearing to the field. Steering at
+            # the field dragged the aircraft off the axis and produced a bogus
+            # "established LATE, 2.1 NM off" that was the harness, not the
+            # plugin. Only inside 3 NM does the runway itself become the target.
+            # Capture the localiser, then track it: steer at the FAF until
+            # reaching it, then follow the published track to the runway.
+            if pilot.faf is not None and nm(prev, pilot.faf) > 0.6:
+                crs_now = bearing(prev, pilot.faf)
+            else:
+                crs_now = crs
             pt = advance(prev, crs_now, step)
             alt = max(500.0, alt - step * 318.0)
             if pilot.cleared_ft is not None:
