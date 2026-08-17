@@ -127,3 +127,57 @@ first level to come from the published constraints rather than
 `cruise * 0.66`. The second is much smaller; the first is closer to how the
 airspace actually works and would make the ACC / terminal split explicit -- which
 the arrival phase already needs elsewhere.
+
+---
+
+## Q3 — The terminal-area queries find nothing at EDLW. Three separate causes.
+
+**Raised:** 2026-08-17, against **v4.4.0-beta-85 (`a6bb13b`)**, from the user's
+question "quel espace fait office de TMA ?" and the checks that followed.
+
+Measured against the user's own data — AIRAC 2606 r1, 11/JUN/2026 to 09/JUL/2026,
+`Custom Data/airspaces/airspace.txt` (OpenAir) and
+`Custom Data/Earth nav data/atc.dat`. **Both sources agree at every point tested.**
+
+```
+KOLOT (the FAF)                      EDLW (the field)
+  0-2500  DORTMUND CTR                 0-2500  DORTMUND CTR
+  2500-4500 DORTMUND SECTOR B          2500-4500 DORTMUND SECTOR B
+  4500-6500 DUESSELDORF/COLOGNE-BONN   4500-10000  ---- nothing ----
+  6500-10000 DUESSELDORF ... Q
+  10000+  AIRSPACE CLASS C             10000+  AIRSPACE CLASS C
+```
+
+`terminal_tma(EDLW)` returns EMPTY, `terminal_tma_ceiling` returns 0. So the TMA
+rung of the descent ladder never exists and `descend-to-enter-TMA` can never fire —
+an EDLW arrival rests entirely on the CIFP constraint chain.
+
+There are **three independent causes**, and fixing any one alone would not be
+enough:
+
+1. **The query is anchored on the airport.** The terminal airspace relevant to this
+   arrival sits over the FAF, not over the field: at KOLOT the stack is continuous
+   from the ground up, while over EDLW there is a 4500–10 000 ft hole.
+2. **Classification, not position.** Even anchored on the FAF it would fail at the
+   altitude that matters: the aircraft crosses KOLOT at 3000 ft, where it is in
+   DORTMUND SECTOR B — classified **CTA**, not TMA. Nothing classed TMA exists at
+   the crossing altitude anywhere on this arrival.
+3. **Class E is absent from the export.** Third confirmation: the AC letters present
+   across 25 759 volumes are `A B C CTR D P Q R` — no E, F or G. Class E is IFR
+   separation airspace (user, 2026-08-17) and the published blanket to FL100 is
+   exactly what would fill the hole over the field.
+
+Also noted: only **two** volumes in the whole file are named `AIRSPACE CLASS C` —
+one 10000–66000, one 3000–19500. These are unnamed blanket blocks; the user
+identifies the first as Langen, which is consistent with atc.dat placing
+`LANGEN ctr 0-24500` over the same points. The export has stripped the name, which
+is why an earlier build announced "contact Airspace class c".
+
+And `ANCHORAGE` appears in atc.dat over Dortmund with a polygon that evidently
+spans the world. The innermost-volume rule discards it, but it is a data quirk
+worth knowing.
+
+**Undecided:** whether to anchor the terminal query on the approach geometry rather
+than the airport; whether to treat a CTA-classified terminal sector as a terminal
+area for these purposes; and whether to carry an `airspace+.txt` overlay for the
+missing class E rather than work around its absence.
