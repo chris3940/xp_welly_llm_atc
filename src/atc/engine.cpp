@@ -10334,6 +10334,14 @@ static bool vectoring_active() {
          s_vtf_leg == VecLeg::Axis;
 }
 
+// True once a vectoring sequence has taken the aircraft OFF the published
+// transition -- including after it ended, and including after it was abandoned.
+// From that moment the route tracker's index means nothing: the aircraft was
+// deliberately steered around the approach fixes, so it never overflies them and
+// the tracker sits wherever it was left. Any rule gated on "the tracker has
+// reached fix N" is then permanently false. [C. P. Potter]
+static bool vectoring_used() { return s_vtf_leg != VecLeg::None; }
+
 static double vectored_distance_nm(const xplane_context::XPlaneContext &ctx) {
   if (!vectoring_active() || s_assigned_dest_icao.empty() ||
       s_assigned_approach_designator.empty())
@@ -10749,6 +10757,19 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                     "(lead %.1f NM for %.0f kt, rule wants %.0f)",
                     std::fabs(y), s, lead_nm,
                     static_cast<double>(ctx.groundspeed_kts), kVecAlignNm);
+      // NEUTRALISE EVERY FIX THE VECTORS HAVE BYPASSED. The aircraft has been
+      // steered around the STAR and the approach transition; it will overfly
+      // none of them, so the route tracker would sit wherever the vectors left
+      // it -- at HEFME on the 2026-08-17 arrival, five fixes short of the FAF.
+      //
+      // Everything gated on route ORDER then stays false for the rest of the
+      // flight. That is why no vectored arrival ever reached Tower, why the
+      // routed distance to the IAF read 24 NM with the aircraft 2 NM from it,
+      // and why fixes that will never be flown kept being enforced. Exempting
+      // each of those rules one at a time was the wrong fix -- three were found
+      // and there are more. The fix is to make the route TRUE again: from the
+      // alignment vector on, the next fix is the FAF. [C. P. Potter]
+      apply_direct_to(faf.ident);
       // The level of the LAST vector is the FAF crossing altitude, and the sector
       // MSA does not floor it -- see vec_leg_level_ft(). This is the leg that
       // carries the approach clearance, so the aircraft is on a published,
@@ -10780,10 +10801,32 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       if (out_requires_readback)
         *out_requires_readback = true;
       s_approach_cleared_issued = true;
-      // The axis leg clears the approach, so this IS the approach phase.
+      // THE GATE THAT OPENS THE TOWER HANDOFF. poll_vector_to_intercept (the IAF
+      // teardrop) sets this in both its branches; poll_vector_to_final -- the one
+      // that actually flies -- never did, so `if (s_approach_final_issued && ...)`
+      // was false for the whole arrival and the Approach -> Tower transfer could
+      // not even be evaluated. That is why the pilot's "established runway 06"
+      // went unanswered on 2026-08-16 AND 2026-08-17, in the build where the
+      // vectoring worked as well as the ones where it did not: it was never a
+      // vectoring fault at all. This leg issues the final altitude, the QNH and
+      // the approach clearance, which is exactly what the flag means.
+      // [C. P. Potter]
+      s_approach_final_issued = true;
+      // APPROACH_DESCENT, not APPROACH_CONTACT. poll_approach() returns
+      // immediately in APPROACH_CONTACT for anything but a STAR-less AFIS field
+      // (engine.cpp, "state == AS::IFR_APPROACH_CONTACT && !(...)"), so the
+      // Approach -> Tower handoff that lives further down was STRUCTURALLY
+      // unreachable for every vectored arrival. APPROACH_CONTACT means "on the
+      // approach controller's frequency, awaiting the clearance"; this leg has
+      // just ISSUED the clearance, the final altitude and the QNH, so the
+      // aircraft is descending on the approach. Getting the state wrong here is
+      // the whole of defect 6 -- the pilot's "established runway 06" was
+      // unanswered on 2026-08-16 and 2026-08-17 alike, in the build where the
+      // vectoring worked as well as in the ones where it did not. [C. P. Potter]
       if (atc_state_machine::get_state() == AS::IFR_ARRIVAL ||
-          atc_state_machine::get_state() == AS::IFR_DESCENT)
-        atc_state_machine::set_state(AS::IFR_APPROACH_CONTACT);
+          atc_state_machine::get_state() == AS::IFR_DESCENT ||
+          atc_state_machine::get_state() == AS::IFR_APPROACH_CONTACT)
+        atc_state_machine::set_state(AS::IFR_APPROACH_DESCENT);
       // The two figures the governing rule is about, so the acceptance test can
       // be run against a real flight log and not only against the replay.
       // Print the heading ACTUALLY assigned, and the course it intercepts. The
@@ -13797,7 +13840,16 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       // aircraft flying direct to ELMEM (heading west) crosses within 2 NM of WI749 ~4 NM
       // BEFORE reaching ELMEM -> a premature Tower handoff that killed the vectoring
       // (real vol 2026-08-01, ENR-jump-near-STAR). [C. P. Potter]
-      if (!at_faf && s_route_fix_idx >= s_faf_route_idx &&
+      // The route-order gate is right on a PUBLISHED transition and wrong on a
+      // vectored one. Under vectors the fixes before the FAF are deliberately
+      // not overflown, so the tracker never reaches s_faf_route_idx and this
+      // fallback -- the only one that can fire -- stays closed. That is why no
+      // arrival ever reached Tower: on 2026-08-17 the tracker was left at HEFME
+      // while the FAF sat five fixes later, and the pilot's "established" went
+      // unanswered on both flights. Position is the truth for a vectored
+      // aircraft; route order is the truth for a procedural one.
+      if (!at_faf &&
+          (s_route_fix_idx >= s_faf_route_idx || vectoring_used()) &&
           (s_approach_faf.lat != 0.0 || s_approach_faf.lon != 0.0)) {
         double dist_nm = traffic_geometry::distance_nm(
             ctx.latitude, ctx.longitude, s_approach_faf.lat, s_approach_faf.lon);
@@ -13820,8 +13872,10 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
     // s_faf_route_idx), the IAF lands AFTER the FAF in s_route_fixes. The aircraft
     // flying outbound to the IAF will pass over the FAF lat/lon and trigger at_faf
     // prematurely. Suppress until the route tracker has actually passed the IAF.
-    if (at_faf && s_iaf_route_idx > s_faf_route_idx && s_faf_route_idx >= 0 &&
-        s_route_fix_idx <= s_iaf_route_idx) {
+    // Same reasoning: this suppression reads the tracker, so it must not apply
+    // to an aircraft that was vectored past the fixes it is testing.
+    if (at_faf && !vectoring_used() && s_iaf_route_idx > s_faf_route_idx &&
+        s_faf_route_idx >= 0 && s_route_fix_idx <= s_iaf_route_idx) {
       logging::debug("[approach] at_faf suppressed (IAF not yet passed): "
                      "route_idx=%d iaf_idx=%d faf_idx=%d",
                      s_route_fix_idx, s_iaf_route_idx, s_faf_route_idx);
