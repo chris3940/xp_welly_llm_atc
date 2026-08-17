@@ -4,7 +4,7 @@ Specification of the airspace layer: how the plugin decides what a volume **is**
 which one it considers the aircraft to be **in**, and how it distinguishes a
 terminal area it is merely **transiting** from the destination's **own**.
 
-**Spec version:** 1.4 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
+**Spec version:** 1.5 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
 **Sources:** `Custom Data/airspaces/airspace.txt` (OpenAir) — authoritative;
 `Custom Data/Earth nav data/atc.dat` — fallback and controller names.
 Measured against AIRAC 2606 r1.
@@ -240,9 +240,43 @@ TRACON. On the German name there is nothing to strip, the fragment stays the who
 compound string, and nothing matches.
 
 **Both defects therefore have one root: the naming convention.** French and Swiss
-data write `CITY TMA SECTOR n`; German data writes `CITY-A/CITY-B <letter>`.
-Everything that works does so because its names follow the first pattern — which
-is precisely why this went unnoticed until a German arrival was flown.
+data write `CITY TMA SECTOR n`; German data does not write the type word at all.
+
+### It is the whole country, not one airport
+
+Measured across the export, 170 volumes sampled over the sixteen main German
+terminal areas:
+
+| | count |
+|---|---|
+| name contains `TMA` | **0** |
+| name contains `CTA` | **0** |
+| `CTR` | 21 |
+| **no type word at all** | **149** |
+
+```
+FRANKFURT A                  class C
+MUNICH A                     class C
+HAMBURG A                    class C
+BERLIN I1 (WEST)             class C
+DRESDEN SECTOR A             class D
+MUENSTER-OSNABRUECK          class D
+DUESSELDORF/COLOGNE-BONN A   class C
+```
+
+Only the CTRs carry their type word, which is why low-level operations work
+everywhere. **Every German arrival is therefore without a TMA** — no descent rung,
+no descend-to-enter, no terminal handoff through the OpenAir path. Dortmund is not
+a special case; it is the first German arrival that was flown.
+
+Note a second-order distinction inside the failures: `DRESDEN SECTOR A` strips to
+`DRESDEN` and would resolve by name, while `DUESSELDORF/COLOGNE-BONN A` strips to
+nothing usable. So the two defects do not fail together everywhere — the
+classification fails on all 149, the name resolution only on the compound ones.
+
+**Untested, and the obvious next question:** every other country. The working set
+is French and Swiss, the failing set is German, and nothing has been measured
+between.
 
 ## 9. The unit, not the volume
 
@@ -316,3 +350,4 @@ the code looked like at the time.
 | 1.2 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | sections 8–10: why the French and Swiss arrivals always worked (naming convention is the single root of both defects); the unit-not-volume modelling error; radar vectoring is published on the EDLW chart |
 | 1.3 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | named the validated arrivals so the working set is a checkable list rather than "the French ones" |
 | 1.4 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | exact STAR designators recovered from the flight logs: `ROMA3P`, `SALE3P`, `ABDI8R`, and `ADEM3A` for the failing case, each with its entry fix and spoken form |
+| 1.5 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | measured the naming across Germany — 0 of 170 volumes carry `TMA` or `CTA`, 149 carry no type word at all. The defect is national, not per-airport; other countries remain unmeasured |
