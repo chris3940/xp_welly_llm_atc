@@ -3,7 +3,7 @@
 Specification of the IFR arrival descent: which altitude ATC gives, and the moment
 it decides to give it.
 
-**Build:** v4.4.0-beta-85 (`a6bb13b`) · **Dated:** 2026-08-17
+**Spec version:** 1.1 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
 **Reference slope:** `kDescentSlopeFtPerNm = 265 ft/NM` = 2.5°
 
 All figures below are measured on the DIK → EDLW replay of the flown route, taken
@@ -199,3 +199,12 @@ and approach fixes. Whether to model the two explicitly is undecided.
 
 *Specification in progress. This document covers the descent only; the vectoring
 manoeuvre is specified in `force-app-vectoring.md`.*
+
+---
+
+## Revision history
+
+| version | date | build | change |
+|---|---|---|---|
+| 1.0 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | first issue: profile view, the two mechanisms, target and rung selection, steep wording, log format |
+| 1.1 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | corrected the TMA rung at EDLW — it is absent because `terminal_tma` returns 0, not because the ceiling is low |

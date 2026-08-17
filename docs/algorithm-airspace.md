@@ -4,7 +4,7 @@ Specification of the airspace layer: how the plugin decides what a volume **is**
 which one it considers the aircraft to be **in**, and how it distinguishes a
 terminal area it is merely **transiting** from the destination's **own**.
 
-**Build:** v4.4.0-beta-85 (`a6bb13b`) · **Dated:** 2026-08-17
+**Spec version:** 1.1 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
 **Sources:** `Custom Data/airspaces/airspace.txt` (OpenAir) — authoritative;
 `Custom Data/Earth nav data/atc.dat` — fallback and controller names.
 Measured against AIRAC 2606 r1.
@@ -165,7 +165,51 @@ centre, `OCEANIC` discarded, then its spoken label.
 
 ---
 
-## 7. Known defects
+## 7. Consequence: a whole handoff is lost
+
+The classification is not only a descent problem. On the flown arrival the aircraft
+crosses `DUESSELDORF/COLOGNE-BONN Q` between 6500 and 10 000 ft and **is never
+handed to Düsseldorf**. The log says why:
+
+```
+[approach] sector handoff suppressed -- DUESSELDORF (EDDL) not a
+           non-dest terminal (force_forward=0 dest=EDLW)
+```
+
+The candidate was found, with its facility. The approach-phase sector block then
+allows **only** a forward handoff to another facility's terminal area, which
+requires `force_forward` — and that flag is raised solely when the enclosing volume
+resolves to a terminal controller **by name**:
+
+```
+resolve_terminal_ctrl("DUESSELDORF/COLOGNE-BONN Q")
+    strip type words (TMA, CTA, FIR, UIR, SECTOR, SEC) → none present
+    fragment = "DUESSELDORF/COLOGNE-BONN Q"
+
+find_by_role_name_contains(TRACON, fragment)
+    tests   controller_name.find(fragment)
+    i.e.    "duesseldorf".find("duesseldorf/cologne-bonn q") → npos
+```
+
+**The comparison runs the wrong way.** It asks whether the CONTROLLER's name
+contains the VOLUME's name, when it is the volume that carries the long compound
+name. `DUESSELDORF` does not contain `DUESSELDORF/COLOGNE-BONN Q`, so no TRACON is
+found, `force_forward` stays false, and the handoff is suppressed.
+
+Measured 2026-08-17: the cause is the **name matching**, not the CTA
+classification. Both would have to be right for the handoff to fire, so A1 still
+stands, but this one is nearer the surface and much smaller to fix — matching on
+the leading token, or testing containment in the other direction, would resolve
+`DUESSELDORF/COLOGNE-BONN Q` to `DUESSELDORF`.
+
+The suppression rule itself is sound and was written from real flights: it stops a
+handoff to the destination's own facility (Innsbruck announcing its Tower as
+"Approach" while the aircraft was already on Innsbruck Radar) and to an en-route
+sector caught in passing (Vienna or Munich during the LOWI reversal).
+
+---
+
+## 8. Known defects
 
 **A1 — a volume is a TMA only if its name says so.**
 `DORTMUND SECTOR B` is a terminal sector by any operational reading and is
@@ -188,3 +232,16 @@ airport position in the harness.
 
 *Specification in progress. The descent that consumes these queries is specified
 in `algorithm-descent.md`; open questions are tracked in `open-questions.md`.*
+
+---
+
+## Revision history
+
+Every specification document carries a **version**, a **date** and the **build** it
+was written against, so a reader can tell when the specification changed and what
+the code looked like at the time.
+
+| version | date | build | change |
+|---|---|---|---|
+| 1.0 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | first issue: classification, enclosing volume, transiting vs destination, the EDLW worked example |
+| 1.1 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | section 7 added — the suppressed Düsseldorf handoff, traced to the name comparison running the wrong way rather than to the CTA classification |
