@@ -10666,7 +10666,31 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     // controller actually transmits it.
     if (std::fabs(y) <= lead_nm && s >= kVecAlignNm) {
       s_vtf_leg = VecLeg::Axis;
-      s_vtf_hdg = course;
+      // THE LAST VECTOR IS AN INTERCEPT HEADING, NOT THE COURSE. Assigning the
+      // course itself to an aircraft still off the axis flies it PARALLEL to the
+      // localiser -- it never converges, and the establishment test below then
+      // declared it established on heading alone. Measured 2026-08-17 in flight
+      // (|y|=2.2 NM at 9.1 NM, turned onto 057) and reproduced headless
+      // (|y|=1.6 NM at 7.4 NM, same turn). ICAO: the final vector shall ENABLE
+      // the aircraft to become established; the aircraft captures.
+      //
+      // The angle is sized to close |y| by kVecAlignNm and capped at the ICAO
+      // maximum; the course itself is assigned only once essentially on the
+      // axis. Right of the axis (y > 0) means turning LEFT of the course, which
+      // is the same sign convention as the first leg. [C. P. Potter]
+      {
+        double ang = 0.0;
+        if (std::fabs(y) > kVecEstabNm) {
+          const double run = s - kVecAlignNm;
+          ang = (run > 0.1)
+                    ? std::atan(std::fabs(y) / run) * 180.0 / M_PI
+                    : kVecInterceptMaxDeg;
+          ang = std::min(ang, kVecInterceptMaxDeg);
+          ang = std::max(ang, 10.0); // a 2-degree "intercept" is not one
+        }
+        const double turn = (y >= 0.0) ? -1.0 : 1.0;
+        s_vtf_hdg = std::fmod(course + ang * turn + 360.0, 360.0);
+      }
       s_vtf_prev_y = y;
       s_vtf_recut_secs = 0.0f;
       s_vtf_nudged = false;
@@ -10703,9 +10727,14 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
         atc_state_machine::set_state(AS::IFR_APPROACH_CONTACT);
       // The two figures the governing rule is about, so the acceptance test can
       // be run against a real flight log and not only against the replay.
-      logging::info("[vector] leg D AXIS hdg %03d, alt %d, %.1f NM to FAF %s",
-                    static_cast<int>(course), s_vtf_cleared_ft, s,
-                    faf.ident.c_str());
+      // Print the heading ACTUALLY assigned, and the course it intercepts. The
+      // old line printed the course whatever was transmitted, so a log read
+      // "AXIS hdg 057" while the pilot had been given 037 -- which hid the
+      // parallel-vector defect for two flights.
+      logging::info("[vector] leg D AXIS assigned hdg %03d intercepting course "
+                    "%03d, |y|=%.1f NM, alt %d, %.1f NM to FAF %s",
+                    static_cast<int>(s_vtf_hdg), static_cast<int>(course),
+                    std::fabs(y), s_vtf_cleared_ft, s, faf.ident.c_str());
       return true;
     }
     return false;
@@ -10752,14 +10781,21 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     }
     s_vtf_prev_y = y;
 
-    if (err < 5.0 && s >= kVecAlignNm - 0.5) {
+    // Established means ON THE AXIS, not merely pointing along it. Testing the
+    // heading alone declared an aircraft established while it flew parallel 1.6
+    // NM off the localiser -- which is how the parallel-vector defect above went
+    // unnoticed for two flights. Lateral offset is the primary condition; the
+    // heading only confirms it is tracking rather than crossing.
+    const bool on_axis = std::fabs(y) <= kVecEstabNm;
+    if (on_axis && err < 5.0 && s >= kVecAlignNm - 0.5) {
       s_vtf_leg = VecLeg::Done;
-      logging::info("[vector] established: hdg err %.0f deg, %.1f NM to FAF -- OK",
-                    err, s);
+      logging::info("[vector] established: |y|=%.1f NM, hdg err %.0f deg, "
+                    "%.1f NM to FAF -- OK", std::fabs(y), err, s);
     } else if (s < kVecAlignNm - 0.5) {
       s_vtf_leg = VecLeg::Done;
-      logging::info("[vector] established LATE: hdg err %.0f deg, %.1f NM to FAF "
-                    "(rule wants %.0f)", err, s, kVecAlignNm);
+      logging::info("[vector] established LATE: |y|=%.1f NM, hdg err %.0f deg, "
+                    "%.1f NM to FAF (rule wants %.0f)",
+                    std::fabs(y), err, s, kVecAlignNm);
     }
     return false;
   }
