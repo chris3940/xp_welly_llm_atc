@@ -4,7 +4,7 @@ Specification of the airspace layer: how the plugin decides what a volume **is**
 which one it considers the aircraft to be **in**, and how it distinguishes a
 terminal area it is merely **transiting** from the destination's **own**.
 
-**Spec version:** 1.1 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
+**Spec version:** 1.2 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
 **Sources:** `Custom Data/airspaces/airspace.txt` (OpenAir) — authoritative;
 `Custom Data/Earth nav data/atc.dat` — fallback and controller names.
 Measured against AIRAC 2606 r1.
@@ -209,7 +209,65 @@ sector caught in passing (Vienna or Munich during the LOWI reversal).
 
 ---
 
-## 8. Known defects
+## 8. Why the French and Swiss arrivals always worked
+
+The user reports that Lyon → Chambéry → Annecy, Genève → Chambéry → Annecy and
+Nice → Cannes have never given trouble. Measured, that is not luck — it is the
+naming convention:
+
+```
+CHAMBERY TMA SECTOR 1        class D    name says TMA   -> TMA   OK
+LYON TMA SECTOR 4            class C    name says TMA   -> TMA   OK
+GENEVA TMA SECTOR 3          class C    name says TMA   -> TMA   OK
+ANNECY CTR / CANNES CTR      class CTR                  -> CTR   OK
+
+DUESSELDORF/COLOGNE-BONN Q   class C    no type word    -> CTA   FAILS
+```
+
+The resolver follows the same fate. It strips `" SECTOR"` and is left with
+`CHAMBERY`, `LYON`, `GENEVA` — a clean single city that matches the atc.dat
+TRACON. On the German name there is nothing to strip, the fragment stays the whole
+compound string, and nothing matches.
+
+**Both defects therefore have one root: the naming convention.** French and Swiss
+data write `CITY TMA SECTOR n`; German data writes `CITY-A/CITY-B <letter>`.
+Everything that works does so because its names follow the first pattern — which
+is precisely why this went unnoticed until a German arrival was flown.
+
+## 9. The unit, not the volume
+
+A related modelling error, visible on the published chart. The arrival crosses
+**three sectors of the same TMA**, differing only by floor:
+
+```
+DUESSELDORF/COLOGNE-BONN N   4500 MSL -> FL100
+DUESSELDORF/COLOGNE-BONN Q   FL065    -> FL100
+DUESSELDORF/COLOGNE-BONN R   FL065    -> FL100
+```
+
+`terminal_tma()` returns **one volume**. The reality is a stack of adjacent
+sectors belonging to **one controlling unit**: crossing N then R then Q is staying
+with Düsseldorf throughout, and warrants one handoff at the start and none
+between. The right abstraction is the unit, not the volume.
+
+`on_destination_terminal()` already works this way — it compares controller name
+FRAGMENTS so that `CHAMBERY TMA SECTOR 2` and `CHAMBERY CTR` count as the same
+unit. The handoff path lacks the same idea.
+
+## 10. Vectoring onto final is PUBLISHED at EDLW
+
+Not an option, and not a training aid. The ADEMI 3A arrival chart carries:
+
+> RADAR vectoring will be provided onto final approach track.
+
+So on this arrival `FORCE APP VECTORING` models what the procedure states, which
+argues for it being the default behaviour at fields whose charts say so rather
+than a checkbox the user must find. How that would be detected from data — the
+charts are not machine-readable here — is undecided.
+
+---
+
+## 11. Known defects
 
 **A1 — a volume is a TMA only if its name says so.**
 `DORTMUND SECTOR B` is a terminal sector by any operational reading and is
@@ -245,3 +303,4 @@ the code looked like at the time.
 |---|---|---|---|
 | 1.0 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | first issue: classification, enclosing volume, transiting vs destination, the EDLW worked example |
 | 1.1 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | section 7 added — the suppressed Düsseldorf handoff, traced to the name comparison running the wrong way rather than to the CTA classification |
+| 1.2 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | sections 8–10: why the French and Swiss arrivals always worked (naming convention is the single root of both defects); the unit-not-volume modelling error; radar vectoring is published on the EDLW chart |
