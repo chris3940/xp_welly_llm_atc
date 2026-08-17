@@ -181,3 +181,108 @@ worth knowing.
 than the airport; whether to treat a CTA-classified terminal sector as a terminal
 area for these purposes; and whether to carry an `airspace+.txt` overlay for the
 missing class E rather than work around its absence.
+
+---
+
+## Q4 — Infer "this is a TMA" where the name does not say so?
+
+**Raised:** 2026-08-17, against **v4.4.0-beta-85 (`a6bb13b`)**, spec
+`algorithm-airspace.md` 1.7.
+
+> "Pourquoi on n'imaginerait pas un algorithme qui peut, pour les pays ou il
+> n'y a pas CTR ou TMA dans le libelle, deduire que c'est une TMA avec une
+> probabilite assez grande ?"
+
+Germany is the only country whose export omits the type word (17 % typed
+against 92–100 % elsewhere, section 8.1), so 138 controlled volumes are
+classified CTA by default and no German arrival has a terminal shelf.
+
+### What was measured before answering
+
+The eight correctly-named countries are a ready-made validation set: the name
+gives the label, so any inferred rule can be scored rather than asserted.
+Ground truth used below: **3313** volumes named TMA, **1678** named CTA,
+control classes only.
+
+**Geometry alone does not separate them.**
+
+| | floor p50 | ceiling p50 | bbox diagonal p50 |
+|---|---|---|---|
+| TMA | 4500 ft | 14 500 ft | 54 NM |
+| CTA | 6500 ft | 15 500 ft | 61 NM |
+
+The distributions overlap almost entirely. A classifier on floor / ceiling /
+extent would be near-worthless, so the obvious "a TMA is low and small" rule is
+dead on arrival.
+
+**A structural signal does better.** S1 = *a CTR sharing the volume's first name
+word exists within 60 NM*:
+
+```
+S1 holds for  2694/3313 TMA  = 81 %
+S1 holds for   899/1678 CTA  = 54 %
+```
+
+And on the German volumes that carry no type word, S1 fires exactly where it
+should — `BERLIN X` 1500–10000, `BERLIN A` 2500–10000, `BERLIN B/C`
+3500–10000, `BERLIN I1..J2` 5500–7500: the Berlin TMA, in layers.
+
+### The finding that changes the question
+
+**That 54 % is not a false-positive rate.** The CTA-labelled volumes passing S1
+are largely *terminal* CTAs — `MILAN CTA ZONE 1 BRERA`, `MILAN CTA ZONE 1
+LOMBARDIA` — which any descent rule should treat as terminal airspace anyway.
+The label is administrative, the question is operational, and the two do not
+line up. Scoring against the name therefore penalises the rule for being right.
+
+So a probability threshold is the wrong instrument. **"Is this a TMA?" is not
+the question the descent ladder needs answered** — it needs *"which volume is
+the terminal airspace of MY destination?"*, which is anchored on an airport and
+barely needs the name at all.
+
+### Why the reframing also fixes EDLW
+
+Cause 1 in Q3 was that the terminal query is anchored on the airport, where
+Dortmund has a 4500–10 000 ft hole. Anchored on the **FAF** the column is
+continuous:
+
+```
+KOLOT   0-2500     DORTMUND CTR
+      2500-4500    DORTMUND SECTOR B      <- the terminal shelf
+      4500-6500    DUESSELDORF/COLOGNE-BONN
+      6500-10000   DUESSELDORF ... Q
+```
+
+`DORTMUND SECTOR B` is a terminal shelf on every operational reading, and S1
+confirms it structurally (`DORTMUND CTR` sits directly beneath it, same stem,
+floor meeting the CTR ceiling exactly at 2500). No probability needed — the
+stack itself says so.
+
+### Proposed shape, not yet built
+
+Replace the classification question with a **terminal-stack walk**, anchored on
+the arrival geometry rather than the airport:
+
+1. anchor at the FAF (fall back to the airport when no approach is known);
+2. take every controlled volume containing that point, ordered by floor;
+3. the stack's base is the CTR; walk upward while each volume's floor meets the
+   previous ceiling (a contiguous column) and the extent stays terminal-sized;
+4. the shelf is the first volume above the CTR; the terminal ceiling is the top
+   of the contiguous run that still belongs to the same controlling unit
+   (section 9 — the unit, not the volume).
+
+An explicit type word always wins; inference applies only where there is none,
+so the eight working countries cannot regress.
+
+**Validation this makes possible, and which should gate any merge:** run the
+walk at airports in the typed countries and check that what it returns is the
+volume whose name carries that city and `TMA`. That is an unambiguous test with
+no label noise, unlike scoring S1 against the name.
+
+**Undecided:** whether the extent bound is needed at all once the contiguity and
+unit rules do the work; whether the walk anchors on the FAF, on the IAF, or on
+several points of the approach path; and whether S1 survives as a
+tie-breaker or drops out entirely.
+
+**Related:** Q3 (the three causes at EDLW), `algorithm-airspace.md` sections 8.1
+(the country survey), 9 (the unit, not the volume) and defects A1 / A2.
