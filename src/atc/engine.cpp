@@ -10226,10 +10226,22 @@ static constexpr int    kGlideClearanceFt  = 300;
 //     aircraft would need an unstabilised dive to reach.
 //
 // The floor is then the sector MSA / grid MORA, as before. [C. P. Potter]
+// `on_final_segment` -- the leg that turns the aircraft onto the final approach
+// course WITH the approach clearance. There the sector MSA no longer applies and
+// must not: MSA is a terrain figure for an aircraft on no procedure at all, while
+// this aircraft is cleared for a PUBLISHED approach whose FAF crossing altitude
+// is itself obstacle-protected. Applying it held the aircraft at the EDLW sector
+// MSA of 3700 ft for a FAF published at 2500 -- 1200 ft high, unexplainable on
+// the radio, and not what a controller says ("descend 2500 until established").
+// The real instrument for radar vectoring is the Minimum Vectoring Altitude,
+// which is not in the navigation data; the published approach altitude is the
+// defensible stand-in on this segment, and the MSA remains the floor on every
+// leg that is NOT on it. [C. P. Potter]
 static int vec_leg_level_ft(const xplane_context::XPlaneContext &ctx,
                             const std::string &dest,
                             const cifp_reader::FafFix &faf, double s_nm,
-                            double track_nm, float alt_now_ft, int cap_ft) {
+                            double track_nm, float alt_now_ft, int cap_ft,
+                            bool on_final_segment = false) {
   int want = cap_ft;
   if (faf.alt_ft > 0 && s_nm > 0.0) {
     const int gp = faf.alt_ft + static_cast<int>(s_nm * kGlideSlopeFtPerNm);
@@ -10237,7 +10249,13 @@ static int vec_leg_level_ft(const xplane_context::XPlaneContext &ctx,
   }
   if (faf.alt_ft > 0)
     want = std::max(want, faf.alt_ft);
-  if (track_nm > 1.0) {
+  // The achievability bound belongs to INTERMEDIATE step-downs, not to the final
+  // platform clearance. "Descend 2500 until established" authorises the aircraft
+  // down to the FAF crossing altitude and leaves the rate to the pilot; bounding
+  // it by the reference gradient would hand out 3500 instead and require yet
+  // another clearance the controller does not give (user, 2026-08-17: "le
+  // dernier vecteur d'alignement doit te donner l'altitude du FAF").
+  if (track_nm > 1.0 && !on_final_segment) {
     // Rounded UP to the next 500 ft: this is a floor, so rounding it down would
     // re-create the unreachable level, and ATC does not say "flight level 67".
     // The harness caught exactly that -- the guard was right and the number was
@@ -10248,6 +10266,8 @@ static int vec_leg_level_ft(const xplane_context::XPlaneContext &ctx,
     want = std::max(want, reachable);
   }
   want = ((want + 50) / 100) * 100;
+  if (on_final_segment)
+    return std::max(want, faf.alt_ft > 0 ? faf.alt_ft : want);
   return vec_leg_altitude_ft(ctx, dest, want);
 }
 
@@ -10630,9 +10650,6 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_leg = VecLeg::Intercept;
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
-  s_vtf_abandoned = false;
-  s_vtf_prev_y = 0.0;
-  s_vtf_recut_secs = 0.0f;
       // Target the FAF crossing altitude itself, not a round number above it:
       // the level is held "until established" and the aircraft then joins the
       // glide path from below. The guards inside keep it under the path and
@@ -10640,7 +10657,8 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       // issued 1.6 NM out, is what this replaces (real flight 2026-08-17).
       const int cap = faf.alt_ft > 0 ? faf.alt_ft : 4000;
       const int lvl = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
-                                       ctx.altitude_ft_msl, cap);
+                                       ctx.altitude_ft_msl, cap,
+                                       /*on_final_segment=*/true);
       std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
       if (lvl > 0 && lvl < s_vtf_cleared_ft) {
         const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
@@ -10698,8 +10716,15 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                     "(lead %.1f NM for %.0f kt, rule wants %.0f)",
                     std::fabs(y), s, lead_nm,
                     static_cast<double>(ctx.groundspeed_kts), kVecAlignNm);
-      const int want = faf.alt_ft > 0 ? faf.alt_ft : 3000;
-      const int lvl = vec_leg_altitude_ft(ctx, dest, want);
+      // The level of the LAST vector is the FAF crossing altitude, and the sector
+      // MSA does not floor it -- see vec_leg_level_ft(). This is the leg that
+      // carries the approach clearance, so the aircraft is on a published,
+      // obstacle-protected segment; the MSA held it at EDLW's 3700 ft for a FAF
+      // published at 2500 (user, 2026-08-17: "je ne veux pas des 3700").
+      const int cap = faf.alt_ft > 0 ? faf.alt_ft : 3000;
+      const int lvl = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
+                                       ctx.altitude_ft_msl, cap,
+                                       /*on_final_segment=*/true);
       std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
       if (lvl > 0) {
         const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
