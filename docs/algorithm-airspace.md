@@ -4,7 +4,7 @@ Specification of the airspace layer: how the plugin decides what a volume **is**
 which one it considers the aircraft to be **in**, and how it distinguishes a
 terminal area it is merely **transiting** from the destination's **own**.
 
-**Spec version:** 1.7 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
+**Spec version:** 1.8 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
 **Sources:** `Custom Data/airspaces/airspace.txt` (OpenAir) — authoritative;
 `Custom Data/Earth nav data/atc.dat` — fallback and controller names.
 Measured against AIRAC 2606 r1.
@@ -363,6 +363,62 @@ charts are not machine-readable here — is undecided.
 
 ---
 
+## 11bis. The terminal stack walk (shipped)
+
+Answers section 8.1's defect for the countries the naming fails. Selects the
+terminal shelf from the SHAPE of the vertical stack instead of from names:
+
+1. every indexed volume containing the point;
+2. the base is the CTR — **no CTR means no terminal structure**, so an enroute
+   position can never yield a shelf (inferring one from a low-floored ACC sector
+   is the 2026-08-14 misfire, 186 NM out);
+3. the shelf is the lowest-floor non-CTR volume sitting on the CTR
+   (`floor <= ctr_ceiling + 500`) and reaching above it.
+
+One guard, `ceiling <= 30 000 ft` — above FL300 it is an ACC sector, not a
+terminal area. It was **measured, not assumed**, over the 1355 points where a
+named TMA exists so the right answer is known (Europe):
+
+| guards | exact | other | none |
+|---|---|---|---|
+| none | 90 % | 6 % | 5 % |
+| **ceiling ≤ 30 000** | **91 %** | **4 %** | **5 %** |
+| + thickness ≤ 20 000 | 86 % | 8 % | 6 % |
+| + extent ≤ 200 NM | 82 % | 11 % | 7 % |
+
+The intuitive thickness and extent caps make it **worse** — they reject
+`LONDON TMA` (4500–19500). Two other candidate signals were dropped the same
+way: floor/ceiling/extent do not separate TMA from CTA at all (medians 4500 vs
+6500 ft, 54 vs 61 NM), and the name-stem CTR match scores 81 % against 54 % but
+its "errors" are mostly terminal CTAs.
+
+**Off by default, twice.** A named TMA always wins, so the walk only runs where
+the export is silent; and callers opt in per destination through
+`ifr_defaults.terminal_stack_walk_icao_prefixes` (`["ED","LI"]`), keyed on the
+assigned destination so it is off for the whole cruise and off everywhere else.
+
+Measured on the export, `enc` in the IFR REPL printing both answers:
+
+```
+EDLW  name (none)                     ->  walk DORTMUND 2000-4500
+LIMF  name (none)                     ->  walk MILAN CTA ZONE 24 3500-9500
+LIMC  name MILAN TMA ZONE 1 LOMBARDIA ->  walk identical
+LFMN  name NICE TMA SECTOR 1          ->  walk identical
+LFLP  name CHAMBERY TMA SECTOR 1      ->  walk identical
+```
+
+**LIMF Turin is the find.** Italy is 99 % typed overall, yet Turin has no
+TMA-named volume overhead — its terminal airspace is `MILAN CTA ZONE 24 DON
+BOSCO`. An arrival there would have failed exactly like Dortmund; it was never
+seen because Turin has only ever been flown as a departure. A national
+percentage does not certify a field.
+
+**Not yet flown.** Departures are not covered: the gate keys on the destination,
+which is empty during climb, so an ED** departure keeps the name-based
+behaviour.
+
+---
+
 ## 11. Known defects
 
 **A1 — a volume is a TMA only if its name says so.**
@@ -404,4 +460,5 @@ the code looked like at the time.
 | 1.4 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | exact STAR designators recovered from the flight logs: `ROMA3P`, `SALE3P`, `ABDI8R`, and `ADEM3A` for the failing case, each with its entry fix and spoken form |
 | 1.5 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | measured the naming across Germany — 0 of 170 volumes carry `TMA` or `CTA`, 149 carry no type word at all. The defect is national, not per-airport; other countries remain unmeasured |
 | 1.6 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | section 8.1 — the other eight countries measured. Germany is the sole outlier at 17 % typed against 92–100 % elsewhere; corrects 1.5's "0 of 170" (`FRIEDRICHSHAFEN TMA` exists); new defect A4 (`UTMA` unrecognised, Poland); records the three measurement traps — border contamination, unfiltered classes, and English city spellings in the export |
+| 1.8 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | section 11bis — the terminal stack walk, shipped (`eee4c8b`). Guard thresholds measured rather than assumed; the intuitive thickness and extent caps degrade the result and were dropped. Off by default and gated per destination on an ICAO-prefix allowlist. Records LIMF Turin as a second failing field inside a 99 %-typed country — found only because arrivals were probed, never flown |
 | 1.7 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | **A4 withdrawn — it was never a defect.** The classifier matches the type word as a SUBSTRING, so `UTMA` already contains `TMA`; all six Polish upper terminal areas resolve to `TMA` in the export and Poland is at 100 %, not 73 %. The word-boundary test was in the measuring script alone. Table recounted using the classifier's own rule and order; a regression test now pins `UTMA`. Germany remains the only outlier |

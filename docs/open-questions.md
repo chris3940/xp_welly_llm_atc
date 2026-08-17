@@ -184,7 +184,7 @@ missing class E rather than work around its absence.
 
 ---
 
-## Q4 — Infer "this is a TMA" where the name does not say so?
+## Q4 — Infer "this is a TMA" where the name does not say so? — **ANSWERED, shipped `eee4c8b`**
 
 **Raised:** 2026-08-17, against **v4.4.0-beta-85 (`a6bb13b`)**, spec
 `algorithm-airspace.md` 1.7.
@@ -258,7 +258,7 @@ confirms it structurally (`DORTMUND CTR` sits directly beneath it, same stem,
 floor meeting the CTR ceiling exactly at 2500). No probability needed — the
 stack itself says so.
 
-### Proposed shape, not yet built
+### Shape as BUILT (see `algorithm-airspace.md` 11bis for the shipped spec)
 
 Replace the classification question with a **terminal-stack walk**, anchored on
 the arrival geometry rather than the airport:
@@ -286,3 +286,12 @@ tie-breaker or drops out entirely.
 
 **Related:** Q3 (the three causes at EDLW), `algorithm-airspace.md` sections 8.1
 (the country survey), 9 (the unit, not the volume) and defects A1 / A2.
+
+**Resolution (2026-08-17, `eee4c8b`).** Built as the terminal stack walk, with
+the guard thresholds measured rather than assumed: only a ceiling cap survives,
+and the thickness / lateral-extent caps proposed above were measured to make the
+result WORSE. Gated per destination on an ICAO-prefix allowlist rather than
+applied globally, so the eight correctly-named countries cannot regress. The
+open sub-questions below are unchanged: the walk anchors on the point it is
+given, so anchoring it on the FAF rather than the airport is still not done, and
+departures are not covered. Not yet flown.
