@@ -1,11 +1,20 @@
 # Open questions
 
-Running log of questions raised in discussion that are **not settled** and not
-yet implemented. Each entry carries the build it was raised against, so a later
-reader knows what the code looked like at the time.
+Running log of questions and reasoning raised in discussion that are **not
+settled** and not yet implemented.
 
-Answered questions move out of here into the relevant document or a commit
-message; nothing is deleted silently.
+Convention for every entry:
+
+- the **date** it was raised, and the **build** (tag + short SHA) it was raised
+  against, so a later reader knows what the code looked like at the time;
+- the question in the words it was asked;
+- what the code does **today**, with measured figures where they exist;
+- an **opinion** where there is one, marked as such and separated from fact;
+- what is explicitly left **undecided**.
+
+Thinking is recorded here even when nothing is built: a decision taken and
+forgotten costs more than one written down. Answered questions move out into the
+relevant document or a commit message; nothing is deleted silently.
 
 ---
 
