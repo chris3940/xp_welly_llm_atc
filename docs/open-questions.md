@@ -48,6 +48,48 @@ fly — the real figure is shorter, the TOD is therefore nearer, and every rung
 should come earlier. The effect is the same one already measured on the pre-TOD
 side, where planning on the routed path left the profile 4.1 degrees steep.
 
+### Mechanism found (2026-08-17, against `741562b`)
+
+The user asked whether the routed distance distinguishes a standard STAR->APP
+from a direct to the FAF. It does, both ways -- and that turned out to be the
+wrong suspect. `s_route_fixes` carries the STAR fixes AND the CIFP approach
+waypoints (`is_approach_proc`, `is_map`), so the published path is summed leg by
+leg; a direct-to jumps the tracker so the distance collapses correctly.
+
+**The failure is specific to VECTORING**, and it inverts the sign of the error.
+`routed_distance_to_fix_idx()` skips any fix more than 100 degrees off the nose:
+
+```cpp
+if (off <= 100.0) break; // ahead -> start summing here
+++start;                 // behind -> skip it
+```
+
+On a DOWNWIND leg the aircraft flies away from the FAF, so every remaining
+STAR/approach fix is behind and gets skipped one by one until `start` reaches
+`target_idx`. The "routed" distance degenerates to the STRAIGHT LINE from the
+aircraft to the FAF -- much shorter than the vector track still to be flown
+(downwind + base + intercept).
+
+That short distance feeds the gradient directly:
+
+```cpp
+need_ftnm = (alt_now - issue_ft) / fc.dist_nm;
+steep     = need_ftnm > kDescentSlopeFtPerNm * 1.35;
+```
+
+So ATC computes a steeper gradient than reality and words the clearance
+"expedite descent". **The longer the vectoring makes the track, the shorter the
+plugin believes it is.** This is the user's reported "descente un peu trop rapide
+sous le FL100 en vectoring", and it is a sign error, not a tuning problem.
+
+The skip loop is not itself a defect -- it exists because the tracker lags and
+summing a backward leg inflated the distance and fired a descent late (LFLP
+2026-07-17). It is correct ON a route and meaningless OFF one.
+
+**So the fix is not "routed vs direct" but "use the VECTOR TRACK length while
+vectoring"**, which is computable: `poll_vector_to_final()` already builds the
+four legs with their geometry.
+
 **Not decided, and deliberately not implemented yet:**
 
 1. Should the ladder mirror the pre-TOD rule exactly — take `min(routed,
