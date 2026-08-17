@@ -10,6 +10,212 @@ of a real flight, and says which one.
 
 ---
 
+## 4.4.0 — what changed since 4.3.1
+
+The short version for someone upgrading: **4.3.1 flew an IFR arrival on a
+published STAR and approach. 4.4 adds radar vectoring, a realistic stepped
+descent, holds, AFIS fields, and an airspace layer that no longer needs a navdata
+subscription to answer.** 183 commits, ~20 000 lines.
+
+Everything below is off-by-default where it changes existing behaviour, and the
+[Limitations](README-IFR.md#limitations) section still applies: these flows have
+been flown in a limited set of configurations.
+
+### New — radar vectors to final
+
+The headline feature. Tick **`FORCE APP VECTORING`** in the IFR tab and ATC
+positions the aircraft onto the final approach course with headings instead of
+sending it round the published procedure:
+
+```
+39 NM  turn left heading 027, descend 4500 feet QNH 1024,
+       vectoring for ILS approach runway 06
+18 NM  turn left heading 057, descend 3700 feet QNH 1024,
+       cleared ILS approach runway 06, report established
+```
+
+The rule it is built around: **the last vector assigns the final approach course,
+and the aircraft is established on it at least 2–3 NM before the FAF.**
+
+- Geometry follows the runway axis and the side the aircraft arrives from —
+  intercept straight away when there is room, displace first when sitting on the
+  centreline, downwind only to gain axis distance. No circuit is flown: IFR radar
+  vectoring has no pattern, only headings.
+- **Every leg level is floored by the sector MSA, then by grid MORA.** Where
+  neither source answers, ATC refuses to vector and the panel says
+  `DISABLED: NO MSA` rather than inventing a safe altitude.
+- Two settings: `ALLOW VECTORING` (ATC may choose) and `FORCE APP VECTORING`
+  (always, for practice). Both default off; with them off nothing changes.
+- Two modes are decided per arrival and logged — vectors to final, or vectors to
+  the IAF where terrain or a curved final forbid the first. **The IAF mode is not
+  implemented**; those arrivals keep the published procedure.
+- Non-compliance is met with a re-issued vector or a confirmation, never a silent
+  abandon.
+
+New readers: `msa_db` (sector minimum altitudes) and `mora_db` (worldwide grid
+MORA) were added as prerequisites and are used wherever a floor is needed.
+
+### New — the descent is flown down, not dropped
+
+- **Stepped descent.** A single "descend flight level 100" from FL280 is replaced
+  by a ladder — FL100, the destination terminal ceiling, 6 000, then the
+  platform — issued one rung at a time and never the next until the previous is
+  flown. From a very high cruise the first step is capped so no clearance asks
+  for 25 000 ft at once.
+- **The top of descent is computed on the path actually flown**, leg by leg,
+  including a STAR that loops back on itself, instead of a straight line.
+- **When the STAR publishes no constraint**, the target becomes the first point
+  of the *cleared approach*.
+- **`DESCEND VIA` clearance** (ICAO Doc 4444 / SERA.14001), always carrying a
+  level.
+- **"Advise when ready to descend"** negotiation before the top of descent.
+- **`EXPEDITE DESCENT` wording** when ATC is asking for a steep gradient, and a
+  monitor for the other half — an aircraft not descending enough, now judged
+  against the constraining *fix* rather than the airport.
+- Every descent clearance writes one line to `Log.txt` saying which fix
+  constrained it, what was transmitted, whether that level is a rung, and the
+  arithmetic that fired it.
+
+### New — airspace that answers without a navdata subscription
+
+- **`atc.dat` fallback.** Where the OpenAir airspace export is silent, the same
+  query is retried against X-Plane's own `atc.dat`. Users without a navdata
+  subscription can now fly the IFR flows at all.
+- **Volumes are classified by their ICAO class letter**, not only by a keyword in
+  the name. European exports put the class in one field and the type in the name,
+  so anything without a type word used to be invisible. The index grows from
+  8 100 to 10 239 volumes, and 74 restricted/danger areas that were being indexed
+  by accident are now excluded.
+- **Terminal stack walk** — for exports that omit the type word entirely.
+  Germany names almost no volume `TMA` or `CTA` (17 % of its controlled volumes
+  carry a type word, against 92–100 % in the eight other countries measured), so
+  every German arrival had no terminal area at all: no descent rung, no
+  descend-to-enter, no terminal handoff. The terminal shelf is now derived from
+  the *shape* of the vertical stack instead. Off by default and enabled per
+  destination (`ED`, `LI`). It also fixes **Turin**, whose terminal airspace is
+  named `MILAN CTA ZONE 24 DON BOSCO` inside a country that is otherwise 99 %
+  correctly named.
+- The destination terminal query anchors on the **FAF**, not the field, where the
+  walk is enabled — at Dortmund the terminal area covers the FAF but not the
+  runway.
+- **Blanket blocks are resolved to their controller.** The export strips names
+  off some volumes, so what a controller calls *Langen* is recorded as
+  `AIRSPACE CLASS C`; logs now print both.
+- **Above the UIR floor, the regional centre is named** ("Reims"), not the
+  country ("France"). France only; frequencies untouched.
+- Cross-border **delegated airspace** is supported through an `airspace+.txt`
+  overlay (Slovenia upper, LFFF→LSAS).
+
+### New — arrival and approach
+
+- **Published holds.** ATC may issue a hold at a STAR fix — "hold at FIX as
+  published, maintain <level>, expect further clearance in N minutes" — read from
+  `earth_hold.dat`, blocking other clearances until it expires.
+- **Direct-to shortcuts on the STAR**, offered inside a window around the STAR
+  entry, and **connector STAR chaining** when the filed STAR ends away from the
+  approach.
+- **Approach selection gates on the destination METAR** (visibility, ceiling),
+  not on the weather at the aircraft.
+- **`FORCE ILS IF AVAILABLE` setting** — assigns the ILS whenever the arrival
+  runway publishes one, bypassing the per-airport filter and the RNAV-first
+  ranking.
+- **Non-RNAV approaches got their final segment back.** The CIFP reader had been
+  treating the approach-type letter as the segment marker, so every ILS, VOR, LOC
+  and NDB approach had no FAF and no missed-approach point.
+- Per-airport overrides in `airport+.json`: runway configuration, approach list,
+  controllers and frequencies, departure holds, SID initial climbs.
+
+### New — departure
+
+- **SID initial climb** read from the earliest constrained SID fix, with a
+  climb ladder driven by the airspace above rather than hardcoded per field.
+- **Lateral sector handoff during the SID climb**, probing the aircraft's own
+  volume rather than the stack above it.
+- **Omnidirectional departure phraseology** when no SID applies.
+- **Departures are no longer cleared into a neighbour's TMA**: the climb probe
+  now checks who owns the airspace ahead.
+
+### New — AFIS fields
+
+Fields with an information service and no control are modelled end to end: the
+IFR clearance comes from the overlying ACC on the ground, there is no line-up or
+takeoff clearance, self-announcements are acknowledged, and ATC never answers
+"unable". Classification was corrected to use "no Ground **and** no Approach
+frequency", which had been mislabelling Innsbruck.
+
+### New — phraseology and radio
+
+- **Full registration on first contact, abbreviated afterwards** — once per
+  flight, not once per frequency. Operator callsigns are never abbreviated.
+- **Multi-item clearances and cumulative readback**: several instructions in one
+  transmission, tracked per field slot with latest-wins.
+- **Speed control** — 250 kt below FL100 combined with the next fix's published
+  cap, including during the SID climb.
+- **SID/STAR designators are spoken properly**: `ABDI8R` → "ABDIL EIGHT ROMEO".
+- **Airport names, never ICAO codes**, in spoken labels ("Reims Prunay").
+- **Readback correction follows ICAO**: NEGATIVE, I SAY AGAIN, then the correct
+  version.
+- **Radio check** answers "reading you five".
+- QNH is stated only when a level is assigned in feet, never with a flight level.
+
+### New — ground
+
+- **Runway crossing clearance** offered at the Tower check-in, with a report when
+  vacated.
+- **GA parking stands**: taxi to a size- and type-appropriate stand read from
+  `apt.dat`, rather than an airline gate.
+- Post-landing "holding short" on Ground leads to taxi-to-parking, and the IFR
+  flight plan closes at the stand.
+
+### New — simulator integration
+
+- **Time acceleration is supported.** Every ATC timer used to run on a wall
+  clock, so speeding the sim up made the aircraft cover far more track miles per
+  timer second than intended. Timers now follow **sim time**, and `Log.txt`
+  reports the factor: `Sim time: running at 2.0x wall clock`.
+
+### Speech recognition
+
+- **Phase-aware context bias** — the vocabulary sent to the recogniser is trimmed
+  to the current flight phase, and fixes already behind the aircraft are dropped.
+- Anchors for the phrases that were being mangled ("report airborne", "say
+  again", landing calls), and SimBrief's pseudo-fixes excluded from the
+  departure vocabulary.
+- Note: the context-bias mechanism is **Voxtral-only**.
+
+### Performance
+
+- **The pre-top-of-descent chain was rebuilding every frame**, re-reading a 15 MB
+  navdata file, and consumed 106 ms of a 106 ms flight loop. It is now cached on
+  the route and approach identity. If you saw the simulator stutter in the
+  descent on an earlier beta, this is it.
+
+### Developer tooling
+
+- A **closed-loop REPL pilot** that obeys ATC — retunes, checks in, flies the
+  cleared levels — so an arrival can be replayed headless.
+- **OFP replay**: load a real saved flight plan and replay it.
+- Real-data test harnesses for AFIS, STAR tracking and the EDLW arrival.
+- Algorithm specifications in `docs/`, each carrying its version, date and the
+  build it was written against: `algorithm-descent.md`, `algorithm-airspace.md`,
+  `force-app-vectoring.md`, and `open-questions.md` for what is still undecided.
+
+### Not done, and known
+
+- **Pilot level requests** (request to maintain / higher / lower, with ATC
+  approving or refusing) — still owed before the public build.
+- **Vectors to the IAF** are decided and logged but not flown.
+- **Sector handoffs fire on crossing the boundary**, not a minute or two before
+  it as real ATC does.
+- **Departures are not covered by the terminal stack walk** — the German fix
+  applies to arrivals only.
+- Readback *verification* is deliberately not enforced, pending better speech
+  recognition.
+- Distances outside the descent planner are great-circle, not routed.
+- Upper-airspace regional naming is corrected for France only.
+
+---
+
 ## Unreleased — 4.4.0-beta
 
 Three flights drove this batch: **LFLP → LFMN** (2026-08-14 morning) and two
