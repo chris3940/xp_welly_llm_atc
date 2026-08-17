@@ -4,7 +4,7 @@ Specification of the airspace layer: how the plugin decides what a volume **is**
 which one it considers the aircraft to be **in**, and how it distinguishes a
 terminal area it is merely **transiting** from the destination's **own**.
 
-**Spec version:** 1.6 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
+**Spec version:** 1.7 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
 **Sources:** `Custom Data/airspaces/airspace.txt` (OpenAir) — authoritative;
 `Custom Data/Earth nav data/atc.dat` — fallback and controller names.
 Measured against AIRAC 2606 r1.
@@ -281,32 +281,31 @@ whose name carries a known city of that country. Restricting to controlled class
 matters: an unfiltered count drags in danger and restricted areas (`R-`, `P-`,
 `M-`) and reports a naming failure that does not exist.
 
+The count applies the classifier's **own** rule — `find("CTR")`, then `find("TMA")`,
+then `find("CTA")`, substring and in that order (`openair_db.cpp:197-202`) — so the
+table reports what the plugin actually sees, not what an independent reading of the
+names would suggest.
+
 | pays | TMA | CTA | CTR | sans type | typées |
 |---|---|---|---|---|---|
 | Espagne | 230 | 1 | 28 | 1 | **100 %** |
 | Autriche | 66 | 0 | 11 | 0 | **100 %** |
+| Pologne | 37 | 0 | 8 | 0 | **100 %** |
 | France | 115 | 39 | 20 | 2 | **99 %** |
 | Italie | 36 | 67 | 32 | 2 | **99 %** |
 | Suisse | 82 | 12 | 11 | 2 | **98 %** |
 | Benelux | 47 | 26 | 12 | 2 | **98 %** |
 | Royaume-Uni | 27 | 59 | 14 | 9 | **92 %** |
-| Pologne | 26 | 0 | 7 | 12 | 73 % |
 | **Allemagne** | **1** | **0** | **28** | **138** | **17 %** |
 
 **Germany is the sole outlier**, and the gap is not marginal — 138 controlled
-volumes with no type word, against 0 to 12 everywhere else. Its single typed TMA is
+volumes with no type word, against 0 to 9 everywhere else. Its single typed TMA is
 `FRIEDRICHSHAFEN TMA`, which is why the earlier "0 of 170" figure in version 1.5
 was slightly wrong: the sample list behind it omitted Friedrichshafen. The
 conclusion is unchanged, and the corrected count makes it sharper — one German
 field in the sample names its terminal area, and it is not one of the majors.
 
-Poland's 73 % is a **different, much smaller defect**: its upper terminal areas are
-named `GDANSK UTMA`, `KRAKOW UTMA SECTOR A`. `UTMA` is Upper TMA and is a terminal
-area, but the type test looks for the token `TMA` on a word boundary and `UTMA`
-does not match it. That is twelve volumes and a one-token fix, not a national
-failure. → defect **A4**.
-
-Two methods were tried and discarded before this one, both recorded so the figures
+Three methods were tried and discarded before this one, all recorded so the figures
 are not re-derived the same wrong way:
 
 1. **Attributing by polygon centroid to a country bounding box.** Contaminated by
@@ -316,6 +315,14 @@ are not re-derived the same wrong way:
 2. **Matching city names without filtering the class.** `ROMA` matched
    `ROMANESTI`, `SAINT-ROMAIN` and `REG PARK VENA DEL GESSO ROMAGN` — all
    restricted areas — and reported Italy at 8 %.
+3. **Testing the type word on a WORD boundary instead of as a substring.** This
+   reported Poland at 73 % and produced a defect entry (A4) claiming its upper
+   terminal areas — `GDANSK UTMA`, `KRAKOW UTMA SECTOR A` — went unrecognised.
+   The classifier uses `std::string::find`, so `UTMA` already contains `TMA` and
+   all six resolve to `AirspaceClass::TMA`; verified against the export itself,
+   and Poland is at 100 %. **There was no A4** — the defect was in the measuring
+   script. `tests/test_openair_db.cpp` now pins the behaviour, so a later
+   "tighten the match to whole words" cleanup cannot silently un-index them.
 
 A third trap, worth stating because it inverts a conclusion: **the export uses
 English city spellings.** There is no volume named `MILANO`; the Milan terminal
@@ -369,12 +376,6 @@ Germany between the CTA tops and the upper block — the plugin sees a hole. Eit
 an `airspace+.txt` overlay carries the missing volumes, or every rule that depends
 on terminal coverage has to tolerate its absence.
 
-**A4 — `UTMA` is not recognised as a type word.**
-Poland names its upper terminal areas `GDANSK UTMA`, `KRAKOW UTMA SECTOR A`. Upper
-TMA is a terminal area, but the type test matches `TMA` on a word boundary and
-`UTMA` fails it. Twelve volumes in the measured sample. Unlike A1 this is a token
-list, not a missing concept.
-
 **A3 — `on_destination_terminal()` returns true when it cannot tell.**
 Correct for the caller it was written for, wrong for any caller that reads the
 result as "suppress". It silenced every sector handoff of an entire replay once,
@@ -403,3 +404,4 @@ the code looked like at the time.
 | 1.4 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | exact STAR designators recovered from the flight logs: `ROMA3P`, `SALE3P`, `ABDI8R`, and `ADEM3A` for the failing case, each with its entry fix and spoken form |
 | 1.5 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | measured the naming across Germany — 0 of 170 volumes carry `TMA` or `CTA`, 149 carry no type word at all. The defect is national, not per-airport; other countries remain unmeasured |
 | 1.6 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | section 8.1 — the other eight countries measured. Germany is the sole outlier at 17 % typed against 92–100 % elsewhere; corrects 1.5's "0 of 170" (`FRIEDRICHSHAFEN TMA` exists); new defect A4 (`UTMA` unrecognised, Poland); records the three measurement traps — border contamination, unfiltered classes, and English city spellings in the export |
+| 1.7 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | **A4 withdrawn — it was never a defect.** The classifier matches the type word as a SUBSTRING, so `UTMA` already contains `TMA`; all six Polish upper terminal areas resolve to `TMA` in the export and Poland is at 100 %, not 73 %. The word-boundary test was in the measuring script alone. Table recounted using the classifier's own rule and order; a regression test now pins `UTMA`. Germany remains the only outlier |

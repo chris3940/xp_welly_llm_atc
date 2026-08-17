@@ -124,6 +124,26 @@ TEST_CASE_METHOD(Fixture, "openair: a bare class-letter volume IS indexed",
   CHECK(e.ac_class == AC::CTA);
 }
 
+TEST_CASE_METHOD(Fixture, "openair: UTMA is an Upper TMA, not an untyped volume",
+                 "[openair]") {
+  // Poland names its upper terminal areas `GDANSK UTMA`, `KRAKOW UTMA SECTOR A`
+  // -- 12 volumes in the 2026-08-17 country survey (algorithm-airspace.md 8.1).
+  // The name test is a SUBSTRING search, so `UTMA` already contains `TMA` and
+  // classifies correctly. That survey initially reported it as a defect (A4)
+  // because the measuring script matched `TMA` on a WORD boundary, which `UTMA`
+  // fails. The defect was in the script, not here -- this test pins the
+  // behaviour so a later "tighten the match to whole words" cleanup cannot
+  // silently un-index Poland's upper terminal areas.
+  const auto e = openair_db::find_enclosing(kLat, lon_of(10), 12000);
+  CHECK(e.name == "HOTEL UTMA SECTOR A");
+  CHECK(e.ac_class == AC::TMA);
+
+  // And it must be visible to the terminal query, which is what feeds the
+  // descent ladder's TMA rung.
+  const auto t = openair_db::terminal_tma(kLat, lon_of(10));
+  CHECK(t.name == "HOTEL UTMA SECTOR A");
+}
+
 // ── Geometry queries built on the index ───────────────────────────────
 
 TEST_CASE_METHOD(Fixture, "openair: altitude band is respected", "[openair]") {

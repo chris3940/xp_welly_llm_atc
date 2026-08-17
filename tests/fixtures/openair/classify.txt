@@ -15,6 +15,9 @@
 *   lon 6-7  R-FOXTROT (RANGE)    AC R     -> OTHER    NOT indexed  (correct)
 *   lon 7-8  DELEGATED BY AAAA TO BBBB     AC C -> CTA indexed via delegation marker
 *   lon 8-9  GOLF TMA (stacked)   two bands, for the lowest-floor selection
+*   lon 10-11 HOTEL UTMA SECTOR A AC C     -> TMA      Upper TMA (Polish spelling)
+*            (lon 9-10 is left EMPTY on purpose -- it is the openair gap that
+*             tests/test_openair_atcdat_fallback.cpp needs to reach atc.dat)
 *
 AC CTR
 AN ALPHA CTR
@@ -105,3 +108,12 @@ DP 40:00:00 N 008:00:00 E
 DP 41:00:00 N 008:00:00 E
 DP 41:00:00 N 009:00:00 E
 DP 40:00:00 N 009:00:00 E
+*
+AC C
+AN HOTEL UTMA SECTOR A
+AL 9500 MSL
+AH 19500 MSL
+DP 40:00:00 N 010:00:00 E
+DP 41:00:00 N 010:00:00 E
+DP 41:00:00 N 011:00:00 E
+DP 40:00:00 N 011:00:00 E
