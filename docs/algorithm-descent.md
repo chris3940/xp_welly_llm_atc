@@ -3,7 +3,7 @@
 Specification of the IFR arrival descent: which altitude ATC gives, and the moment
 it decides to give it.
 
-**Spec version:** 1.1 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
+**Spec version:** 1.2 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta (`d7c3f64`, pkg 87)
 **Reference slope:** `kDescentSlopeFtPerNm = 265 ft/NM` = 2.5°
 
 All figures below are measured on the DIK → EDLW replay of the flown route, taken
@@ -185,6 +185,31 @@ the heuristic with the published-constraint walk the ladder already performs wou
 remove the collision.
 
 **D2 — the ladder plans on the routed track even when the aircraft will be vectored.**
+*Measured 2026-08-17, and the error has two signs, not one.* Every descent
+clearance now logs all three distances:
+
+```
+IFR descent: distances to DOR -- routed 64.4, direct 47.3 NM (routed is +17.1)
+             | gradient routed 123, direct 168 ft/NM
+```
+
+The +17.1 NM is the published reversal a vectored aircraft never flies — at EDLW
+the ILS 06 transition runs overhead the field (`DOR` is the field VOR, 0.9 NM
+from the threshold) and back out to `KOLOT` 6.6 NM southwest. Routed therefore
+**overstates** while the descent is planned, so it fires late and is then
+genuinely steep. Once on a downwind leg the opposite happens: every remaining fix
+falls more than 100° off the nose, is skipped, and routed collapses to the
+straight line, **understating** the track and wording "expedite" with room to
+spare. Nothing consumes the figures yet — they are logged so the next flight
+settles which one dominates.
+
+**D4 — the vectored descent held one level to the FAF.** *Fixed 2026-08-17.* A
+vectoring leg was cleared to `FAF + 2000`, issued once and never revisited, so
+the aircraft crossed 1.6 NM from the FAF at 4461 ft with the 3° path at 3000 —
+1460 ft high. Leg levels are now derived from the path itself (`FAF alt + s×318
+− 300`), floored at the FAF crossing altitude and by the MSA, bounded by what the
+reference gradient reaches over the **vector track**, and stepped down as the
+geometry changes. See `force-app-vectoring.md` §Altitudes.
 The pre-TOD calculation takes the shorter of routed and direct when vectoring is
 certain; the ladder always uses the routed distance. The two differ by ~20 NM on this
 arrival, so every rung comes later than it should. → `open-questions.md`, Q1.
@@ -208,3 +233,4 @@ manoeuvre is specified in `force-app-vectoring.md`.*
 |---|---|---|---|
 | 1.0 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | first issue: profile view, the two mechanisms, target and rung selection, steep wording, log format |
 | 1.1 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | corrected the TMA rung at EDLW — it is absent because `terminal_tma` returns 0, not because the ceiling is low |
+| 1.2 | 2026-08-17 | v4.4.0-beta (`d7c3f64`, pkg 87) | D2 measured on a real flight — routed overstates by 17.1 NM before the vectors and collapses to the straight line once on downwind, so the error has two signs; all three distances now logged at every clearance. New D4: the vectored descent held one level to the FAF (1460 ft high at 1.6 NM), now derived from the glide path and stepped |
