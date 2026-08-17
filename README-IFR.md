@@ -24,7 +24,7 @@ upstream [README.md](README.md).
 | **Departure** | Progressive climb ladder shaped by the airspace above the field, with a departure hold where the local procedure calls for one, then handoff to the next sector. |
 | **En route** | Sector handoffs driven by the airspace boundaries actually crossed, each new controller acknowledging the pilot's check-in and preserving the previous clearance. |
 | **Descent** | Top-of-descent negotiation, descent on the filed STAR with the published step-downs, occasional published hold. |
-| **Approach** | Approach selected against the destination weather, cleared at the initial approach fix, radar vectors to final where a reversal is needed, then Tower. |
+| **Approach** | Approach selected against the destination weather, cleared at the initial approach fix or positioned onto the final approach course by radar vectors, then Tower. |
 
 **Uncontrolled (AFIS) aerodromes are handled as such.** At a field whose radio
 service is "Information" rather than a Tower, there is no line-up or take-off
@@ -77,16 +77,19 @@ Representative test routes:
 | LIMF → LFLP | cross-border from Italy, high-altitude stepped descent |
 | LFLU → LFLP | **departure from an AFIS field** ("Information", no Tower), and a sector missing from the airspace export, supplied by the `airspace+.txt` overlay |
 | LFLP → LFQA | **arrival at an AFIS field**, no published STAR |
-| LFLP → EDLW | the long leg: four ACC sectors across four countries, a filed step-climb profile, and an **ILS** arrival at a field with no approach unit of its own |
+| LFLP → EDLW | the long leg: four ACC sectors across four countries, a filed step-climb profile, and an **ILS** arrival at a field whose terminal airspace belongs to a neighbouring unit (Duesseldorf) and is not named as such in the airspace export |
 
 The phraseology, the airspace assumptions and the tuning all reflect those
 flights.
 
 ### Data dependencies
 
-- **A Navigraph subscription is effectively required.** SIDs, STARs and approaches
-  come from the CIFP; sector boundaries come from the OpenAir airspace export.
-  Without current data the plugin will pick wrong procedures or fall silent.
+- **A Navigraph subscription is effectively required for PROCEDURES.** SIDs, STARs
+  and approaches come from the CIFP, and without current data the plugin will pick
+  wrong procedures or fall silent. **Airspace is no longer in that category**:
+  sector boundaries come from the OpenAir export when it is present, and where it
+  is silent the same query is retried against X-Plane's own `atc.dat`, so
+  controllers and handoffs still resolve without a subscription.
 - **Sector handoffs are only as good as the OpenAir coverage.** Where a country's
   export omits a volume — upper airspace is the usual gap — no controller
   resolves and the handoff does not happen. Gaps are patched by hand in
@@ -95,6 +98,14 @@ flights.
   vertical hole above its low terminal volumes; the plugin then falls back to the
   destination field's own published approach frequency so the arrival still gets
   a controller.
+- **Some exports omit the airspace TYPE altogether.** Germany names almost no
+  volume `TMA` or `CTA` — 17 % of its controlled volumes carry a type word,
+  against 92-100 % in the eight other countries measured — so a German arrival
+  had no terminal area at all. The terminal shelf is now derived from the shape of
+  the vertical stack instead of from the name. It is **enabled per destination**
+  (`terminal_stack_walk_icao_prefixes` in the IFR `flight_rules.json`, currently
+  `ED` and `LI`), applies to **arrivals only**, and the same gap exists at Turin
+  inside an otherwise correctly-named Italy.
 - **Some data is hand-maintained, per airport, in `Resources/airport+.json`** —
   runway pairings, weather-gated approach selection, controllers missing from
   `atc.dat`, departure holds, published initial-climb altitudes. Airports without
@@ -126,11 +137,30 @@ flights.
   honoured.** The climb floor is read from the first constrained fix of the SID;
   a later, higher minimum can be crossed below its published level. Fixing this
   needs a continuous per-fix floor tracked along the route.
+- **Radar vectors to final are OFF by default and incomplete.** Two settings
+  control them: `ALLOW VECTORING` (ATC may choose) and `FORCE APP VECTORING`
+  (always, for practice). With both unticked nothing changes. Known boundaries:
+  - **A sector MSA or grid MORA must resolve**, otherwise ATC refuses to vector
+    and the panel says `DISABLED: NO MSA`. No leg level is ever invented.
+  - **Vectors to the IAF are decided and logged but not flown.** Where terrain or
+    a curved final rule out vectors to final, the arrival keeps the published
+    procedure.
+  - Vectoring does not hand off to Tower by itself, and the localiser
+    re-intercept path has never been exercised in flight.
 - **No vertical-profile check.** The plugin verifies lateral alignment on the
   approach and compliance with the last cleared level, but never that the
   aircraft is on the published glide/descent path.
-- **En-route and top-of-descent distances are great-circle**, not routed. Trigger
-  points are therefore approximate on a route with significant dog-legs.
+- **Top-of-descent distances follow the routed path** — leg by leg along the
+  route, the STAR in published order (loops included), then the approach — but
+  **every other distance is great-circle**, so triggers outside the descent
+  planner stay approximate on a route with significant dog-legs.
+- **The routed path is the wrong measure once the aircraft is vectored**, and it
+  errs in both directions: before the vectors start it includes procedure legs the
+  vectors will delete (at Dortmund the ILS 06 transition runs overhead the field
+  and back out to the FAF), and once on a downwind leg it collapses to the
+  straight line. Both distances and the resulting gradients are printed at every
+  descent clearance in `Log.txt` so the effect is visible; neither is corrected
+  yet.
 
 ### Phraseology and speech
 
