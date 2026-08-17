@@ -10042,7 +10042,13 @@ static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
 // 5.1 NM, so the feasibility test abandoned first). Real flight 2026-08-17, and
 // the user's own words: "c'est avant l'interception de l'axe qu'il faut donner
 // l'alignement final". [C. P. Potter]
-static constexpr double kVecLeadNm        = 2.5;  // |y| at which the axis vector is given
+// The lead is a TIME, not a distance -- see vec_lead_nm(). 60 s is the usual
+// order for a radar intercept: enough for the pilot to read back, turn, and let
+// the localiser capture, without clearing the approach so early that the vector
+// stops being one.
+static constexpr double kVecLeadSecs      = 60.0;
+static constexpr double kVecLeadMinNm     = 1.0;  // floor, slow aircraft
+static constexpr double kVecLeadMaxNm     = 4.0;  // ceiling, fast aircraft
 static constexpr double kVecFinalNm       = 6.0;  // aimed length of the final
 static constexpr double kVecDisplaceDeg   = 40.0; // opening angle to build the offset
 // Slack kept when deciding a direct intercept is flyable. Deliberately SMALL: it
@@ -10074,6 +10080,32 @@ static void vec_frame(const xplane_context::XPlaneContext &ctx,
 // aligned segment. This IS the feasibility rule.
 static double vec_required_s(double y) {
   return kVecAlignNm + std::fabs(y) / std::tan(kVecInterceptDeg * M_PI / 180.0);
+}
+
+// Lateral distance from the axis at which the FINAL ALIGNMENT vector is given.
+//
+// It scales with the SPEED OF THE APPROACH, because the quantity that matters is
+// how long the aircraft still has before it reaches the axis, not how far it is
+// from it (user, 2026-08-17). Closing at 30 degrees, a jet at 250 kt eats a
+// given lateral gap in half the time a turboprop at 130 kt does, and must
+// therefore be turned onto the course from further out.
+//
+//   closure across the axis = groundspeed * sin(angle between heading and course)
+//   lead distance           = closure * kVecLeadSecs
+//
+// The ACTUAL heading is used, not the design intercept angle: an aircraft that
+// is closing shallowly crosses slowly and can be left to run closer in. The
+// angle is floored so a near-parallel track cannot collapse the lead to zero,
+// and the result is clamped so neither a hold-speed nor a high-speed descent
+// produces an absurd figure. [C. P. Potter]
+static double vec_lead_nm(const xplane_context::XPlaneContext &ctx,
+                          double course_deg) {
+  const double gs = std::max(80.0, static_cast<double>(ctx.groundspeed_kts));
+  double ang = heading_error_deg(ctx.heading_mag, course_deg);
+  ang = std::max(5.0, std::min(90.0, ang));
+  const double closure = gs * std::sin(ang * M_PI / 180.0);
+  const double lead = closure * kVecLeadSecs / 3600.0;
+  return std::max(kVecLeadMinNm, std::min(kVecLeadMaxNm, lead));
 }
 
 // Track still to fly to the FAF under vectoring, from the current (s, y).
@@ -10375,7 +10407,8 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   // abandon a manoeuvre that is one transmission from complete -- which is
   // exactly what happened at 1.5 NM off axis, 5.1 NM before the FAF, and drew
   // "resume own navigation direct KOLOT" for a fix lying dead ahead.
-  const bool aligning = std::fabs(y) <= kVecLeadNm && s >= kVecAlignNm;
+  const double lead_nm = vec_lead_nm(ctx, course);
+  const bool aligning = std::fabs(y) <= lead_nm && s >= kVecAlignNm;
   if (settled && !aligning &&
       (s_vtf_leg == VecLeg::Base || s_vtf_leg == VecLeg::Intercept)) {
     if (s < vec_required_s(y) - 0.5) {
@@ -10506,15 +10539,16 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     // established by kVecAlignNm, so the governing rule is unchanged; only the
     // moment the vector is transmitted moves earlier, which is where a
     // controller actually transmits it.
-    if (std::fabs(y) <= kVecLeadNm && s >= kVecAlignNm) {
+    if (std::fabs(y) <= lead_nm && s >= kVecAlignNm) {
       s_vtf_leg = VecLeg::Axis;
       s_vtf_hdg = course;
       s_vtf_prev_y = y;
       s_vtf_recut_secs = 0.0f;
       s_vtf_nudged = false;
       logging::info("[vector] alignment vector at |y|=%.1f NM, %.1f NM to FAF "
-                    "(lead %.1f, rule wants %.0f)",
-                    std::fabs(y), s, kVecLeadNm, kVecAlignNm);
+                    "(lead %.1f NM for %.0f kt, rule wants %.0f)",
+                    std::fabs(y), s, lead_nm,
+                    static_cast<double>(ctx.groundspeed_kts), kVecAlignNm);
       const int want = faf.alt_ft > 0 ? faf.alt_ft : 3000;
       const int lvl = vec_leg_altitude_ft(ctx, dest, want);
       std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
