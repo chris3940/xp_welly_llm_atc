@@ -4,7 +4,7 @@ Specification of the airspace layer: how the plugin decides what a volume **is**
 which one it considers the aircraft to be **in**, and how it distinguishes a
 terminal area it is merely **transiting** from the destination's **own**.
 
-**Spec version:** 1.8 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
+**Spec version:** 1.9 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
 **Sources:** `Custom Data/airspaces/airspace.txt` (OpenAir) — authoritative;
 `Custom Data/Earth nav data/atc.dat` — fallback and controller names.
 Measured against AIRAC 2606 r1.
@@ -400,12 +400,39 @@ assigned destination so it is off for the whole cruise and off everywhere else.
 Measured on the export, `enc` in the IFR REPL printing both answers:
 
 ```
-EDLW  name (none)                     ->  walk DORTMUND 2000-4500
-LIMF  name (none)                     ->  walk MILAN CTA ZONE 24 3500-9500
+EDLW/KOLOT  name (none)               ->  walk DUESSELDORF/COLOGNE-BONN 1500-10000
+LIMF        name (none)               ->  walk MILAN CTA ZONE 24 3500-9500
 LIMC  name MILAN TMA ZONE 1 LOMBARDIA ->  walk identical
 LFMN  name NICE TMA SECTOR 1          ->  walk identical
 LFLP  name CHAMBERY TMA SECTOR 1      ->  walk identical
 ```
+
+### The anchor decides the answer
+
+The walk alone was not enough, and the first EDLW result was wrong. Asked over
+the **field** it returns `DORTMUND` 2000-4500 -- a sector overlapping the control
+zone (floor 2000 beneath the CTR's 2500 ceiling), not a terminal area. Its
+ceiling would have set the terminal top at 4500 and cleared an arrival to
+**4000 ft** to enter the terminal area, 5500 ft low.
+
+Asked over the **FAF** it returns `DUESSELDORF/COLOGNE-BONN` 1500-10000 -- class
+C, topping FL100 as published, one volume covering the whole band.
+
+```
+EDLW field          KOLOT (FAF)
+0-2500   CTR        0-2500   CTR
+2000-4500 DORTMUND  1500-10000 DUESSELDORF/COLOGNE-BONN   <- the TMA
+---- hole ----      6500-10000 DUESSELDORF ... Q
+10000+ CLASS C      10000+ CLASS C
+```
+
+The Düsseldorf TMA covers the FAF but **not the field**. What encloses the field
+between 4500 and 10 000 ft is the class E blanket, which this export does not
+carry (defect A2) -- so the hole and the wrong answer have the same cause, and
+the field is simply the wrong place to ask. This is cause 1 of Q3, now fixed.
+
+The anchor moved **only** where the stack walk is enabled, so every field whose
+export names its TMAs keeps the field anchor it was validated on.
 
 **LIMF Turin is the find.** Italy is 99 % typed overall, yet Turin has no
 TMA-named volume overhead — its terminal airspace is `MILAN CTA ZONE 24 DON
@@ -460,5 +487,6 @@ the code looked like at the time.
 | 1.4 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | exact STAR designators recovered from the flight logs: `ROMA3P`, `SALE3P`, `ABDI8R`, and `ADEM3A` for the failing case, each with its entry fix and spoken form |
 | 1.5 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | measured the naming across Germany — 0 of 170 volumes carry `TMA` or `CTA`, 149 carry no type word at all. The defect is national, not per-airport; other countries remain unmeasured |
 | 1.6 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | section 8.1 — the other eight countries measured. Germany is the sole outlier at 17 % typed against 92–100 % elsewhere; corrects 1.5's "0 of 170" (`FRIEDRICHSHAFEN TMA` exists); new defect A4 (`UTMA` unrecognised, Poland); records the three measurement traps — border contamination, unfiltered classes, and English city spellings in the export |
+| 1.9 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | the destination terminal query anchors on the FAF where the walk is enabled (`9d75c6a`). Corrects 1.8, which reported `DORTMUND 2000-4500` as the EDLW result: that volume overlaps the control zone and tops 5500 ft below the real terminal area. Over the FAF the answer is `DUESSELDORF/COLOGNE-BONN` 1500-10000, class C to FL100. Resolves cause 1 of Q3 |
 | 1.8 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | section 11bis — the terminal stack walk, shipped (`eee4c8b`). Guard thresholds measured rather than assumed; the intuitive thickness and extent caps degrade the result and were dropped. Off by default and gated per destination on an ICAO-prefix allowlist. Records LIMF Turin as a second failing field inside a 99 %-typed country — found only because arrivals were probed, never flown |
 | 1.7 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | **A4 withdrawn — it was never a defect.** The classifier matches the type word as a SUBSTRING, so `UTMA` already contains `TMA`; all six Polish upper terminal areas resolve to `TMA` in the export and Poland is at 100 %, not 73 %. The word-boundary test was in the measuring script alone. Table recounted using the classifier's own rule and order; a regression test now pins `UTMA`. Germany remains the only outlier |
