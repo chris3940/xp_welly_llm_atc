@@ -6783,12 +6783,23 @@ static bool on_destination_terminal(const xplane_context::XPlaneContext &ctx) {
   // CTR (0-4000) as the innermost over LFLP -- its fragment "ANNECY" != the
   // approach TMA "CHAMBERY", which false-blocked the clearance in-sim (LFLP
   // 2026-07-17). terminal_tma_ceiling() is TMA-class only (skips the CTR).
-  const auto anc = dest_terminal_anchor(ctx, dpos);
-  const int tma_ceil = openair_db::terminal_tma_ceiling(anc.first, anc.second,
+  // NO FAF anchor here, and this is not an oversight. This function COMPARES two
+  // probes -- one at the destination, one at the aircraft -- and moving only one
+  // of them breaks the comparison by construction. Anchoring the destination on
+  // the FAF made it read DUESSELDORF/COLOGNE-BONN at KOLOT against DORTMUND under
+  // an aircraft on final, so it returned false and the approach clearance never
+  // fired on the whole EDLW arrival (real flight 2026-08-17, build 86; build 85
+  // with the field anchor cleared the approach normally). Measured fragments:
+  //   field  @4000 ft -> DORTMUND SECTOR B          -> "DORTMUND"
+  //   FAF    @9500 ft -> DUESSELDORF/COLOGNE-BONN Q -> "DUESSELDORF/..."
+  //   acft   @1088 ft -> DORTMUND CTR               -> "DORTMUND"
+  // The FAF anchor belongs where a terminal CEILING is read (the descent ladder,
+  // descend-to-enter), never where two positions are compared. [C. P. Potter]
+  const int tma_ceil = openair_db::terminal_tma_ceiling(dpos.first, dpos.second,
                                                         dest_stack_walk_ok());
   const int probe = (tma_ceil > 1500) ? tma_ceil - 500 : 3000;
   const openair_db::AirspaceEntry dest_tma =
-      openair_db::find_enclosing(anc.first, anc.second, probe);
+      openair_db::find_enclosing(dpos.first, dpos.second, probe);
   const openair_db::AirspaceEntry acft_tma = openair_db::find_enclosing(
       ctx.latitude, ctx.longitude, openair_alt(ctx));
   if (dest_tma.name.empty() || acft_tma.name.empty())
@@ -6822,12 +6833,13 @@ static bool dest_terminal_tma_below(const xplane_context::XPlaneContext &ctx) {
   if (dpos.first == 0.0 && dpos.second == 0.0)
     return false;
   // Destination approach-controller fragment (same probe as on_destination_terminal).
-  const auto anc = dest_terminal_anchor(ctx, dpos);
-  const int dceil = openair_db::terminal_tma_ceiling(anc.first, anc.second,
+  // Field anchor, for the same reason as on_destination_terminal above: this too
+  // compares a destination probe against one under the aircraft.
+  const int dceil = openair_db::terminal_tma_ceiling(dpos.first, dpos.second,
                                                      dest_stack_walk_ok());
   const int dprobe = (dceil > 1500) ? dceil - 500 : 3000;
   const openair_db::AirspaceEntry dest_tma =
-      openair_db::find_enclosing(anc.first, anc.second, dprobe);
+      openair_db::find_enclosing(dpos.first, dpos.second, dprobe);
   if (dest_tma.name.empty())
     return false;
   // Terminal TMA directly under the AIRCRAFT -- only meaningful while ABOVE its ceiling
@@ -10021,6 +10033,16 @@ static constexpr double kVecAlignNm       = 3.0;  // aligned before the FAF
 static constexpr double kVecInterceptDeg  = 30.0; // max intercept angle
 static constexpr double kVecFloorNm       = 15.0; // below this, do not start
 static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
+// Lateral offset at which the FINAL ALIGNMENT vector is given. A controller does
+// not wait for the aircraft to be ON the localiser before assigning the approach
+// course -- he gives it while the aircraft is still CLOSING, so the turn and the
+// capture happen together. Waiting for kVecEstabNm (0.6 NM) means waiting to be
+// on the axis already, and it is why the manoeuvre survived by luck on build 85
+// (|y| reached 0.6 with 4.6 NM to spare) and died on build 86 (|y| was 1.5 at
+// 5.1 NM, so the feasibility test abandoned first). Real flight 2026-08-17, and
+// the user's own words: "c'est avant l'interception de l'axe qu'il faut donner
+// l'alignement final". [C. P. Potter]
+static constexpr double kVecLeadNm        = 2.5;  // |y| at which the axis vector is given
 static constexpr double kVecFinalNm       = 6.0;  // aimed length of the final
 static constexpr double kVecDisplaceDeg   = 40.0; // opening angle to build the offset
 // Slack kept when deciding a direct intercept is flyable. Deliberately SMALL: it
@@ -10347,7 +10369,15 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   // Judging the geometry before the turn is established makes ATC abandon the
   // very manoeuvre it has just ordered. [C. P. Potter]
   const bool settled = heading_error_deg(ctx.heading_mag, s_vtf_hdg) < 15.0;
-  if (settled && (s_vtf_leg == VecLeg::Base || s_vtf_leg == VecLeg::Intercept)) {
+  // Within the lead distance the aircraft is close enough that the ALIGNMENT
+  // vector is the right answer, not an abandon: the transition below turns it
+  // onto the approach course and clears it. Testing feasibility here would
+  // abandon a manoeuvre that is one transmission from complete -- which is
+  // exactly what happened at 1.5 NM off axis, 5.1 NM before the FAF, and drew
+  // "resume own navigation direct KOLOT" for a fix lying dead ahead.
+  const bool aligning = std::fabs(y) <= kVecLeadNm && s >= kVecAlignNm;
+  if (settled && !aligning &&
+      (s_vtf_leg == VecLeg::Base || s_vtf_leg == VecLeg::Intercept)) {
     if (s < vec_required_s(y) - 0.5) {
       s_vtf_leg = VecLeg::Refused;
       logging::info("[vector] cannot align %.0f NM before FAF %s (s=%.1f needs "
@@ -10472,15 +10502,19 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   }
 
   if (s_vtf_leg == VecLeg::Intercept) {
-    if (std::fabs(y) <= kVecEstabNm) {
+    // BEFORE the axis, not on it -- see kVecLeadNm. Still requires room to be
+    // established by kVecAlignNm, so the governing rule is unchanged; only the
+    // moment the vector is transmitted moves earlier, which is where a
+    // controller actually transmits it.
+    if (std::fabs(y) <= kVecLeadNm && s >= kVecAlignNm) {
       s_vtf_leg = VecLeg::Axis;
       s_vtf_hdg = course;
       s_vtf_prev_y = y;
       s_vtf_recut_secs = 0.0f;
       s_vtf_nudged = false;
-  s_vtf_abandoned = false;
-  s_vtf_prev_y = 0.0;
-  s_vtf_recut_secs = 0.0f;
+      logging::info("[vector] alignment vector at |y|=%.1f NM, %.1f NM to FAF "
+                    "(lead %.1f, rule wants %.0f)",
+                    std::fabs(y), s, kVecLeadNm, kVecAlignNm);
       const int want = faf.alt_ft > 0 ? faf.alt_ft : 3000;
       const int lvl = vec_leg_altitude_ft(ctx, dest, want);
       std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
