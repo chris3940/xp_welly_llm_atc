@@ -328,6 +328,9 @@ static std::string resolve_approach_iaf(const xplane_context::XPlaneContext &ctx
 static void build_sid_route_table(const xplane_context::XPlaneContext &ctx); // departure half of the route table
 static std::string approach_clearance_phrase(
     const xplane_context::XPlaneContext &ctx); // "RNAV Zulu approach runway 08"; defined near poll_approach
+// "'AIRSPACE CLASS C' (Langen)" -- the OpenAir name a log line would otherwise show
+// alone, plus the controller it actually resolves to. Defined with the sector helpers.
+static std::string volume_label(const openair_db::AirspaceEntry &enc);
 // Fix positions resolved with the airport as the proximity reference -- see the
 // definition for why every lookup must carry one.
 static std::unordered_map<std::string, std::pair<double, double>>
@@ -4294,7 +4297,7 @@ bool poll_departure_handoff(const xplane_context::XPlaneContext &ctx,
   logging::info(
       "IFR departure handoff: openair enc='%s' class=%d floor=%dft ceil=%dft at "
       "%.0fft MSL pos=%.4f,%.4f (report_alt=%d MSL, reported=%d)",
-      enc.name.c_str(), static_cast<int>(enc.ac_class), enc.floor_ft,
+      volume_label(enc).c_str(), static_cast<int>(enc.ac_class), enc.floor_ft,
       enc.ceiling_ft, ctx.altitude_ft_msl, ctx.latitude, ctx.longitude, report_alt,
       s_departure_level_reported ? 1 : 0);
 
@@ -6785,6 +6788,27 @@ static bool dest_terminal_tma_below(const xplane_context::XPlaneContext &ctx) {
 // lower, differently-controlled TMA; 0 when there is no such boundary (same
 // controlling unit, no inner TMA, or outside all airspace / ACC). Guards Geneva
 // from clearing "descend 6500" into the Chambery TMA (LFLP 2026-07-15).
+// A volume's OpenAir NAME is not what the pilot hears: the export strips names off
+// the blanket blocks, so the same airspace the controller correctly calls "Langen"
+// is logged as "AIRSPACE CLASS C". Reading such a line, one concludes the plugin
+// does not know who owns the volume -- when it does, through
+// resolve_sector_controller(). A diagnostic that reads differently from the
+// behaviour it describes is worse than no diagnostic (user, 2026-08-17).
+//
+// Every log line naming a volume goes through this, so it always carries both:
+//     'AIRSPACE CLASS C' (Langen)
+// -- the OpenAir name first, because that is what the data says, then the name the
+// controller is actually given, which comes from atc.dat.
+static std::string volume_label(const openair_db::AirspaceEntry &enc) {
+  std::string out = "'" + (enc.name.empty() ? std::string("(none)") : enc.name) + "'";
+  std::string lbl;
+  float f = 0.0f;
+  if (!enc.name.empty() &&
+      resolve_sector_controller(enc, /*terminal=*/false, &lbl, &f) && !lbl.empty())
+    out += " (" + lbl + ")";
+  return out;
+}
+
 static int sector_transfer_floor_ft(const xplane_context::XPlaneContext &ctx,
                                     int target_ft) {
   if (!openair_db::ready() || target_ft <= 0)
@@ -6819,9 +6843,9 @@ static int sector_transfer_floor_ft(const xplane_context::XPlaneContext &ctx,
   constexpr int kMaxTerminalThicknessFt = 15000;
   if (lower.ceiling_ft > kMaxTerminalCeilingFt ||
       (lower.ceiling_ft - lower.floor_ft) > kMaxTerminalThicknessFt) {
-    logging::debug("[DBG] transfer-floor clamp IGNORED: '%s' %d-%d ft is enroute "
+    logging::debug("[DBG] transfer-floor clamp IGNORED: %s %d-%d ft is enroute "
                    "structure, not a terminal area",
-                   lower.name.c_str(), lower.floor_ft, lower.ceiling_ft);
+                   volume_label(lower).c_str(), lower.floor_ft, lower.ceiling_ft);
     return 0;
   }
   return lower.ceiling_ft; // inner controller owns everything below this
@@ -6871,7 +6895,7 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
   logging::info(
       "IFR arrival handoff: openair enc='%s' class=%d floor=%dft ceil=%dft"
       " at %.0fft MSL pos=%.4f,%.4f",
-      enc.name.c_str(), static_cast<int>(enc.ac_class),
+      volume_label(enc).c_str(), static_cast<int>(enc.ac_class),
       enc.floor_ft, enc.ceiling_ft,
       ctx.altitude_ft_msl, ctx.latitude, ctx.longitude);
 
@@ -9216,7 +9240,7 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
       new_mhz = f;
       // Diagnostic: which openair sector produced this enroute controller.
       logging::info("[acc] openair sector '%s' (class %d) -> %s %.3f MHz (avoid %u)",
-                    enc.name.c_str(), static_cast<int>(enc.ac_class),
+                    volume_label(enc).c_str(), static_cast<int>(enc.ac_class),
                     new_label.c_str(), new_mhz, avoid_khz);
     }
   }
