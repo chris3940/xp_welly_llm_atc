@@ -47,7 +47,7 @@ LINT_EXCLUDE := $(LINT_EXCLUDE_WIN) src/audio/audio_input_coreaudio.cpp
 endif
 LINT_SOURCES := $(filter-out $(LINT_EXCLUDE),$(wildcard src/main.cpp src/*/*.cpp))
 
-.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl test test-unit test-scenarios test-afis test-stars ci-remote win-artifact skunkcrafts
+.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay test test-unit test-scenarios test-afis test-stars ci-remote win-artifact skunkcrafts
 
 .DEFAULT_GOAL := help
 
@@ -455,6 +455,24 @@ _DIST_BASE    := xp_wellys_atc-$(DIST_PLATFORM)-$(DIST_VERSION)-$(DIST_GIT_HASH)
 DIST_BUILD_N  := $(shell m=$$(for f in dist/xp_wellys_atc-$(DIST_PLATFORM)-$(DIST_VERSION)-*.$(DIST_EXT); do [ -e "$$f" ] || continue; b=$${f%.$(DIST_EXT)}; echo $${b##*-}; done | sort -n | tail -1); echo $$(( $${m:-0} + 1 )))
 DIST_NAME     := $(_DIST_BASE)-$(DIST_BUILD_N)
 DIST_STAGE    := dist/$(DIST_NAME)/xp_wellys_atc
+
+# Closed-loop replay of the DIK -> EDLW vectored arrival: the REPL flies it end
+# to end with a driver that obeys ATC, so an arrival change is judged on what the
+# ENGINE says, not on a reimplementation of its formulas in a scratch script.
+#
+# THE GATE: run this before packaging any change to the arrival, the descent or
+# the vectoring. On 2026-08-17 six vectoring changes were packaged and flown
+# without it; the replay found the defects in one run afterwards -- the last
+# vector assigning the axis course instead of an intercept, and "established"
+# declared on heading alone. Both were visible in this output. [C. P. Potter]
+replay: ifr-repl
+	@echo "=== Replay: DIK -> EDLW, forced vectoring, ILS ==="
+	@XP_ATC_FORCE_ILS=1 XP_ATC_FORCE_VECTORING=1 \
+	    ATC_RAW=build/replay-raw.log \
+	    python3 testscripts/ifr_real/fly.py testscripts/ifr_real/route_dik_edlw.json
+	@echo
+	@echo "--- vectoring trace (build/replay-raw.log) ---"
+	@grep -h "\[vector\]" build/replay-raw.log | grep -v "turn word" || true
 
 package:
 	@if [ ! -f "build/xp_wellys_atc.xpl" ]; then \
