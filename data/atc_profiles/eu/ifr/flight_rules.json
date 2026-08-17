@@ -14,7 +14,9 @@
     "approach_entry_alt_ft": 8000,
     "sid_handoff_min_alt_ft": 12000,
     "_comment_tower_report": "EUROCONTROL: Tower keeps the aircraft after takeoff, the takeoff clearance ends with 'report passing 3000 feet', and hands to Approach/Departure only once passing that height AGL -- then APP/DEP gives FL110. Set 0 for legacy immediate transfer (APP contact embedded in the takeoff clearance).",
-    "tower_report_alt_ft": 3000
+    "tower_report_alt_ft": 3000,
+    "_comment_stack_walk": "ICAO prefixes whose ARRIVALS may use the terminal stack walk when no volume over the field is NAMED a TMA. Germany omits the type word on 83% of its controlled volumes (no terminal shelf at all on any ED** arrival); LI** is here for Turin, whose terminal airspace is named MILAN CTA ZONE 24 DON BOSCO. Empty list = never runs. See docs/algorithm-airspace.md section 8.1.",
+    "terminal_stack_walk_icao_prefixes": ["ED", "LI"]
   },
 
   "intent_preconditions": {

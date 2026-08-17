@@ -16,6 +16,9 @@
 *   lon 7-8  DELEGATED BY AAAA TO BBBB     AC C -> CTA indexed via delegation marker
 *   lon 8-9  GOLF TMA (stacked)   two bands, for the lowest-floor selection
 *   lon 10-11 HOTEL UTMA SECTOR A AC C     -> TMA      Upper TMA (Polish spelling)
+*   lon 11-12 INDIA / INDIA SECTOR B / INDIA CENTER SECTOR -- the GERMAN shape:
+*            a CTR-class zone with an untyped shelf on top and an untyped
+*            enroute block above. Only the stack walk can resolve it.
 *            (lon 9-10 is left EMPTY on purpose -- it is the openair gap that
 *             tests/test_openair_atcdat_fallback.cpp needs to reach atc.dat)
 *
@@ -117,3 +120,33 @@ DP 40:00:00 N 010:00:00 E
 DP 41:00:00 N 010:00:00 E
 DP 41:00:00 N 011:00:00 E
 DP 40:00:00 N 011:00:00 E
+*
+* lon 11-12: the GERMAN shape -- a CTR with an untyped shelf directly on top and
+* an untyped enroute block far above it. Nothing here carries a type word, so
+* the name-based lookup finds nothing and only the stack walk can answer.
+AC CTR
+AN INDIA
+AL GND
+AH 2500 MSL
+DP 40:00:00 N 011:00:00 E
+DP 41:00:00 N 011:00:00 E
+DP 41:00:00 N 012:00:00 E
+DP 40:00:00 N 012:00:00 E
+*
+AC C
+AN INDIA SECTOR B
+AL 2500 MSL
+AH 4500 MSL
+DP 40:00:00 N 011:00:00 E
+DP 41:00:00 N 011:00:00 E
+DP 41:00:00 N 012:00:00 E
+DP 40:00:00 N 012:00:00 E
+*
+AC C
+AN INDIA CENTER SECTOR
+AL 2500 MSL
+AH 45000 MSL
+DP 40:00:00 N 011:00:00 E
+DP 41:00:00 N 011:00:00 E
+DP 41:00:00 N 012:00:00 E
+DP 40:00:00 N 012:00:00 E

@@ -144,6 +144,71 @@ TEST_CASE_METHOD(Fixture, "openair: UTMA is an Upper TMA, not an untyped volume"
   CHECK(t.name == "HOTEL UTMA SECTOR A");
 }
 
+// ── The terminal stack walk ──────────────────────────────────────────
+// Square 11 reproduces the German shape: INDIA (CTR, 0-2500), INDIA SECTOR B
+// (2500-4500) and INDIA CENTER SECTOR (2500-45000). Not one name carries a type
+// word, which is the situation at Dortmund and at Turin.
+
+TEST_CASE_METHOD(Fixture, "openair: the name lookup finds nothing without a type word",
+                 "[openair][stackwalk]") {
+  // The premise. If this ever starts returning something, the walk is being
+  // tested against the wrong fixture and its own assertions mean nothing.
+  CHECK(openair_db::terminal_tma(kLat, lon_of(11)).name.empty());
+  CHECK(openair_db::terminal_tma_ceiling(kLat, lon_of(11)) == 0);
+}
+
+TEST_CASE_METHOD(Fixture, "openair: the stack walk finds the shelf on the CTR",
+                 "[openair][stackwalk]") {
+  const auto s = openair_db::terminal_stack_shelf(kLat, lon_of(11));
+  CHECK(s.name == "INDIA SECTOR B");
+  CHECK(s.floor_ft == 2500);  // sits exactly on the CTR ceiling
+  CHECK(s.ceiling_ft == 4500);
+}
+
+TEST_CASE_METHOD(Fixture, "openair: the enroute block is rejected by the ceiling cap",
+                 "[openair][stackwalk]") {
+  // INDIA CENTER SECTOR also sits on the CTR at 2500 and would tie on floor,
+  // but tops at 45000. Without the cap the tie-break on the higher ceiling
+  // would pick it -- an ACC sector announced as the terminal shelf, which is
+  // the 2026-08-14 misfire in a new disguise. This is the one guard that was
+  // kept; thickness and extent caps measured WORSE (open-questions.md Q4).
+  const auto s = openair_db::terminal_stack_shelf(kLat, lon_of(11));
+  REQUIRE_FALSE(s.name.empty());
+  CHECK(s.name != "INDIA CENTER SECTOR");
+  CHECK(s.ceiling_ft <= openair_db::kMaxTerminalCeilingFt);
+}
+
+TEST_CASE_METHOD(Fixture, "openair: the walk is OFF unless the caller opts in",
+                 "[openair][stackwalk]") {
+  // The whole regression guarantee for the eight correctly-named countries:
+  // default-off, so every existing call site keeps its behaviour untouched.
+  CHECK(openair_db::terminal_tma(kLat, lon_of(11)).name.empty());
+  CHECK(openair_db::terminal_tma(kLat, lon_of(11), true).name ==
+        "INDIA SECTOR B");
+  CHECK(openair_db::terminal_tma_ceiling(kLat, lon_of(11), true) == 4500);
+}
+
+TEST_CASE_METHOD(Fixture, "openair: a NAMED TMA always beats the walk",
+                 "[openair][stackwalk]") {
+  // Square 8 has GOLF TMA SECTOR 1 (1000-8500). Opting in must change NOTHING
+  // where the export names its volumes -- otherwise enabling the prefix for one
+  // country would silently re-answer every field in it.
+  const auto off = openair_db::terminal_tma(kLat, lon_of(8));
+  const auto on = openair_db::terminal_tma(kLat, lon_of(8), true);
+  CHECK(off.name == "GOLF TMA SECTOR 1");
+  CHECK(on.name == off.name);
+  CHECK(on.ceiling_ft == off.ceiling_ft);
+}
+
+TEST_CASE_METHOD(Fixture, "openair: no CTR under the point means no shelf",
+                 "[openair][stackwalk]") {
+  // Square 2 is CHARLIE CTA (9500-19500) with no control zone beneath. An
+  // enroute position must never yield a terminal shelf -- inferring one from a
+  // low-floored ACC sector is exactly what fired a terminal descent 186 NM out.
+  CHECK(openair_db::terminal_stack_shelf(kLat, lon_of(2)).name.empty());
+  CHECK(openair_db::terminal_tma(kLat, lon_of(2), true).name.empty());
+}
+
 // ── Geometry queries built on the index ───────────────────────────────
 
 TEST_CASE_METHOD(Fixture, "openair: altitude band is respected", "[openair]") {

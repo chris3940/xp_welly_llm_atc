@@ -499,6 +499,25 @@ void cmd_enc() {
   for (const auto &e : all)
     std::printf("   enclosing: '%s' class=%d floor=%d ceil=%d\n", e.name.c_str(),
                 static_cast<int>(e.ac_class), e.floor_ft, e.ceiling_ft);
+  // Terminal-area queries, both answers side by side. The name-based lookup is
+  // what every arrival uses today; the stack walk is the fallback for exports
+  // that omit the type word (Germany, and Turin locally). Printing both makes
+  // the difference visible at a glance when flying an ED**/LI** arrival.
+  const auto t_named = openair_db::terminal_tma(ctx.latitude, ctx.longitude);
+  const auto t_walk =
+      openair_db::terminal_stack_shelf(ctx.latitude, ctx.longitude);
+  std::printf("terminal by NAME : %s\n",
+              t_named.name.empty()
+                  ? "(none)"
+                  : (t_named.name + " " + std::to_string(t_named.floor_ft) +
+                     "-" + std::to_string(t_named.ceiling_ft))
+                        .c_str());
+  std::printf("terminal by WALK : %s\n",
+              t_walk.name.empty()
+                  ? "(none)"
+                  : (t_walk.name + " " + std::to_string(t_walk.floor_ft) + "-" +
+                     std::to_string(t_walk.ceiling_ft))
+                        .c_str());
   // atc.dat enclosing controllers -- what the SECTOR-CHANGE handoffs actually see.
   refresh_enclosing(ctx);
   std::printf("atc.dat enclosing (%zu):\n", ctx.enclosing_airspaces.size());

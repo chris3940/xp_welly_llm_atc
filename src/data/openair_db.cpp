@@ -461,7 +461,65 @@ int ctr_ceiling_ft(double lat, double lon) {
 // answer for that guard: it reads "no volume" as "can't tell" and stays permissive.
 // find_enclosing() keeps the fallback, which is where the value is (sector handoffs
 // and the enclosing-volume queries). [C. P. Potter]
-AirspaceEntry terminal_tma(double lat, double lon) {
+// The terminal stack walk -- see the long comment in openair_db.hpp for why it
+// exists and how it was validated. Selects on the SHAPE of the vertical stack,
+// never on the name, so it works where the export omits the type word.
+AirspaceEntry terminal_stack_shelf(double lat, double lon) {
+  if (!s_ready)
+    return {};
+
+  // Pass 1: the base of the stack. No CTR over the point means no terminal
+  // structure at all -- an enroute position, where inferring a "shelf" from a
+  // low-floored ACC sector is exactly the mistake that fired a terminal descent
+  // 186 NM out on 2026-08-14. Take the HIGHEST CTR ceiling: a field with
+  // stacked/adjacent control zones (SOUTHEND CTR 2 / 3) must walk from the top
+  // of the zone, not from the first one found.
+  int ctr_top = -1;
+  for (const auto &e : s_entries) {
+    if (e.ac_class != AirspaceClass::CTR || e.ceiling_ft <= ctr_top)
+      continue;
+    if (lat < e.bbox_min_lat || lat > e.bbox_max_lat)
+      continue;
+    if (lon < e.bbox_min_lon || lon > e.bbox_max_lon)
+      continue;
+    if (point_in_polygon(lat, lon, e.polygon))
+      ctr_top = e.ceiling_ft;
+  }
+  if (ctr_top < 0)
+    return {};
+
+  // Pass 2: the shelf -- lowest-floor volume sitting ON that CTR and reaching
+  // above it. The tolerance absorbs floors expressed in a different reference
+  // (an AGL floor against an MSL ceiling); an overlapping floor is fine and
+  // common, so the test is <= rather than a band.
+  const Entry *best = nullptr;
+  for (const auto &e : s_entries) {
+    if (e.ac_class == AirspaceClass::CTR)
+      continue;
+    if (e.ceiling_ft <= ctr_top || e.ceiling_ft > kMaxTerminalCeilingFt)
+      continue;
+    if (e.floor_ft > ctr_top + kStackGapToleranceFt)
+      continue;
+    if (lat < e.bbox_min_lat || lat > e.bbox_max_lat)
+      continue;
+    if (lon < e.bbox_min_lon || lon > e.bbox_max_lon)
+      continue;
+    // Ties on floor break to the higher ceiling, matching terminal_tma().
+    if (best != nullptr && (e.floor_ft > best->floor_ft ||
+                            (e.floor_ft == best->floor_ft &&
+                             e.ceiling_ft <= best->ceiling_ft)))
+      continue;
+    if (!point_in_polygon(lat, lon, e.polygon))
+      continue;
+    best = &e;
+  }
+  if (best == nullptr)
+    return {};
+  return {best->name, best->ac_class, best->floor_ft, best->ceiling_ft,
+          best->freq_khz};
+}
+
+AirspaceEntry terminal_tma(double lat, double lon, bool allow_stack_walk) {
   if (!s_ready)
     return {};
   int best_floor = 1000000000; // base (lowest-floor) TMA over the point
@@ -483,14 +541,20 @@ AirspaceEntry terminal_tma(double lat, double lon) {
       best = &e;
     }
   }
-  if (best == nullptr)
-    return {}; // see the note above terminal_tma(): no atc.dat fallback here
+  if (best == nullptr) {
+    // A NAMED TMA always wins, so this fallback can only fire where the export
+    // says nothing -- the eight correctly-named countries never reach it. See
+    // the note above terminal_tma(): still no atc.dat fallback here.
+    if (allow_stack_walk)
+      return terminal_stack_shelf(lat, lon);
+    return {};
+  }
   return {best->name, best->ac_class, best->floor_ft, best->ceiling_ft,
           best->freq_khz};
 }
 
-int terminal_tma_ceiling(double lat, double lon) {
-  return terminal_tma(lat, lon).ceiling_ft;
+int terminal_tma_ceiling(double lat, double lon, bool allow_stack_walk) {
+  return terminal_tma(lat, lon, allow_stack_walk).ceiling_ft;
 }
 
 int highest_tma_ceiling(double lat, double lon) {
@@ -514,16 +578,25 @@ int highest_tma_ceiling(double lat, double lon) {
 }
 
 int descend_to_enter_ceiling(double acft_lat, double acft_lon, double dest_lat,
-                             double dest_lon) {
+                             double dest_lon, bool allow_stack_walk) {
   if (!s_ready)
     return 0;
-  const int ref_ceil = terminal_tma_ceiling(dest_lat, dest_lon);
+  const int ref_ceil =
+      terminal_tma_ceiling(dest_lat, dest_lon, allow_stack_walk);
   if (ref_ceil <= 0)
     return 0; // no terminal TMA at the destination (AFIS / CTR-only field)
   // Aircraft laterally inside a TMA whose ceiling matches the destination's
   // terminal ceiling -> it is over the destination terminal area.
+  //
+  // When the reference came from the stack walk it is a CTA-classified volume
+  // (DORTMUND SECTOR B, MILAN CTA ZONE 24), so restricting the aircraft-side
+  // test to TMA class would never match and the clearance would stay dead --
+  // the very defect the walk exists to fix. Widen to CTA only in that case, so
+  // a name-derived reference keeps its stricter test.
   for (const auto &e : s_entries) {
-    if (e.ac_class != AirspaceClass::TMA || e.ceiling_ft != ref_ceil)
+    const bool class_ok = e.ac_class == AirspaceClass::TMA ||
+                          (allow_stack_walk && e.ac_class == AirspaceClass::CTA);
+    if (!class_ok || e.ceiling_ft != ref_ceil)
       continue;
     if (acft_lat < e.bbox_min_lat || acft_lat > e.bbox_max_lat)
       continue;

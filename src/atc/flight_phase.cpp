@@ -439,6 +439,17 @@ static void load_from_file() {
           id.value("sid_handoff_min_alt_ft", 12000);
       ifr_defaults_.tower_report_alt_ft =
           id.value("tower_report_alt_ft", 0);
+      // Absent key -> empty list -> the terminal stack walk never runs. Every
+      // country whose export names its TMAs keeps the name-based lookup.
+      ifr_defaults_.terminal_stack_walk_icao_prefixes.clear();
+      if (id.contains("terminal_stack_walk_icao_prefixes") &&
+          id["terminal_stack_walk_icao_prefixes"].is_array()) {
+        for (const auto &p : id["terminal_stack_walk_icao_prefixes"]) {
+          if (p.is_string() && !p.get<std::string>().empty())
+            ifr_defaults_.terminal_stack_walk_icao_prefixes.push_back(
+                p.get<std::string>());
+        }
+      }
     }
 
     loaded_ = true;

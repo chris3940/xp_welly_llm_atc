@@ -70,6 +70,45 @@ std::vector<AirspaceEntry> find_all_enclosing(double lat, double lon,
 // ignoring altitude. Returns 0 if not inside any CTR.
 int ctr_ceiling_ft(double lat, double lon);
 
+// ── The terminal stack walk ──────────────────────────────────────────────
+//
+// Germany's OpenAir export names almost no volume TMA or CTA: 17 % of its
+// controlled volumes carry a type word against 92-100 % in the other eight
+// countries measured (docs/algorithm-airspace.md 8.1). Because terminal_tma()
+// selects by NAME, every German arrival is left without a terminal shelf -- no
+// descent rung, no descend-to-enter, no terminal handoff. Italy shows the same
+// hole locally: LIMF Turin has no TMA-named volume overhead, its terminal
+// airspace being `MILAN CTA ZONE 24 DON BOSCO`.
+//
+// The walk answers the OPERATIONAL question instead of the administrative one --
+// "which volume is the terminal shelf over this point?" -- from the shape of the
+// vertical stack rather than from names:
+//
+//   1. take every indexed volume whose polygon contains the point;
+//   2. the base is the CTR; no CTR -> no terminal structure -> nothing;
+//   3. the shelf is the lowest-floor non-CTR volume that sits ON the CTR
+//      (floor <= CTR ceiling + tolerance) and reaches above it.
+//
+// One guard, and it is measured rather than assumed: a ceiling cap. Thickness
+// and lateral-extent caps were tried and made the result WORSE (they reject
+// LONDON TMA, 4500-19500) -- see open-questions.md Q4 for the sweep.
+//
+// Validated against the 1355 points where a TMA-named volume exists, so the
+// right answer is known: in Europe the walk reproduces it 91 % of the time,
+// picks a different volume 4 %, finds nothing 5 %. That is a sanity check, not
+// the production path -- the walk only ever runs where the name lookup already
+// returned NOTHING.
+//
+// OFF BY DEFAULT. Callers opt in per destination via allow_stack_walk, gated on
+// an ICAO-prefix allowlist (ifr_defaults.terminal_stack_walk_icao_prefixes), so
+// the eight correctly-named countries cannot regress.
+inline constexpr int kStackGapToleranceFt = 500;
+inline constexpr int kMaxTerminalCeilingFt = 30000;
+
+// The shelf found by the walk described above, or an empty entry. Exposed for
+// tests and diagnostics; normal callers go through terminal_tma().
+AirspaceEntry terminal_stack_shelf(double lat, double lon);
+
 // Returns the ceiling of the BASE (lowest-floor) TMA-class airspace whose
 // polygon contains (lat, lon), IGNORING altitude (2-D lateral test only) --
 // i.e. the top of the terminal control area sitting directly on the field, not
@@ -81,14 +120,16 @@ int ctr_ceiling_ft(double lat, double lon);
 // differently-named unit (LFLP under CHAMBERY) resolves correctly. Used by the
 // "descend to enter the terminal area" clearance -- an aircraft cleared above a
 // low-ceilinged terminal TMA can never enter it otherwise.
-int terminal_tma_ceiling(double lat, double lon);
+int terminal_tma_ceiling(double lat, double lon,
+                         bool allow_stack_walk = false);
 
 // Same selection as terminal_tma_ceiling, but returns the whole entry instead of
 // just its ceiling -- the caller often needs the volume's NAME (to resolve which
 // facility owns it) and its FLOOR. An empty name means no TMA over the point.
 // The departure climb ladder uses this: a ceiling alone cannot tell you whether
 // the volume belongs to the controller currently working the aircraft.
-AirspaceEntry terminal_tma(double lat, double lon);
+AirspaceEntry terminal_tma(double lat, double lon,
+                           bool allow_stack_walk = false);
 
 // Highest TMA ceiling over the point: the MAX ceiling across every TMA block
 // (stacked sub-volumes) whose polygon contains (lat, lon). Unlike
@@ -108,7 +149,7 @@ int highest_tma_ceiling(double lat, double lon);
 // polygon test, not a distance gate. Matching by the base ceiling keeps a
 // stacked overlying TMA (GENEVA over CHAMBERY) from hijacking it.
 int descend_to_enter_ceiling(double acft_lat, double acft_lon, double dest_lat,
-                             double dest_lon);
+                             double dest_lon, bool allow_stack_walk = false);
 
 } // namespace openair_db
 

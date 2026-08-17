@@ -151,6 +151,19 @@ struct IfrDefaults {
   // field elevation. Configurable per profile; a future airport+.json override can
   // set it per field.
   int tower_report_alt_ft = 0;
+  // ICAO prefixes whose ARRIVALS may use openair_db's terminal stack walk when
+  // no volume over the field is NAMED a TMA. Germany's export omits the type
+  // word on 83 % of its controlled volumes, so ED** arrivals have no terminal
+  // shelf at all; LI** is here for Turin, whose terminal airspace is named
+  // `MILAN CTA ZONE 24 DON BOSCO` (measured 2026-08-17, see
+  // docs/algorithm-airspace.md 8.1). Matched as a plain PREFIX against the
+  // destination ICAO.
+  //
+  // Empty (the struct default) = the walk never runs, which is the behaviour
+  // every other country keeps. Widen this list only after flying the arrival --
+  // the walk agrees with the known-good answer 91 % of the time in Europe, so
+  // the remaining 9 % has to be checked per country rather than assumed.
+  std::vector<std::string> terminal_stack_walk_icao_prefixes;
 };
 
 void init();
