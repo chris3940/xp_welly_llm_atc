@@ -10238,8 +10238,13 @@ static int vec_leg_level_ft(const xplane_context::XPlaneContext &ctx,
   if (faf.alt_ft > 0)
     want = std::max(want, faf.alt_ft);
   if (track_nm > 1.0) {
-    const int reachable = static_cast<int>(
-        alt_now_ft - kDescentSlopeFtPerNm * 1.35 * track_nm);
+    // Rounded UP to the next 500 ft: this is a floor, so rounding it down would
+    // re-create the unreachable level, and ATC does not say "flight level 67".
+    // The harness caught exactly that -- the guard was right and the number was
+    // not (headless replay, 2026-08-17).
+    int reachable = static_cast<int>(alt_now_ft -
+                                     kDescentSlopeFtPerNm * 1.35 * track_nm);
+    reachable = ((reachable + 499) / 500) * 500;
     want = std::max(want, reachable);
   }
   want = ((want + 50) / 100) * 100;

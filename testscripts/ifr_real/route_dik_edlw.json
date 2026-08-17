@@ -2,29 +2,173 @@
   "_comment": "LFLP -> EDLW arrival from DIK, matched against the REAL flight of 2026-08-16 (Log(16)/transcript(16)): same fixes, same cruise FL280, same starting frequency. Earlier versions of this file used a 7-fix simplification and FL270, which shifted every clearance and made the comparison meaningless. ADEM3A publishes no altitude constraint, which is what makes this arrival the interesting one.",
   "dest": "EDLW",
   "runway": "06",
+  "_comment_field": "Aerodrome reference position. WITHOUT it the driver measured every distance to the last navlog fix -- ADEMI, 10.5 NM east of the field -- so the summary distances were wrong and the final approach segment flew AWAY from the runway.",
+  "field": [
+    51.5183,
+    7.6122
+  ],
   "cruise_ft": 28000,
   "start_ft": 28000,
   "com": "118.105",
   "gs_kt": 280,
   "navlog": [
-    ["DIK",   49.8613, 6.1298, 28000, "CRZ", 0],
-    ["ADUSU", 49.9561, 6.1961, 28000, "CRZ", 0],
-    ["NIVNU", 50.3594, 6.4931, 28000, "CRZ", 0],
-    ["GEBSO", 50.5494, 6.6908, 23000, "DSC", 0],
-    ["ERUKI", 50.6083, 6.7526, 23000, "DSC", 0],
-    ["DEPOK", 50.7125, 6.8622, 21000, "DSC", 0],
-    ["SOXOS", 50.9067, 6.8472, 19000, "DSC", 0],
-    ["AFNAF", 50.9669, 6.8367, 18000, "DSC", 0],
-    ["BAMSU", 51.1888, 7.3090, 17400, "DSC", 1],
-    ["PADBA", 51.3117, 7.6786, 10400, "DSC", 1],
-    ["HEFME", 51.3872, 7.7703,  7800, "DSC", 1],
-    ["BARAG", 51.4186, 7.8086,  6900, "DSC", 1],
-    ["ADEMI", 51.4828, 7.8886,  4800, "DSC", 1]
+    [
+      "DIK",
+      49.8613,
+      6.1298,
+      28000,
+      "CRZ",
+      0
+    ],
+    [
+      "ADUSU",
+      49.9561,
+      6.1961,
+      28000,
+      "CRZ",
+      0
+    ],
+    [
+      "NIVNU",
+      50.3594,
+      6.4931,
+      28000,
+      "CRZ",
+      0
+    ],
+    [
+      "GEBSO",
+      50.5494,
+      6.6908,
+      23000,
+      "DSC",
+      0
+    ],
+    [
+      "ERUKI",
+      50.6083,
+      6.7526,
+      23000,
+      "DSC",
+      0
+    ],
+    [
+      "DEPOK",
+      50.7125,
+      6.8622,
+      21000,
+      "DSC",
+      0
+    ],
+    [
+      "SOXOS",
+      50.9067,
+      6.8472,
+      19000,
+      "DSC",
+      0
+    ],
+    [
+      "AFNAF",
+      50.9669,
+      6.8367,
+      18000,
+      "DSC",
+      0
+    ],
+    [
+      "BAMSU",
+      51.1888,
+      7.309,
+      17400,
+      "DSC",
+      1
+    ],
+    [
+      "PADBA",
+      51.3117,
+      7.6786,
+      10400,
+      "DSC",
+      1
+    ],
+    [
+      "HEFME",
+      51.3872,
+      7.7703,
+      7800,
+      "DSC",
+      1
+    ],
+    [
+      "BARAG",
+      51.4186,
+      7.8086,
+      6900,
+      "DSC",
+      1
+    ],
+    [
+      "ADEMI",
+      51.4828,
+      7.8886,
+      4800,
+      "DSC",
+      1
+    ]
   ],
   "path": [
-    [49.8613, 6.1298], [49.9561, 6.1961], [50.3594, 6.4931], [50.5494, 6.6908],
-    [50.6083, 6.7526], [50.7125, 6.8622], [50.9067, 6.8472], [50.9669, 6.8367],
-    [51.1888, 7.3090], [51.3117, 7.6786], [51.3872, 7.7703], [51.4186, 7.8086],
-    [51.4828, 7.8886]
+    [
+      49.8613,
+      6.1298
+    ],
+    [
+      49.9561,
+      6.1961
+    ],
+    [
+      50.3594,
+      6.4931
+    ],
+    [
+      50.5494,
+      6.6908
+    ],
+    [
+      50.6083,
+      6.7526
+    ],
+    [
+      50.7125,
+      6.8622
+    ],
+    [
+      50.9067,
+      6.8472
+    ],
+    [
+      50.9669,
+      6.8367
+    ],
+    [
+      51.1888,
+      7.309
+    ],
+    [
+      51.3117,
+      7.6786
+    ],
+    [
+      51.3872,
+      7.7703
+    ],
+    [
+      51.4186,
+      7.8086
+    ],
+    [
+      51.4828,
+      7.8886
+    ]
   ]
 }

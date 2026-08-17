@@ -73,6 +73,15 @@ def bearing(a, b):
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
 
+def advance(a, course_deg, dist_nm):
+    """Point `dist_nm` ahead of `a` on the true course `course_deg`. Flat-earth,
+    which is exact enough for a final approach segment."""
+    c = math.radians(course_deg)
+    dlat = dist_nm * math.cos(c) / 60.0
+    dlon = dist_nm * math.sin(c) / (60.0 * math.cos(math.radians(a[0])))
+    return (a[0] + dlat, a[1] + dlon)
+
+
 def interpolate(points, step_nm):
     """Dense flown path: every leg cut into <= step_nm pieces."""
     out = [points[0]]
@@ -165,7 +174,10 @@ class Pilot:
         self.callsign = callsign
         self.cleared_ft = None
         self.vector_hdg = None   # steered heading while under radar vectors
-        self.finished = False    # established on final: stop flying
+        self.finished = False    # arrival over: cleared to land, or on the ground
+        self.established = False # on the final approach course
+        self.final_course = None # course to fly inbound once established
+        self.runway = ""         # for the "established" report
         self.events = []
 
     def react(self, lines, where, alt):
@@ -208,12 +220,16 @@ class Pilot:
             if RE_RESUME.search(msg):
                 self.vector_hdg = None
             if re.search(r"report established", msg, re.I):
-                # The vectoring sequence is over: the aircraft is on the final
-                # approach course and flies the procedure. Without this the
-                # driver kept dead-reckoning on the axis heading and flew across
-                # Europe -- Kaliningrad, Riga, Tallinn -- which looked like an
-                # engine runaway and was purely the harness.
+                # The vectoring sequence is over. The driver used to STOP here,
+                # which is why the Tower handoff and the landing clearance were
+                # never exercised headless -- the one defect that survived two
+                # real flights. It now flies the final approach course inbound
+                # and REPORTS ESTABLISHED, so whatever ATC does (or fails to do)
+                # next is on the record.
+                self.established = True
+                self.final_course = self.vector_hdg  # the axis vector just given
                 self.vector_hdg = None
+            if re.search(r"cleared to land", msg, re.I):
                 self.finished = True
 
             m = RE_FL.search(msg)
@@ -274,10 +290,18 @@ def main():
     alt = float(route["start_ft"])
     prev = path[0]
     flown = 0.0
+    # Distances and the final approach segment are measured to the AERODROME.
+    # Falling back to the last navlog fix is only a default: on this route that
+    # fix is ADEMI, 10.5 NM east of EDLW, which made every printed distance wrong
+    # and sent the final approach segment away from the runway.
     dest = None
-    for f in route["navlog"]:
-        dest = (f[1], f[2])
+    if isinstance(route.get("field"), list) and len(route["field"]) == 2:
+        dest = (float(route["field"][0]), float(route["field"][1]))
+    else:
+        for f in route["navlog"]:
+            dest = (f[1], f[2])
 
+    pilot.runway = str(route.get("runway", ""))
     repl.send("poll 5")
     pilot.react(repl.sync(), prev, int(alt))
 
@@ -318,10 +342,49 @@ def main():
         repl.send("track %.4f %.4f %d %d" % (pt[0], pt[1], int(alt), dt))
         pilot.react(repl.sync(), pt, int(alt))
         prev = pt
-        if pilot.finished:
+        if pilot.finished or pilot.established:
             break
         if pilot.vector_hdg is not None and flown > 900.0:
             break  # runaway guard: a vector that is never cancelled
+
+    # ── final approach ────────────────────────────────────────────────────────
+    # Established on the axis, the aircraft flies the course inbound and descends
+    # on the nominal 3 degree path. This is the segment where the Tower handoff
+    # and the landing clearance are due; without it the harness stopped one
+    # transmission short of the only part that has never worked.
+    if pilot.established and dest:
+        pilot.events.append((prev, int(alt), ">> pilot: reports established"))
+        repl.send("say %s established runway %s" % (pilot.callsign, pilot.runway))
+        pilot.react(repl.sync(), prev, int(alt))
+        crs = pilot.final_course if pilot.final_course is not None else bearing(prev, dest)
+        for _ in range(40):
+            if pilot.finished:
+                break
+            d = nm(prev, dest)
+            if d < 0.8:
+                pilot.events.append((prev, int(alt), ">> pilot: over the field"))
+                break
+            step = min(1.0, d)
+            # Steer at the destination once inside 6 NM: the published course and
+            # a straight line differ a little, and drifting off it here would look
+            # like a lateral deviation the plugin would rightly challenge.
+            crs_now = bearing(prev, dest)
+            pt = advance(prev, crs_now, step)
+            alt = max(500.0, alt - step * 318.0)
+            if pilot.cleared_ft is not None:
+                alt = max(alt, float(pilot.cleared_ft) - 100.0)
+            repl.send("set heading %.0f" % crs_now)
+            pilot.react(repl.sync(), prev, int(alt))
+            repl.send("track %.4f %.4f %d %d" % (pt[0], pt[1], int(alt),
+                                                 max(5, int(step / gs * 3600.0))))
+            pilot.react(repl.sync(), pt, int(alt))
+            prev = pt
+            if _raw_fh:
+                _raw_fh.write("  [final] d=%.1f NM alt=%d crs=%.0f\n"
+                              % (nm(prev, dest), int(alt), crs_now))
+        else:
+            pilot.events.append((prev, int(alt),
+                                 ">> harness: final loop ended %.1f NM out" % nm(prev, dest)))
 
     repl.close()
 
