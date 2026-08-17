@@ -106,9 +106,30 @@ one lies genuinely between the aircraft and the target.
 | rung | why it exists | on this arrival |
 |---|---|---|
 | `FL100` | the 250 kt boundary, and the top of most terminal areas | given at 68 NM |
-| `TMA ceiling` | destination terminal area, rounded up to the next 1000 ft | 4500 → skipped |
+| `TMA ceiling` | destination terminal area, rounded up to the next 1000 ft | **absent — see below** |
 | `6000` | the usual last level before the platform | given at 10 NM |
 | `target` | the constraint itself | 3000 at DOR |
+
+**At EDLW the TMA rung does not exist at all.** Measured 2026-08-17,
+`terminal_tma(EDLW)` returns empty and `terminal_tma_ceiling` returns 0 — nothing
+over Dortmund is classified as a TMA:
+
+```
+  1000 ft -> DORTMUND CTR         0 - 2500      class CTR
+  3000 ft -> DORTMUND SECTOR B    2500 - 4500   class CTA
+  6000 ft -> nothing
+  9000 ft -> nothing
+ 12000 ft -> AIRSPACE CLASS C    10000 - 66000
+```
+
+The terminal structure is a control zone to 2500 and a CTA-classified sector to
+4500, with a hole from 4500 to 10 000 ft. What would fill that hole is the class E
+blanket published to FL100, and the OpenAir export carries no class E, F or G at
+all. So the rung is skipped because the value is **zero**, not because it is low —
+an earlier revision of this document wrongly said "4500 → skipped".
+
+Consequences beyond the rung: `descend-to-enter-TMA` can never fire here either,
+which is why an EDLW arrival depends entirely on the CIFP constraint chain.
 
 Three rules bound it:
 
