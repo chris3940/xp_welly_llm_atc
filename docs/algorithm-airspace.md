@@ -151,14 +151,17 @@ recorded as `AIRSPACE CLASS C`. Log lines therefore print both — the data's na
 first, then the controller it resolves to through `atc.dat`:
 
 ```
-'LANGEN' (Langen Control)
+AIRSPACE CLASS C (Langen)
 ```
 
-**Known gap:** the generic blanket blocks still print bare —
-`'AIRSPACE CLASS C'` with no parenthesis — because the resolver used by the
-logging helper does not resolve them in that code path, while the sector-change
-resolver does and correctly says *Langen* on frequency. The diagnostic is
-therefore still more pessimistic than the behaviour. Defect A3.
+The blanket blocks are the whole point of the format: a named volume gains
+nothing from the parenthesis, while `AIRSPACE CLASS C` alone tells the reader
+nothing at all.
+
+Resolving them needs the **position**. A blanket block carries no usable name, so
+the name-based resolver cannot place it — the label therefore falls back to the
+same lookup the sector-change path uses: `atc.dat` at that point, innermost
+centre, `OCEANIC` discarded, then its spoken label.
 
 ---
 
@@ -175,11 +178,7 @@ Germany between the CTA tops and the upper block — the plugin sees a hole. Eit
 an `airspace+.txt` overlay carries the missing volumes, or every rule that depends
 on terminal coverage has to tolerate its absence.
 
-**A3 — the volume label does not always resolve.**
-See section 6. The log reads as though the plugin does not know who owns a volume,
-when on frequency it does.
-
-**A4 — `on_destination_terminal()` returns true when it cannot tell.**
+**A3 — `on_destination_terminal()` returns true when it cannot tell.**
 Correct for the caller it was written for, wrong for any caller that reads the
 result as "suppress". It silenced every sector handoff of an entire replay once,
 which was misdiagnosed as a plugin defect before being traced to a missing
