@@ -135,6 +135,19 @@ TEST_CASE("normalize_spoken_frequency: all read-back styles collapse to 125.630"
           "november seven five zero x-ray papa");
   // A non-frequency number + decimal outside the VHF band is left alone.
   REQUIRE(only("flight level two three zero") == "flight level two three zero");
+  // HYPHENATED digit strings. Voxtral punctuates them arbitrarily -- the same
+  // pilot said the same frequency both ways on one flight, and only the spaced
+  // form was understood, so a correct readback drew "negative, I say again"
+  // (real flight 2026-08-17).
+  REQUIRE(only("contact langen on one-two-five decimal-zero-zero-zero") ==
+          "contact langen on 125.000");
+  REQUIRE(only("one-two-five decimal zero zero zero") == "125.000");
+  REQUIRE(only("one two five decimal-six-three-zero") == "125.630");
+  // ... but a hyphen that is NOT joining number-words must survive untouched:
+  // splitting it would turn "x-ray" into "x ray" and corrupt every callsign.
+  REQUIRE(only("november seven five zero x-ray papa") ==
+          "november seven five zero x-ray papa");
+  REQUIRE(only("cleared for the r-nav approach") == "cleared for the r-nav approach");
   // US "point" / "period" separators also collapse; "holding point" is NOT a freq.
   REQUIRE(only("one two five point six three zero") == "125.630");
   REQUIRE(only("one two five period six three zero") == "125.630");

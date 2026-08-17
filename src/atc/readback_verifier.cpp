@@ -184,14 +184,26 @@ static std::string extract_freq(const std::string &norm) {
   if (std::regex_search(norm, m, kStd))
     return m[1].str() + "." + m[2].str();
 
-  // Spaced variant: digits may have spaces — "1 2 1.2 0 5"
+  // Separated variant: the digits may carry ANY separator, not just a space.
+  // extract_squawk() was made tolerant on 2026-08-05 for exactly this reason
+  // (`[\s,:.-]*`) and the frequency was left behind, so a correct readback of
+  // "one-two-five decimal-zero-zero-zero" logged
+  // `field=freq expected=125.000 stated=(missing)` and drew "negative, I say
+  // again, 125.000" -- real flight 2026-08-17. Voxtral's choice of hyphen or
+  // space between spoken digits is arbitrary from one transmission to the next.
+  // This form subsumes "125.000", "1 2 5.0 0 0" and "1-2-5.0-0-0".
   static const std::regex kSpaced(
-      R"((\d[\s]?\d[\s]?\d)\s*[.,]\s*(\d[\s]?\d[\s]?\d))");
+      R"((\d[\s,:-]?\d[\s,:-]?\d)\s*[.,]\s*(\d[\s,:-]?\d[\s,:-]?\d))");
   if (std::regex_search(norm, m, kSpaced)) {
     std::string p1 = m[1].str();
     std::string p2 = m[2].str();
-    p1.erase(std::remove(p1.begin(), p1.end(), ' '), p1.end());
-    p2.erase(std::remove(p2.begin(), p2.end(), ' '), p2.end());
+    const auto strip = [](std::string &s) {
+      s.erase(std::remove_if(s.begin(), s.end(),
+                             [](unsigned char c) { return !std::isdigit(c); }),
+              s.end());
+    };
+    strip(p1);
+    strip(p2);
     if (p1.size() == 3 && p2.size() == 3)
       return p1 + "." + p2;
   }

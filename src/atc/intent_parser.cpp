@@ -793,19 +793,66 @@ void fq_parse_run(const std::vector<std::string> &w, int &value,
 std::string normalize_spoken_frequency(const std::string &text) {
   std::vector<std::string> tok;
   {
+    // HYPHENS SPLIT LIKE SPACES. Voxtral punctuates spoken digit strings, and
+    // whether it writes them with spaces or hyphens is arbitrary between two
+    // transmissions of the same pilot. Splitting on whitespace alone left the
+    // hyphenated form as opaque tokens, no number-word matched, and a correct
+    // readback drew "negative, I say again, 125.000" while the log recorded
+    // `field=freq expected=125.000 stated=(missing)` -- with the frequency
+    // present in full in the transcript (real flight 2026-08-17):
+    //
+    //   "one-two-five decimal-zero-zero-zero"  -> rejected
+    //   "one-two-five decimal zero zero zero"  -> accepted
+    //
+    // Scoped to the frequency normaliser on purpose: a hyphen carries meaning
+    // elsewhere in a transcript ("R-NAV"). [C. P. Potter]
+    // A hyphenated token is split ONLY when every part is itself a number-word
+    // or a separator. "one-two-five" and "decimal-zero-zero-zero" break apart;
+    // "x-ray" does not, because "x" is neither.
+    auto push = [&tok](const std::string &t) {
+      if (t.empty())
+        return;
+      if (t.find('-') != std::string::npos) {
+        std::vector<std::string> parts;
+        std::string p;
+        for (char c : t) {
+          if (c == '-') {
+            if (!p.empty()) {
+              parts.push_back(p);
+              p.clear();
+            }
+          } else {
+            p += c;
+          }
+        }
+        if (!p.empty())
+          parts.push_back(p);
+        bool splittable = parts.size() > 1;
+        for (const auto &x : parts) {
+          const std::string l = fq_lc_alpha(x);
+          if (!fq_is_num_word(l) && !fq_is_separator(l)) {
+            splittable = false;
+            break;
+          }
+        }
+        if (splittable) {
+          for (const auto &x : parts)
+            tok.push_back(x);
+          return;
+        }
+      }
+      tok.push_back(t);
+    };
     std::string cur;
     for (char c : text) {
       if (std::isspace(static_cast<unsigned char>(c))) {
-        if (!cur.empty()) {
-          tok.push_back(cur);
-          cur.clear();
-        }
+        push(cur);
+        cur.clear();
       } else {
         cur += c;
       }
     }
-    if (!cur.empty())
-      tok.push_back(cur);
+    push(cur);
   }
   std::vector<std::string> lc(tok.size());
   for (size_t i = 0; i < tok.size(); ++i)
