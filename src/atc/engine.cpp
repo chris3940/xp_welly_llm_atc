@@ -10029,8 +10029,21 @@ static void log_vector_mode_decision(const xplane_context::XPlaneContext &ctx) {
 //     y = signed lateral offset from the axis     (positive = right of it)
 // so "established 3 NM before the FAF" is s >= 3 with |y| ~ 0. [C. P. Potter]
 static constexpr double kVecOffsetNm      = 8.0;  // downwind displacement
-static constexpr double kVecAlignNm       = 3.0;  // aligned before the FAF
-static constexpr double kVecInterceptDeg  = 30.0; // max intercept angle
+// ICAO Doc 4444 (PANS-ATM) sets the real limits, and ours were STRICTER than the
+// standard on both counts -- which is what refused a feasible manoeuvre at EDLW
+// on 2026-08-17 (1.5 NM off axis, 5.1 NM before the FAF: our rule wanted 5.6,
+// ICAO wants 3.5). The standard says the final vector shall provide an intercept
+// angle of 45 degrees or less (30 or less only for independent parallel
+// approaches), and shall establish the aircraft on the final approach track in
+// level flight at least 2.0 NM before it intercepts the glide path.
+//
+// So 30 deg / 3 NM stay as the TARGET -- what ATC aims for, and what a passenger
+// notices -- while 45 deg / 2.0 NM are the FLOOR below which the manoeuvre is
+// genuinely impossible and must be abandoned. [C. P. Potter]
+static constexpr double kVecAlignNm       = 3.0;  // aligned before the FAF (target)
+static constexpr double kVecAlignMinNm    = 2.0;  // ICAO minimum before abandoning
+static constexpr double kVecInterceptDeg  = 30.0; // nominal intercept angle
+static constexpr double kVecInterceptMaxDeg = 45.0; // ICAO maximum, used when tight
 static constexpr double kVecFloorNm       = 15.0; // below this, do not start
 static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
 // Lateral offset at which the FINAL ALIGNMENT vector is given. A controller does
@@ -10078,8 +10091,34 @@ static void vec_frame(const xplane_context::XPlaneContext &ctx,
 
 // The axis distance still needed to close |y| at the intercept angle, plus the
 // aligned segment. This IS the feasibility rule.
-static double vec_required_s(double y) {
-  return kVecAlignNm + std::fabs(y) / std::tan(kVecInterceptDeg * M_PI / 180.0);
+static double vec_required_s(double y, double angle_deg = kVecInterceptDeg,
+                             double align_nm = kVecAlignNm) {
+  return align_nm + std::fabs(y) / std::tan(angle_deg * M_PI / 180.0);
+}
+
+// The axis distance below which the manoeuvre is genuinely impossible: the ICAO
+// limits, not the nominal ones. Everything between this and vec_required_s() is
+// still flyable -- steeper than we would choose, legal, and far better than
+// handing the aircraft back its procedure a few miles from the FAF.
+static double vec_floor_s(double y) {
+  return vec_required_s(y, kVecInterceptMaxDeg, kVecAlignMinNm);
+}
+
+// Intercept angle to assign for a given geometry: the nominal 30 degrees when
+// there is room for it, steepened towards the ICAO maximum only as far as the
+// remaining axis distance forces. Returns 0 when even the maximum will not fit.
+static double vec_intercept_angle(double s, double y) {
+  if (s >= vec_required_s(y))
+    return kVecInterceptDeg;
+  const double a = std::fabs(y);
+  if (a < 0.01)
+    return kVecInterceptDeg;
+  // Smallest angle that still aligns by kVecAlignMinNm: tan(t) = |y| / (s - min)
+  const double run = s - kVecAlignMinNm;
+  if (run <= 0.0)
+    return 0.0;
+  const double t = std::atan(a / run) * 180.0 / M_PI;
+  return (t <= kVecInterceptMaxDeg) ? t : 0.0;
 }
 
 // Lateral distance from the axis at which the FINAL ALIGNMENT vector is given.
@@ -10150,6 +10189,61 @@ static int vec_leg_altitude_ft(const xplane_context::XPlaneContext &ctx,
   if (floor_ft == 0)
     return 0; // no protection value available -- caller holds its level
   return std::max(wanted_ft, ((floor_ft + 99) / 100) * 100);
+}
+
+// What the level is held UNTIL. ICAO requires the approach clearance issued under
+// vectors to carry the level to maintain until the aircraft is established --
+// that is what makes it licit to clear an aircraft that is not yet on the axis,
+// and it is why "report established" exists at all. The reference differs by
+// approach type: an ILS or a localiser approach has a LOCALISER to be established
+// on, an RNP/RNAV or a VOR approach does not (LOWI is RNP -- user, 2026-08-17),
+// so those get the generic form.
+static std::string vec_established_ref(const xplane_context::XPlaneContext &ctx) {
+  const std::string p = approach_clearance_phrase(ctx);
+  const bool loc = p.find("ILS") != std::string::npos ||
+                   p.find("LOC") != std::string::npos ||
+                   p.find("localiser") != std::string::npos;
+  return loc ? "the localiser" : "the approach";
+}
+
+// Nominal 3 degree glide path, expressed as feet above the FAF crossing altitude
+// per NM before the FAF, and the margin we keep below it.
+static constexpr double kGlideSlopeFtPerNm = 318.0;
+static constexpr int    kGlideClearanceFt  = 300;
+
+// Level to assign on a vectoring leg. Three constraints, in this order:
+//
+//  1. BELOW THE GLIDE PATH. ICAO Doc 4444 requires the glide path to be
+//     intercepted from below. `FAF + 2000` satisfies that only beyond 6.3 NM
+//     from the FAF, `FAF + 1000` only beyond 3.1 NM -- so a fixed offset is
+//     above the path exactly where it matters. Measured 2026-08-17: the aircraft
+//     crossed 1.6 NM from the FAF at 4461 ft with the path at 3000, i.e. 1460 ft
+//     high, and the approach could not be stabilised.
+//  2. NEVER BELOW THE FAF CROSSING ALTITUDE. The aircraft joins the vertical
+//     profile there; taking it lower buys nothing and costs protection.
+//  3. ACHIEVABLE. Bounded by the descent reference over the track STILL TO FLY
+//     (the vector track, not the straight line), so ATC cannot order a level the
+//     aircraft would need an unstabilised dive to reach.
+//
+// The floor is then the sector MSA / grid MORA, as before. [C. P. Potter]
+static int vec_leg_level_ft(const xplane_context::XPlaneContext &ctx,
+                            const std::string &dest,
+                            const cifp_reader::FafFix &faf, double s_nm,
+                            double track_nm, float alt_now_ft, int cap_ft) {
+  int want = cap_ft;
+  if (faf.alt_ft > 0 && s_nm > 0.0) {
+    const int gp = faf.alt_ft + static_cast<int>(s_nm * kGlideSlopeFtPerNm);
+    want = std::min(want, gp - kGlideClearanceFt);
+  }
+  if (faf.alt_ft > 0)
+    want = std::max(want, faf.alt_ft);
+  if (track_nm > 1.0) {
+    const int reachable = static_cast<int>(
+        alt_now_ft - kDescentSlopeFtPerNm * 1.35 * track_nm);
+    want = std::max(want, reachable);
+  }
+  want = ((want + 50) / 100) * 100;
+  return vec_leg_altitude_ft(ctx, dest, want);
 }
 
 // "turn left/right heading NNN" -- the direction is the SHORTEST way round from
@@ -10348,9 +10442,21 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_leg = VecLeg::Displace;
       s_vtf_hdg = std::fmod(course + 180.0 - kVecDisplaceDeg * turn0 + 360.0, 360.0);
     } else if (s >= vec_required_s(y) + kVecTurnAllowNm) {
+      // Room for the nominal angle: use it.
       s_vtf_leg = VecLeg::Intercept;
       s_vtf_hdg =
           std::fmod(course + kVecInterceptDeg * turn0 + 360.0, 360.0);
+    } else if (vec_intercept_angle(s, y) > 0.0 &&
+               s >= vec_floor_s(y) + kVecTurnAllowNm) {
+      // Not enough room at 30 degrees, but ICAO allows up to 45. Steepen only as
+      // far as the geometry forces rather than flying the aircraft away from the
+      // field on a downwind it does not need.
+      const double ang = vec_intercept_angle(s, y);
+      s_vtf_leg = VecLeg::Intercept;
+      s_vtf_hdg = std::fmod(course + ang * turn0 + 360.0, 360.0);
+      logging::info("[vector] tight: intercept steepened to %.0f deg "
+                    "(s=%.1f, nominal wants %.1f, ICAO floor %.1f)",
+                    ang, s, vec_required_s(y), vec_floor_s(y));
     } else {
       s_vtf_leg = VecLeg::Downwind;
       s_vtf_hdg = std::fmod(course + 180.0, 360.0);
@@ -10360,8 +10466,9 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   s_vtf_abandoned = false;
   s_vtf_prev_y = 0.0;
   s_vtf_recut_secs = 0.0f;
-    const int want = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
-    s_vtf_cleared_ft = vec_leg_altitude_ft(ctx, dest, want);
+    const int cap = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
+    s_vtf_cleared_ft = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
+                                        ctx.altitude_ft_msl, cap);
     std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
     if (s_vtf_cleared_ft > 0) {
       const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
@@ -10411,11 +10518,18 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   const bool aligning = std::fabs(y) <= lead_nm && s >= kVecAlignNm;
   if (settled && !aligning &&
       (s_vtf_leg == VecLeg::Base || s_vtf_leg == VecLeg::Intercept)) {
-    if (s < vec_required_s(y) - 0.5) {
+    // Judged against the ICAO FLOOR (45 deg / 2.0 NM), not the nominal target.
+    // Between the two the manoeuvre is steeper than we would choose and entirely
+    // legal; abandoning there hands the aircraft back its procedure a few miles
+    // from the FAF, which is worse in every respect. Measured 2026-08-17: 1.5 NM
+    // off axis at 5.1 NM, nominal wanted 5.6 and refused, ICAO wants 3.5.
+    if (s < vec_floor_s(y)) {
       s_vtf_leg = VecLeg::Refused;
-      logging::info("[vector] cannot align %.0f NM before FAF %s (s=%.1f needs "
+      logging::info("[vector] cannot align even at the ICAO limit before FAF %s "
+                    "(s=%.1f, floor %.1f at %.0f deg / %.0f NM; nominal wanted "
                     "%.1f) -- abandoning, resume own navigation",
-                    kVecAlignNm, faf.ident.c_str(), s, vec_required_s(y));
+                    faf.ident.c_str(), s, vec_floor_s(y), kVecInterceptMaxDeg,
+                    kVecAlignMinNm, vec_required_s(y));
       // Say it AND do it. The abandon told the pilot "direct KOLOT" and then
       // challenged him ten seconds later for not tracking BAMSU, because the
       // intermediate fixes were never neutralised (real flight 2026-08-16).
@@ -10514,8 +10628,14 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   s_vtf_abandoned = false;
   s_vtf_prev_y = 0.0;
   s_vtf_recut_secs = 0.0f;
-      const int want = faf.alt_ft > 0 ? faf.alt_ft + 1000 : 4000;
-      const int lvl = vec_leg_altitude_ft(ctx, dest, want);
+      // Target the FAF crossing altitude itself, not a round number above it:
+      // the level is held "until established" and the aircraft then joins the
+      // glide path from below. The guards inside keep it under the path and
+      // above the MSA. "continue descent to 3000" for a FAF published at 2500,
+      // issued 1.6 NM out, is what this replaces (real flight 2026-08-17).
+      const int cap = faf.alt_ft > 0 ? faf.alt_ft : 4000;
+      const int lvl = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
+                                       ctx.altitude_ft_msl, cap);
       std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
       if (lvl > 0 && lvl < s_vtf_cleared_ft) {
         const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
@@ -10554,7 +10674,13 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
       if (lvl > 0) {
         const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
-        txt += ", descend " + format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta);
+        // "... until established on the localiser" -- the level is a floor held
+        // until the aircraft joins the axis, not a level to leave at will. Without
+        // it the aircraft is cleared BOTH to the approach and to a level, with
+        // nothing saying which prevails, and may leave protection before
+        // intercepting.
+        txt += ", descend " + format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta) +
+               " until established on " + vec_established_ref(ctx);
         s_vtf_cleared_ft = lvl;
         s_enroute_cleared_alt_ft = lvl;
       }
@@ -10631,6 +10757,37 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                     "(rule wants %.0f)", err, s, kVecAlignNm);
     }
     return false;
+  }
+
+  // ── stepped descent along the leg ─────────────────────────────────────────
+  // A leg level is issued once and then goes stale: the aircraft closes on the
+  // FAF, the glide path comes down to meet it, and a level that was correctly
+  // below the path 30 NM out is above it 5 NM out. Measured 2026-08-17: cleared
+  // 4500 at 32.8 NM and never re-cleared, the aircraft reached 5.3 NM still at
+  // 4924 with the path at 4180 -- 743 ft high, and 1460 ft high by 1.6 NM.
+  //
+  // So re-evaluate the level as the geometry changes and step down when it has
+  // drifted. Heading is untouched: this is a level, not a vector. Runs LAST so
+  // it can never pre-empt an alignment vector or an abandon. [C. P. Potter]
+  if (s_vtf_cleared_ft > 0 && s > kVecAlignNm) {
+    const int cap = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
+    const int want = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
+                                      ctx.altitude_ft_msl, cap);
+    // Only downwards, and only once it is worth a transmission.
+    if (want > 0 && want <= s_vtf_cleared_ft - 400) {
+      const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+      *out_text = callsign + ", descend " +
+                  format_alt_clearance(want, AltHint::Auto, ctx.qnh_hpa, ta) + ".";
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      logging::info("[vector] step down %d -> %d ft at %.1f NM to FAF "
+                    "(glide path %d ft there)",
+                    s_vtf_cleared_ft, want, s,
+                    faf.alt_ft + static_cast<int>(s * kGlideSlopeFtPerNm));
+      s_vtf_cleared_ft = want;
+      s_enroute_cleared_alt_ft = want;
+      return true;
+    }
   }
   return false;
 }
