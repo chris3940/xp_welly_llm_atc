@@ -78,9 +78,31 @@ steep     = need_ftnm > kDescentSlopeFtPerNm * 1.35;
 ```
 
 So ATC computes a steeper gradient than reality and words the clearance
-"expedite descent". **The longer the vectoring makes the track, the shorter the
-plugin believes it is.** This is the user's reported "descente un peu trop rapide
-sous le FL100 en vectoring", and it is a sign error, not a tuning problem.
+"expedite descent" when there is in fact room.
+
+**Corrected the same day, by the user: that is only half of it, and the other
+half is the half that bites.** The claim above was written as though the error
+had one sign. It does not -- there are TWO errors, in OPPOSITE directions, acting
+at different moments:
+
+| | when | direction | effect |
+|---|---|---|---|
+| the published path is not the flown one | while the descent is PLANNED, before vectoring starts | routed **overstates** | descent fires late, then is **genuinely** steep |
+| the skip loop collapses the sum | once ON a downwind leg | routed **understates** | "expedite" worded with room to spare |
+
+The first is the user's reading and it is the one that produces a descent that is
+actually too fast. Measured at EDLW: the ILS 06 transition runs **overhead the
+field** -- `DOR` is the field VOR, 0.9 NM from the threshold -- and then out to
+`KOLOT` 6.6 NM to the southwest before turning back inbound on 057. A west
+arrival routed through that reversal carries ~13 NM the vectors will delete. The
+descent spec already measured the same thing from the other end: routed and
+direct differ by roughly 20 NM on this arrival (defect D2).
+
+Note the routed choice is **deliberate and correct on a published path** --
+`routed_distance_to_fix_idx()` exists because the straight line under-reads on a
+dog-legged STAR and fired a descent 53 NM early at LFLP. The defect is not
+"routed is wrong", it is "routed is the wrong question once the aircraft is going
+to be taken off the route".
 
 The skip loop is not itself a defect -- it exists because the tracker lags and
 summing a backward leg inflated the distance and fired a descent late (LFLP

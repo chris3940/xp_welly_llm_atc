@@ -7298,6 +7298,12 @@ struct FixCompliance {
   bool        alt_is_fl = false;
   bool        spd_bust = false;
   int         spd_target_kt = 0;
+  // Position of the constraining fix, so a caller can compare the ROUTED
+  // distance above against the straight line. Logged, never used to decide --
+  // routed is deliberate (see routed_distance_to_fix_idx: straight line
+  // under-reads on a dog-legged STAR and fired a descent 53 NM early at LFLP).
+  double      lat = 0.0;
+  double      lon = 0.0;
 };
 
 // Routed "distance to FLY" (NM) from the aircraft to route fix `target_idx`: the
@@ -7442,6 +7448,8 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
     // Routed distance-to-fly (sum of legs), not straight-line -- the TOD trigger
     // reads this, and great-circle under-read fired FL090 53 NM out (LFLP).
     c.dist_nm = routed_distance_to_fix_idx(ctx, i);
+    c.lat = f.lat;
+    c.lon = f.lon;
     // Time to the fix = distance / groundspeed (floored so we don't divide by a
     // near-zero GS on the ground / in a hold).
     const double gs = ctx.groundspeed_kts > 40.0f
@@ -7837,20 +7845,46 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
                   fc.ident.c_str(), clr.c_str(),
                   static_cast<double>(ctx.pressure_alt_ft), fc.dist_nm, tod_dist,
                   alt_to_lose);
-  // Under vectoring the routed distance degenerates to the straight line to the
-  // FAF (every remaining fix is behind the nose and gets skipped), so the
-  // gradient above is computed against a distance SHORTER than the track that
-  // will actually be flown -- the too-steep clearances reported under vectoring.
-  // Print the vector track beside it so the size of the error is measurable on a
-  // real arrival. OBSERVATION ONLY: nothing consumes this yet. Q1.
+  // OBSERVATION ONLY -- nothing below decides anything. The gradient above is
+  // computed on the ROUTED distance, which is deliberate on a published path
+  // (straight line under-reads on a dog-legged STAR) but is the wrong figure
+  // whenever the aircraft will be VECTORED off that path. Two errors act in
+  // OPPOSITE directions and at different moments, so a single number cannot
+  // settle which one bit; print all three and let the flight say.
+  //
+  //   routed  the published path. At EDLW the ILS 06 transition runs overhead
+  //           the field (DOR is the field VOR) and back out to KOLOT 6.6 NM
+  //           southwest -- a reversal a west arrival will never fly if vectored.
+  //           OVERSTATES the distance, so the descent fires late and is then
+  //           genuinely steep.
+  //   direct  the straight line. What the routed figure DEGENERATES to once on
+  //           a downwind leg, because every remaining fix falls more than 100
+  //           degrees off the nose and is skipped. UNDERSTATES the track, so
+  //           "expedite" gets worded when there is in fact room.
+  //   vector  the modelled vector track (minimum). Only while vectoring.
+  const double direct_nm =
+      (fc.lat != 0.0 || fc.lon != 0.0)
+          ? traffic_geometry::distance_nm(ctx.latitude, ctx.longitude, fc.lat,
+                                          fc.lon)
+          : 0.0;
   const double vec_nm = vectored_distance_nm(ctx);
-  if (vec_nm > 0.0)
-    logging::info("IFR descent: vectoring -- routed %.1f NM vs vector track "
-                  "%.1f NM (min), gradient computed on routed: %.0f ft/NM, on "
-                  "vector track: %.0f ft/NM",
-                  fc.dist_nm, vec_nm,
-                  fc.dist_nm > 1.0 ? (alt_now - issue_ft) / fc.dist_nm : 0.0,
-                  (alt_now - issue_ft) / vec_nm);
+  if (direct_nm > 0.0 || vec_nm > 0.0) {
+    const double g_routed =
+        fc.dist_nm > 1.0 ? (alt_now - issue_ft) / fc.dist_nm : 0.0;
+    if (vec_nm > 0.0)
+      logging::info("IFR descent: distances to %s -- routed %.1f, direct %.1f, "
+                    "vector track %.1f NM (min) | gradient routed %.0f, vector "
+                    "%.0f ft/NM (VECTORING)",
+                    fc.ident.c_str(), fc.dist_nm, direct_nm, vec_nm, g_routed,
+                    (alt_now - issue_ft) / vec_nm);
+    else
+      logging::info("IFR descent: distances to %s -- routed %.1f, direct %.1f "
+                    "NM (routed is %+.1f) | gradient routed %.0f, direct %.0f "
+                    "ft/NM",
+                    fc.ident.c_str(), fc.dist_nm, direct_nm,
+                    fc.dist_nm - direct_nm, g_routed,
+                    direct_nm > 1.0 ? (alt_now - issue_ft) / direct_nm : 0.0);
+  }
   return true;
 }
 
