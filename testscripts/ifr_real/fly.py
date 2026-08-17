@@ -55,6 +55,14 @@ _raw_fh = open(RAW, "w") if RAW else None
 # steeply rather than teleporting onto its cleared level.
 FPM = 1800.0
 
+# Pilot reaction to a heading instruction, and the rate he turns at. 35 s is the
+# middle of what the flown arrivals show between an instruction and its readback;
+# 3 deg/s is standard rate. Both matter: together they consume axis distance
+# while closing almost nothing laterally, which is what makes a vectored
+# intercept run out of room.
+REACT_SECS = 35.0
+TURN_RATE_DEG_S = 3.0
+
 
 def nm(a, b):
     dlat = (b[0] - a[0]) * 60.0
@@ -188,6 +196,8 @@ class Pilot:
         self.faf = None          # (lat, lon) of the FAF, from the engine's own log
         self.faf_track = None    # published final approach track
         self.assigned_kt = None  # speed ATC has assigned, and the pilot flies
+        self.hdg = None          # heading actually FLOWN (lags the assignment)
+        self.react_s = 0.0       # seconds still to elapse before the turn starts
         self.events = []
 
     def react(self, lines, where, alt):
@@ -238,6 +248,15 @@ class Pilot:
                 # assigned heading. Without this the compliance monitor sees a
                 # pilot who never turns, re-issues once and then abandons -- which
                 # is exactly what a fixed path produced on the first run.
+                if self.vector_hdg != float(m.group(2)):
+                    # A pilot does not roll onto a new heading the instant ATC
+                    # says it: he reads it back, then turns at a normal rate.
+                    # Measured on the real flight of 2026-08-17: 39 s elapsed
+                    # between the instruction and the readback, during which the
+                    # aircraft ate 4.3 NM of axis distance and closed 0.2 NM
+                    # laterally. Modelling neither is why this harness reported a
+                    # clean intercept where the real one ran out of room.
+                    self.react_s = REACT_SECS
                 self.vector_hdg = float(m.group(2))
             if RE_RESUME.search(msg):
                 self.vector_hdg = None
@@ -330,10 +349,21 @@ def main():
     idx = 1
     while idx < len(path):
         if pilot.vector_hdg is not None:
-            # Dead-reckon along the assigned heading instead of following the
-            # route. 4 NM steps, matching the route interpolation.
-            step = 4.0
-            hdg = math.radians(pilot.vector_hdg)
+            # Dead-reckon, but as an aircraft flies: 1 NM steps, a reaction delay
+            # before the turn begins, then a standard-rate turn onto the assigned
+            # heading. 4 NM steps with an instantaneous turn modelled a pilot who
+            # does not exist and hid a real geometric failure.
+            step = 1.0
+            dt_s = step / max(60.0, gs) * 3600.0
+            if pilot.hdg is None:
+                pilot.hdg = pilot.vector_hdg
+            if pilot.react_s > 0.0:
+                pilot.react_s = max(0.0, pilot.react_s - dt_s)
+            else:
+                d = (pilot.vector_hdg - pilot.hdg + 540.0) % 360.0 - 180.0
+                mx = TURN_RATE_DEG_S * dt_s
+                pilot.hdg = (pilot.hdg + max(-mx, min(mx, d))) % 360.0
+            hdg = math.radians(pilot.hdg)
             pt = (prev[0] + step * math.cos(hdg) / 60.0,
                   prev[1] + step * math.sin(hdg) /
                   (60.0 * math.cos(math.radians(prev[0]))))

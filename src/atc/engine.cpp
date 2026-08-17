@@ -10044,6 +10044,22 @@ static constexpr double kVecAlignNm       = 3.0;  // aligned before the FAF (tar
 static constexpr double kVecAlignMinNm    = 2.0;  // ICAO minimum before abandoning
 static constexpr double kVecInterceptDeg  = 30.0; // nominal intercept angle
 static constexpr double kVecInterceptMaxDeg = 45.0; // ICAO maximum, used when tight
+// WHERE THE VECTORS ARE AIMED. Not the FAF: a point on the final approach course
+// this far BEFORE it, so there is room left for the alignment vector and for the
+// aircraft to settle on the axis (user, repeatedly: "3 a 5 NM avant pour pouvoir
+// faire le dernier vecteur d'alignement").
+//
+// The previous design assigned a fixed 30-degree offset from the course and let
+// it converge wherever it converged. With margin it converged early, which was
+// fine; with the margin eaten -- by the turn, by reaction time, by a shallower
+// real closure -- it converged ON the FAF. Measured 2026-08-17: at 4.3 NM before
+// KOLOT and 2.2 NM off axis, the assigned 027 pointed at 030, i.e. straight at
+// the FAF, which is exactly what the G1000 showed.
+//
+// Aiming at the POINT instead of holding an ANGLE is self-correcting: every
+// re-evaluation re-aims, so drift, wind and a slow turn are absorbed instead of
+// accumulating. [C. P. Potter]
+static constexpr double kVecInterceptPointNm = 4.0;
 static constexpr double kVecFloorNm       = 15.0; // below this, do not start
 static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
 // Lateral offset at which the FINAL ALIGNMENT vector is given. A controller does
@@ -10059,7 +10075,14 @@ static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
 // order for a radar intercept: enough for the pilot to read back, turn, and let
 // the localiser capture, without clearing the approach so early that the vector
 // stops being one.
-static constexpr double kVecLeadSecs      = 60.0;
+// Reaction + turn, not a full minute of closure. The lead exists to cover the
+// time between the instruction and the aircraft settling on the new heading:
+// ~20 s for the pilot to read back and start the turn, ~10 s for a 30-degree
+// turn at standard rate. A 60 s lead fired the alignment vector while the
+// aircraft was still 1.6 NM off the axis, which forced a 37-degree "alignment"
+// -- steeper than the intercept it replaced, and unachievable once the reaction
+// time is modelled. Measured on the realistic-pilot replay, 2026-08-17.
+static constexpr double kVecLeadSecs      = 30.0;
 static constexpr double kVecLeadMinNm     = 1.0;  // floor, slow aircraft
 static constexpr double kVecLeadMaxNm     = 4.0;  // ceiling, fast aircraft
 static constexpr double kVecFinalNm       = 6.0;  // aimed length of the final
@@ -10102,6 +10125,38 @@ static double vec_required_s(double y, double angle_deg = kVecInterceptDeg,
 // handing the aircraft back its procedure a few miles from the FAF.
 static double vec_floor_s(double y) {
   return vec_required_s(y, kVecInterceptMaxDeg, kVecAlignMinNm);
+}
+
+// Heading to steer, RELATIVE to the final approach course, to reach the intercept
+// point -- the point on the course kVecInterceptPointNm before the FAF. Positive
+// turns right of the course. Capped at the ICAO maximum so the result is always a
+// legal intercept; when the point is already behind, the cap is what is returned
+// and the feasibility test above decides whether that is still flyable.
+// Where the aircraft will BE when it starts flying the heading it is about to be
+// given. A controller anticipates this without thinking about it; the code did
+// not, and it is the whole of the "vector aims at the FAF" failure. Between the
+// instruction and the aircraft settling on the new heading there are ~20 s of
+// reading back and ~10 s of turning, during which it keeps its present track and
+// closes almost nothing laterally -- 4.3 NM of axis distance for 0.2 NM of
+// closure on the flight of 2026-08-17. Aiming from the present position hands
+// out a heading that was correct 2 NM ago.
+static void vec_project(const xplane_context::XPlaneContext &ctx, double course,
+                        double *s, double *y) {
+  const double gs = std::max(80.0, static_cast<double>(ctx.groundspeed_kts));
+  const double d = gs * kVecLeadSecs / 3600.0; // NM flown before the turn bites
+  const double rel = (static_cast<double>(ctx.heading_mag) - course) * M_PI / 180.0;
+  *s -= d * std::cos(rel);
+  *y -= d * std::sin(rel);
+}
+
+static double vec_intercept_rel_deg(double s, double y) {
+  const double run = s - kVecInterceptPointNm; // axis distance still to cover
+  double rel;
+  if (run <= 0.1)
+    rel = (y >= 0.0) ? -kVecInterceptMaxDeg : kVecInterceptMaxDeg;
+  else
+    rel = std::atan2(-y, run) * 180.0 / M_PI;
+  return std::max(-kVecInterceptMaxDeg, std::min(kVecInterceptMaxDeg, rel));
 }
 
 // Intercept angle to assign for a given geometry: the nominal 30 degrees when
@@ -10506,22 +10561,19 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     if (std::fabs(y) < 2.0) {
       s_vtf_leg = VecLeg::Displace;
       s_vtf_hdg = std::fmod(course + 180.0 - kVecDisplaceDeg * turn0 + 360.0, 360.0);
-    } else if (s >= vec_required_s(y) + kVecTurnAllowNm) {
-      // Room for the nominal angle: use it.
+    } else if (s >= vec_floor_s(y) + kVecTurnAllowNm) {
+      // AIM AT THE INTERCEPT POINT, not at a fixed angle off the course. The
+      // relative heading is capped at the ICAO maximum, and is naturally the
+      // nominal 30 degrees or less whenever there is room.
       s_vtf_leg = VecLeg::Intercept;
-      s_vtf_hdg =
-          std::fmod(course + kVecInterceptDeg * turn0 + 360.0, 360.0);
-    } else if (vec_intercept_angle(s, y) > 0.0 &&
-               s >= vec_floor_s(y) + kVecTurnAllowNm) {
-      // Not enough room at 30 degrees, but ICAO allows up to 45. Steepen only as
-      // far as the geometry forces rather than flying the aircraft away from the
-      // field on a downwind it does not need.
-      const double ang = vec_intercept_angle(s, y);
-      s_vtf_leg = VecLeg::Intercept;
-      s_vtf_hdg = std::fmod(course + ang * turn0 + 360.0, 360.0);
-      logging::info("[vector] tight: intercept steepened to %.0f deg "
-                    "(s=%.1f, nominal wants %.1f, ICAO floor %.1f)",
-                    ang, s, vec_required_s(y), vec_floor_s(y));
+      double ps = s, py = y;
+      vec_project(ctx, course, &ps, &py);
+      const double rel = vec_intercept_rel_deg(ps, py);
+      s_vtf_hdg = std::fmod(course + rel + 360.0, 360.0);
+      logging::info("[vector] intercept aimed at the point %.0f NM before %s: "
+                    "rel %+.0f deg (s=%.1f y=%.1f, nominal wants %.1f, floor %.1f)",
+                    kVecInterceptPointNm, faf.ident.c_str(), rel, s, y,
+                    vec_required_s(y), vec_floor_s(y));
     } else {
       s_vtf_leg = VecLeg::Downwind;
       s_vtf_hdg = std::fmod(course + 180.0, 360.0);
@@ -10581,7 +10633,17 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   // exactly what happened at 1.5 NM off axis, 5.1 NM before the FAF, and drew
   // "resume own navigation direct KOLOT" for a fix lying dead ahead.
   const double lead_nm = vec_lead_nm(ctx, course);
-  const bool aligning = std::fabs(y) <= lead_nm && s >= kVecAlignNm;
+  // The vectors are aimed at the intercept point, so the alignment vector is due
+  // as the aircraft APPROACHES THAT POINT -- not when some lateral threshold
+  // happens to be crossed. Waiting for |y| let the aircraft run past the point
+  // and then demanded a 45-degree turn in the last mile. The along-axis lead is
+  // the same reaction+turn time expressed along the track.
+  const double along_lead_nm =
+      std::max(0.5, static_cast<double>(std::max(80.0f, ctx.groundspeed_kts)) *
+                        kVecLeadSecs / 3600.0);
+  const bool aligning =
+      s >= kVecAlignNm &&
+      (s <= kVecInterceptPointNm + along_lead_nm || std::fabs(y) <= kVecEstabNm);
   if (settled && !aligning &&
       (s_vtf_leg == VecLeg::Base || s_vtf_leg == VecLeg::Intercept)) {
     // Judged against the ICAO FLOOR (45 deg / 2.0 NM), not the nominal target.
@@ -10723,7 +10785,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     // established by kVecAlignNm, so the governing rule is unchanged; only the
     // moment the vector is transmitted moves earlier, which is where a
     // controller actually transmits it.
-    if (std::fabs(y) <= lead_nm && s >= kVecAlignNm) {
+    if (aligning) {
       s_vtf_leg = VecLeg::Axis;
       // THE LAST VECTOR IS AN INTERCEPT HEADING, NOT THE COURSE. Assigning the
       // course itself to an aircraft still off the axis flies it PARALLEL to the
@@ -10738,11 +10800,13 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       // axis. Right of the axis (y > 0) means turning LEFT of the course, which
       // is the same sign convention as the first leg. [C. P. Potter]
       {
+        double ps2 = s, py2 = y;
+        vec_project(ctx, course, &ps2, &py2);
         double ang = 0.0;
-        if (std::fabs(y) > kVecEstabNm) {
-          const double run = s - kVecAlignNm;
+        if (std::fabs(py2) > kVecEstabNm) {
+          const double run = ps2 - kVecAlignNm;
           ang = (run > 0.1)
-                    ? std::atan(std::fabs(y) / run) * 180.0 / M_PI
+                    ? std::atan(std::fabs(py2) / run) * 180.0 / M_PI
                     : kVecInterceptMaxDeg;
           ang = std::min(ang, kVecInterceptMaxDeg);
           ang = std::max(ang, 10.0); // a 2-degree "intercept" is not one
