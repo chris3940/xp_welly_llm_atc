@@ -56,3 +56,65 @@ and the coordination assumption it rests on); the `cruise * 0.66` heuristic that
 still produces the first level (FL180 on this arrival) and is superseded two
 miles later by the ladder's FL100 — a separate defect, noted here only because
 the two surface together in the same log.
+
+---
+
+## Q2 — Two calculations when both modes coexist? And are there two TODs?
+
+**Raised:** 2026-08-17, against **v4.4.0-beta-85 (`a6bb13b`)**.
+
+> "Pour l'instant on ne fait que le FORCE VECTORING c'est plutot simple, mais
+> quand les 2 pourront coexister (par exemple un declenchement RANDOM), il faut
+> faire les 2 calculs, avec vectoring et sans, non ? Et finalement on a 2 TOD,
+> un TOD enroute et un TOD pour l'arrivee, ou je me trompe ?"
+
+### Part 1 — two parallel profiles?
+
+**Opinion: no, and it would be the wrong model.** Two profiles held at once
+means ATC entertaining two intentions simultaneously, which no controller does:
+he DECIDES, then announces ("expect vectors" / "cleared via the STAR"). If the
+trigger becomes random, the roll belongs BEFORE the top of descent, and from
+then on there is one distance.
+
+What is genuinely needed is what already exists: the ladder re-evaluates every
+frame, so if the decision changes later the profile re-plans itself. Under
+`allow_vectoring`, where vectoring is possible but not agreed, the planning
+deliberately stays on the ROUTED distance -- see the coordination assumption in
+`force-app-vectoring.md`.
+
+Open sub-question: if the decision is taken late (traffic), the aircraft may
+already be committed to a routed profile and be too high for a vectored one. A
+controller would then not vector at all, or would extend. Nothing implements
+that yet.
+
+### Part 2 — two TODs. Yes, and the code merges them.
+
+The user is right, and it is more than terminology. There are two decisions,
+owned by two different units:
+
+| | question | owner |
+|---|---|---|
+| en-route TOD | when to leave cruise | ACC |
+| arrival TOD | when to start down for the platform / FAF | terminal |
+
+The pre-TOD chain currently computes ONE answer: it walks every candidate
+(remaining route fixes, STAR fixes, the FAF) and keeps whichever forces the
+earliest descent. That merges the two into a single "most binding constraint".
+
+**This merge is what produced the FL180 / FL100 collision** on the DIK → EDLW
+arrival:
+
+    70 NM  descend flight level 180, cleared via ADEMI Three Alpha   <- leave cruise
+    68 NM  descend flight level 100  (target 3000 ft at DOR)         <- arrival profile
+
+Two clearances two miles apart, the first already superseded before it is
+reached. They are not a sequence -- they are two mechanisms answering two
+different questions without knowing about each other, one heuristic
+(`cruise * 0.66`) and one constraint-driven.
+
+**Undecided:** whether to model the two TODs explicitly (each with its own
+constraint set and owner) or to keep one merged calculation and simply fix the
+first level to come from the published constraints rather than
+`cruise * 0.66`. The second is much smaller; the first is closer to how the
+airspace actually works and would make the ACC / terminal split explicit -- which
+the arrival phase already needs elsewhere.
