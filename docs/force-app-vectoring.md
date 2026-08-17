@@ -1,7 +1,12 @@
 # FORCE APP VECTORING — specification
 
-Status: **specification only, nothing implemented.** Agreed with the user
-2026-08-16, before the public release.
+**Spec version:** 2.0 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta (`d7c3f64`,
+package 87)
+
+Status: **implemented and flown twice, neither flight completing the arrival.**
+The manoeuvre itself works — build 85 flew it to the localiser — but the
+approach was never handed to Tower on either flight. See *Known defects* at the
+end before reading this as a description of working behaviour.
 
 ---
 
@@ -12,6 +17,41 @@ Status: **specification only, nothing implemented.** Agreed with the user
 
 This is not a refinement of the sequence — it is the constraint that
 *dimensions* the whole manoeuvre. Everything below is derived from it.
+
+### The rule as ICAO states it, and what we had wrong (2026-08-17)
+
+Our numbers were **stricter than the standard**, and that is what refused a
+legal manoeuvre on the EDLW arrival of 2026-08-17. ICAO Doc 4444 (PANS-ATM)
+requires the final vector to:
+
+- provide an intercept angle with the final approach track of **45° or less**
+  (30° or less only for independent parallel approaches);
+- establish the aircraft on that track, in level flight, **at least 2.0 NM
+  before it intercepts the glide path**;
+- provide at least **1.0 NM straight and level** before the track intercept;
+- and have the aircraft intercept the glide path **from below**.
+
+| | ours, before | ICAO | now |
+|---|---|---|---|
+| intercept angle | 30° | 45° max | 30° **target**, up to 45° when tight |
+| aligned before the FAF | 3.0 NM | 2.0 NM | 3.0 NM **target**, 2.0 NM floor |
+
+The distinction between a *target* and a *floor* is the whole point. Between the
+two the manoeuvre is steeper than we would choose, entirely legal, and far
+better than handing the aircraft back its published procedure a few miles from
+the FAF. Measured at the abandon point of that flight — 1.5 NM off axis, 5.1 NM
+before the FAF:
+
+```
+our rule    3.0 + 1.5/tan 30  = 5.6 NM  ->  refused, "resume own navigation"
+ICAO floor  2.0 + 1.5/tan 45  = 3.5 NM  ->  1.6 NM of margin
+```
+
+The clearance issued under vectors must also carry the level to hold **until
+established**, which is what makes it licit to clear an aircraft that is not yet
+on the axis — and why `report established` exists at all. The reference adapts
+to the approach type: an ILS or LOC approach has a **localiser**, an RNP/RNAV or
+VOR approach does not, and gets the generic form.
 
 Two consequences that must be implemented as such:
 
@@ -242,13 +282,36 @@ joins from the outside.
 
 ## Altitudes
 
-Each leg is cleared to `max(sector MSA, leg altitude)`:
+**Superseded 2026-08-17 — a fixed offset above the FAF is above the glide path
+exactly where that matters.** The nominal 3° path rises 318 ft per NM before the
+FAF, so:
 
-| leg | altitude |
-|---|---|
-| downwind | platform + 2000 |
-| base | platform + 1000 |
-| axis | **the glide-intercept altitude** (2500 ft at EDLW) |
+```
+FAF + 2000  is below the path only beyond  6.3 NM
+FAF + 1000  is below the path only beyond  3.1 NM
+```
+
+Measured on the EDLW arrival: the aircraft crossed **1.6 NM from the FAF at
+4461 ft with the path at 3000** — 1460 ft high — and was then told *"continue
+descent to 3000"* for a FAF published at **2500**. Too late, and not low enough.
+
+A leg level is now bounded by three constraints, in this order, then floored by
+the sector MSA / grid MORA as before:
+
+| | constraint | why |
+|---|---|---|
+| 1 | at most `FAF altitude + s × 318 − 300 ft` | intercept the glide path **from below** (ICAO) |
+| 2 | never below the FAF crossing altitude | the aircraft joins the vertical profile there |
+| 3 | never below what the reference gradient reaches over the **vector track** still to fly | ATC cannot order a level that needs a dive |
+
+And the level is **re-evaluated as the geometry changes**, not issued once. A
+level correct 30 NM out is above the path 5 NM out, so it is stepped down when it
+has drifted 400 ft — heading untouched, because this is a level, not a vector.
+Replayed against the flight: `4500 → 4100 (~6 NM) → 3700 (~4.3 NM)` instead of
+holding 4500 all the way to the FAF.
+
+The alignment leg targets **the FAF crossing altitude itself**, not a round
+number above it.
 
 This closes the rule settled on 2026-08-16
 (`coding_last_assigned_altitude`): the FAF altitude is **wrong** on a published
@@ -426,3 +489,23 @@ Note that the off-route recovery already sketched elsewhere is the same
 manoeuvre seen from the other side -- an aircraft that has drifted is vectored
 back onto its route. If both are built, they should share one implementation
 rather than grow two.
+
+---
+
+## Known defects (2026-08-17, build `d7c3f64` / package 87)
+
+Flown twice on LFLP → EDLW. **Neither flight completed the arrival.**
+
+| | defect | status |
+|---|---|---|
+| **The Tower handoff never fires.** On build 85 the manoeuvre worked end to end, the pilot reported *"established as 06"* — and ATC never answered. `[approach] profile enforcement yielded to Tower handoff` was logged 2 400 times: the profile stands aside for a transfer that never comes. | **open**, deferred by the user |
+| **The feasibility margin does not budget the turn.** The sequence armed with 6.7 NM of margin; the turn onto the intercept heading then ate 11 NM of axis distance for 4 NM of lateral closure, at an effective 26° against the 30° assumed. The ICAO floor now absorbs this, but the arithmetic is still wrong. | open |
+| **No speed control anywhere in the manoeuvre.** A vectored approach without speed assignment does not exist in practice. Deliberately deferred: the values depend on aircraft category, which we do not have. | deferred (point 4) |
+| **The route tracker is re-initialised behind the aircraft** when the approach waypoints are appended, which cancels any direct-to and made the routed distance to the IAF read 24 NM with the aircraft 2 NM from it. | open |
+
+## Revision history
+
+| version | date | build | change |
+|---|---|---|---|
+| 1.x | 2026-08-16 | — | specification, written before implementation |
+| 2.0 | 2026-08-17 | v4.4.0-beta (`d7c3f64`, pkg 87) | brought to the ICAO Doc 4444 limits after the EDLW flight: 45° / 2.0 NM as the floor with 30° / 3 NM kept as the target; `until established on the localiser` added to the clearance, adapting to the approach type; leg levels derived from the glide path instead of a fixed offset above the FAF, and stepped down as the geometry changes; status corrected from "nothing implemented" |
