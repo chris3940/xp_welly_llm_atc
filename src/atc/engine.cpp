@@ -787,6 +787,43 @@ static std::string current_flight_airport(
   return ctx.nearest_airport_id;   // on the ground / fallback
 }
 
+// ── will THIS arrival be vectored? ────────────────────────────────────────
+// Decided ONCE and latched, as soon as the arrival runway and approach are
+// bound -- which is well before any descent decision, and is the earliest
+// moment the question can honestly be answered.
+//
+// It is a latch and not a settings read because the trigger will not always be
+// a setting: ALLOW VECTORING is meant to become a per-arrival draw (user,
+// 2026-08-18). A draw consulted at each call site would answer differently from
+// one frame to the next, and the descent would be planned on one track while
+// the vectors were flown on another -- the exact split that already cost a
+// flight when the pre-TOD chain and the ladder measured different distances.
+//
+// One decision, taken early, read everywhere. The draw plugs in below, in the
+// single place marked for it. [C. P. Potter]
+static int s_arrival_vectored = -1; // -1 undecided, 0 no, 1 yes
+
+static bool arrival_is_vectored(const xplane_context::XPlaneContext &ctx) {
+  (void)ctx;
+  if (s_arrival_vectored >= 0)
+    return s_arrival_vectored == 1;
+  // Nothing to latch onto yet: the approach is not bound, so the runway in use
+  // is not certain. Answer from the setting without committing, so a forced
+  // arrival still behaves before the latch closes.
+  if (s_assigned_approach_designator.empty())
+    return settings::force_app_vectoring();
+  if (settings::force_app_vectoring())
+    s_arrival_vectored = 1;
+  else
+    // FUTURE: allow_vectoring() -> the per-arrival draw belongs HERE and
+    // nowhere else. Until it exists, not forced means not vectored.
+    s_arrival_vectored = 0;
+  logging::info("[vector] arrival decision latched: %s (approach %s)",
+                s_arrival_vectored ? "VECTORED" : "published procedure",
+                s_assigned_approach_designator.c_str());
+  return s_arrival_vectored == 1;
+}
+
 // Terminal stack walk gate. The walk infers the terminal shelf from the SHAPE
 // of the airspace stack instead of from its name, for exports that omit the
 // type word (Germany: 83 % of controlled volumes; Turin locally). It is opt-in
@@ -880,6 +917,7 @@ void reset() {
   s_callsign_full_used = false;
   s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
+  s_arrival_vectored = -1;
   s_vtf_leg = VecLeg::None;
   s_vtf_hdg = 0.0;
   s_vtf_cleared_ft = 0;
@@ -1023,6 +1061,7 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_callsign_full_used = false;
   s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
+  s_arrival_vectored = -1;
   s_vtf_leg = VecLeg::None;
   s_vtf_hdg = 0.0;
   s_vtf_cleared_ft = 0;
@@ -6126,6 +6165,7 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   s_vector_mode_logged = false;
   s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
+  s_arrival_vectored = -1;
   s_vtf_leg = VecLeg::None;
   s_vtf_hdg = 0.0;
   s_vtf_cleared_ft = 0;
@@ -7462,6 +7502,27 @@ static FixCompliance check_next_fix(const xplane_context::XPlaneContext &ctx,
     c.dist_nm = routed_distance_to_fix_idx(ctx, i);
     c.lat = f.lat;
     c.lon = f.lon;
+    // THE LADDER MUST MEASURE THE TRACK IT WILL ACTUALLY FLY. Under FORCE APP
+    // VECTORING the aircraft is cut across the published path, so the routed sum
+    // counts miles it will never get. The pre-TOD chain has taken min(routed,
+    // direct) since b5e9cb2 for exactly this reason; the ladder -- the thing
+    // that issues the rungs -- was left on the routed distance, so the two
+    // halves of the same descent planned against different tracks.
+    //
+    // Measured on the flight of 2026-08-17, the rung to FL100 with the target
+    // 3000 ft at DOR:
+    //     routed 64.4 NM, direct 47.3 NM  (routed is +17.1)
+    // It fired at exactly TOD = 64.4 NM on the routed figure, leaving 14 943 ft
+    // to lose in the 47.3 NM that were really there -- 316 ft/NM against a 265
+    // reference. It never caught up: 30 NM from the FAF the aircraft was still
+    // 14 000 ft above the platform, which no amount of vectoring geometry can
+    // recover. This is open-questions Q1, raised 2026-08-17. [C. P. Potter]
+    if (arrival_is_vectored(ctx) && (f.lat != 0.0 || f.lon != 0.0)) {
+      const double direct = traffic_geometry::distance_nm(
+          ctx.latitude, ctx.longitude, f.lat, f.lon);
+      if (direct > 0.0 && direct < c.dist_nm)
+        c.dist_nm = direct;
+    }
     // Time to the fix = distance / groundspeed (floored so we don't divide by a
     // near-zero GS on the ground / in a hold).
     const double gs = ctx.groundspeed_kts > 40.0f
@@ -8976,7 +9037,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
           // get, which is why the descent ended up needing more than 2000 fpm.
           // The shorter distance is more binding, so it moves the TOD EARLIER.
           double d_used = acc_nm;
-          if (settings::force_app_vectoring()) {
+          if (arrival_is_vectored(ctx)) {
             const double direct = traffic_geometry::distance_nm(
                 ctx.latitude, ctx.longitude, c.lat, c.lon);
             d_used = std::min(d_used, direct);
@@ -11516,6 +11577,7 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
   s_vector_mode_logged = false;
   s_vtf_faf_key.clear();
   s_vector_mode_final_known = false;
+  s_arrival_vectored = -1;
   s_vtf_leg = VecLeg::None;
   s_vtf_hdg = 0.0;
   s_vtf_cleared_ft = 0;
