@@ -1,6 +1,6 @@
 # FORCE APP VECTORING — specification
 
-**Spec version:** 2.1 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta (`11365b5`)
+**Spec version:** 2.2 · **Dated:** 2026-08-18 · **Build:** v4.4.0-beta (`7d7dfe6`)
 
 Status: **implemented and flown twice, neither flight completing the arrival.**
 The manoeuvre itself works — build 85 flew it to the localiser — but the
@@ -16,6 +16,76 @@ end before reading this as a description of working behaviour.
 
 This is not a refinement of the sequence — it is the constraint that
 *dimensions* the whole manoeuvre. Everything below is derived from it.
+
+### Sources, quoted (ICAO Doc 4444 / PANS-ATM, 16th ed.)
+
+Everything below is quoted from the document itself, not from a summary. An
+earlier revision of this spec cited figures taken from a web search and got one
+of them wrong — see the correction two paragraphs down.
+
+**8.9.3.6 — vectoring for final approach (the general rule, a single runway):**
+
+> *Aircraft vectored for final approach should be given a heading or a series of
+> headings calculated to close with the final approach track. The final vector
+> shall enable the aircraft to be established on the final approach track prior
+> to intercepting the specified or nominal glide path of the approach procedure
+> from below, and should provide an intercept angle with the final approach track
+> of **45 degrees or less**.*
+
+**6.7.3.2.4 — INDEPENDENT PARALLEL approaches only:**
+
+> *a) enable the aircraft to intercept at an angle **not greater than 30
+> degrees**; b) provide at least 1.9 km (**1.0 NM**) straight and level flight
+> prior to the final approach course or track intercept; and c) enable the
+> aircraft to be established on the final approach course or track, in level
+> flight for at least 3.7 km (**2.0 NM**) …*
+
+**8.6.5.5 — terminating vectoring:**
+
+> *In terminating vectoring of an aircraft, the controller shall instruct the
+> pilot to resume own navigation, giving the pilot the aircraft's position and
+> appropriate instructions … if the current instructions had diverted the
+> aircraft from a previously assigned route.*
+
+**12.4.1.4 — termination of vectoring, phraseology:**
+
+> *a) RESUME OWN NAVIGATION (position of aircraft) (specific instructions);
+> b) RESUME OWN NAVIGATION [DIRECT] (significant point) [MAGNETIC TRACK (three
+> digits) DISTANCE (number) KILOMETRES (or MILES)].*
+
+**12.3.3.2 — approach instructions, phraseology:**
+
+> *d) CLEARED DIRECT (waypoint), DESCEND TO (level), EXPECT TO REJOIN STAR
+> [(STAR designator)] AT (waypoint), **then** REJOIN STAR [(designator)] [AT
+> (waypoint)]; e) CLEARED DIRECT (waypoint), DESCEND TO (level), **then** REJOIN
+> STAR (designator) AT (waypoint); f) CLEARED (type of approach) APPROACH
+> [RUNWAY (number)].*
+
+The SID side is symmetric — 12.3.3.1 g) and h), *REJOIN SID … AT (waypoint)*.
+
+**8.9.3.7:**
+
+> *Whenever an aircraft is assigned a vector which will take it through the final
+> approach track, it should be advised accordingly, stating the reason.*
+
+**Correction to spec 2.0/2.1 (2026-08-18).** Those revisions said ICAO requires
+the aircraft established **2.0 NM** before the glide path intercept, and treated
+30° as the ICAO nominal. Both readings came from the wrong section: **6.7.3.2.4
+governs independent parallel approaches only.** For a single runway the rule is
+8.9.3.6 — 45° or less, established *before* the glide path intercept, from below,
+with **no distance figure at all**.
+
+So of our numbers:
+
+| ours | status |
+|---|---|
+| 45° maximum | **is** the ICAO general limit (8.9.3.6) |
+| 30° nominal | a conservatism of ours; it is the *parallel* limit, not a general nominal |
+| established 3 NM before the FAF | **our own rule**, from the user's requirement — ICAO gives no figure here |
+| 2.0 NM floor | a conservatism of ours; the figure itself comes from the parallel-approach section |
+
+The rules are not weaker for being ours, but they must not be presented as the
+standard's.
 
 ### The rule as ICAO states it, and what we had wrong (2026-08-17)
 
@@ -527,6 +597,28 @@ a 0.5 NM tolerance.
 
 ---
 
+## Terminating the manoeuvre (2026-08-18)
+
+**"Resume own navigation direct <FAF>" was wrong twice over**, and it is what the
+flown arrivals kept hearing.
+
+- 12.4.1.4 does allow *RESUME OWN NAVIGATION [DIRECT] (significant point)*, but
+  8.6.5.5 requires the aircraft's **position** with it, or the phraseology's
+  magnetic track and distance. We gave neither.
+- More fundamentally, it does not belong in the approach phase at all: the
+  approach-instruction set (12.3.3.2) contains **no such phrase**. After a direct,
+  the procedure is **REJOINED**, or the approach is simply cleared.
+- And the **FAF is the worst possible target**: it is not a rejoin point, and
+  sending an *unaligned* aircraft straight at it is precisely what the manoeuvre
+  exists to prevent.
+
+Terminating now hands the published procedure back at its **entry** — the IAF —
+and clears the approach with it:
+
+```
+cleared direct <IAF>, cleared <approach> runway <NN>.
+```
+
 ## Known defects (2026-08-17, build `11365b5`)
 
 Flown twice on LFLP → EDLW. **Neither flight completed the arrival.**
@@ -543,5 +635,6 @@ Flown twice on LFLP → EDLW. **Neither flight completed the arrival.**
 | version | date | build | change |
 |---|---|---|---|
 | 1.x | 2026-08-16 | — | specification, written before implementation |
+| 2.2 | 2026-08-18 | v4.4.0-beta (`7d7dfe6`) | ICAO Doc 4444 quoted verbatim from the document instead of from a search summary, **and a correction**: the 2.0 NM and the 30° that 2.0/2.1 attributed to ICAO come from 6.7.3.2.4, which governs INDEPENDENT PARALLEL approaches only. The general rule is 8.9.3.6 -- 45° or less, established before the glide path intercept from below, no distance figure. Our 3 NM and 2 NM are ours, not the standard's. Terminating the manoeuvre now REJOINS the procedure at the IAF (12.3.3.2 d/e/f) instead of "resume own navigation direct <FAF>", which the approach-instruction set does not contain |
 | 2.1 | 2026-08-17 | v4.4.0-beta (`11365b5`) | speed control on the vectors (210 kt sequencing, 160 kt with the approach clearance, EUROCONTROL); no category table -- the target is only issued when the aircraft is faster than it. Records that the lead is a TIME and the alignment rule a DISTANCE, so the margin narrows as speed drops |
 | 2.0 | 2026-08-17 | v4.4.0-beta (`d7c3f64`, pkg 87) | brought to the ICAO Doc 4444 limits after the EDLW flight: 45° / 2.0 NM as the floor with 30° / 3 NM kept as the target; `until established on the localiser` added to the clearance, adapting to the approach type; leg levels derived from the glide path instead of a fixed offset above the FAF, and stepped down as the geometry changes; status corrected from "nothing implemented" |

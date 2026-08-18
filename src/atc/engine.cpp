@@ -10658,12 +10658,34 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                     "%.1f) -- abandoning, resume own navigation",
                     faf.ident.c_str(), s, vec_floor_s(y), kVecInterceptMaxDeg,
                     kVecAlignMinNm, vec_required_s(y));
-      // Say it AND do it. The abandon told the pilot "direct KOLOT" and then
-      // challenged him ten seconds later for not tracking BAMSU, because the
-      // intermediate fixes were never neutralised (real flight 2026-08-16).
+      // WHAT TO SAY, AND WHERE TO SEND IT. Not "resume own navigation direct
+      // <FAF>", which was wrong twice over (user, 2026-08-18):
+      //
+      //  - ICAO Doc 4444 12.4.1.4 does allow "RESUME OWN NAVIGATION [DIRECT]
+      //    (significant point)", but only with "(position of aircraft)" or the
+      //    magnetic track and distance. We gave neither.
+      //  - and it does not belong here at all. The approach-instruction set
+      //    (12.3.3.2) has no such phrase: after a direct, the procedure is
+      //    REJOINED -- "CLEARED DIRECT (waypoint), DESCEND TO (level), then
+      //    REJOIN STAR (designator) AT (waypoint)" (d/e), or the approach is
+      //    simply cleared (f). The SID side is symmetric, 12.3.3.1 g/h.
+      //
+      // And the FAF is the worst possible target: it is not a rejoin point, and
+      // sending an UNALIGNED aircraft straight at it is the one thing the whole
+      // manoeuvre exists to avoid. Hand the published procedure back at its
+      // entry -- the IAF -- and clear the approach with it.
       s_vtf_abandoned = true;
-      apply_direct_to(faf.ident);
-      *out_text = callsign + ", resume own navigation direct " + faf.ident + ".";
+      std::string rejoin = resolve_approach_iaf(ctx, s_assigned_star_name,
+                                                s_assigned_approach_designator);
+      if (rejoin.empty())
+        rejoin = faf.ident; // nothing better resolved; still say it properly
+      apply_direct_to(rejoin);
+      const std::string appr = approach_clearance_phrase(ctx);
+      *out_text = callsign + ", cleared direct " + rejoin +
+                  (appr.empty() ? ", cleared approach."
+                                : (", cleared " + appr + "."));
+      logging::info("[vector] handing the procedure back at %s (not the FAF %s)",
+                    rejoin.c_str(), faf.ident.c_str());
       if (out_requires_readback)
         *out_requires_readback = true;
       return true;
