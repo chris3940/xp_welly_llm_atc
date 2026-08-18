@@ -246,6 +246,7 @@ static bool   s_vtf_nudged       = false; // re-issued once already
 // 2026-08-16 abandoned at 18:39 and then heard "expect vectors for ILS approach
 // runway 06" from the next controller at 23:05. [C. P. Potter]
 static bool   s_vtf_abandoned    = false;
+static bool   s_vtf_slow_issued  = false; // the standalone 160 kt has gone out
 // Lateral deviation at the previous check, and a cooldown, for the localiser
 // intercept monitor on the AXIS leg.
 static double s_vtf_prev_y       = 0.0;
@@ -929,6 +930,7 @@ void reset() {
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
   s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
@@ -1073,6 +1075,7 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
   s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
@@ -6196,6 +6199,7 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
   s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
@@ -10140,7 +10144,11 @@ static constexpr double kVecOffsetNm      = 8.0;  // downwind displacement
 // So 30 deg / 3 NM stay as the TARGET -- what ATC aims for, and what a passenger
 // notices -- while 45 deg / 2.0 NM are the FLOOR below which the manoeuvre is
 // genuinely impossible and must be abandoned. [C. P. Potter]
-static constexpr double kVecAlignNm       = 3.0;  // aligned before the FAF (target)
+// 5 NM, not 3. The aircraft must arrive on the axis far enough out to have TIME
+// to fly the turn and settle before the FAF (user, 2026-08-18). The abandon
+// floor below stays at 2 NM: it is the last resort, not the target, and moving
+// both would make the manoeuvre refuse geometries it can still fly.
+static constexpr double kVecAlignNm       = 5.0;  // aligned before the FAF (target)
 static constexpr double kVecAlignMinNm    = 2.0;  // ICAO minimum before abandoning
 static constexpr double kVecInterceptDeg  = 30.0; // nominal intercept angle
 static constexpr double kVecInterceptMaxDeg = 45.0; // ICAO maximum, used when tight
@@ -10159,7 +10167,7 @@ static constexpr double kVecInterceptMaxDeg = 45.0; // ICAO maximum, used when t
 // Aiming at the POINT instead of holding an ANGLE is self-correcting: every
 // re-evaluation re-aims, so drift, wind and a slow turn are absorbed instead of
 // accumulating. [C. P. Potter]
-static constexpr double kVecInterceptPointNm = 4.0;
+static constexpr double kVecInterceptPointNm = 5.0;
 
 static constexpr double kVecFloorNm       = 15.0; // below this, do not start
 static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
@@ -10183,7 +10191,11 @@ static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
 // aircraft was still 1.6 NM off the axis, which forced a 37-degree "alignment"
 // -- steeper than the intercept it replaced, and unachievable once the reaction
 // time is modelled. Measured on the realistic-pilot replay, 2026-08-17.
-static constexpr double kVecLeadSecs      = 30.0;
+// 45 s, measured rather than assumed: the flight of 2026-08-17 took 39 s between
+// the instruction and the readback, and the turn follows that. At 30 s the
+// aircraft settled on the axis 3.8 NM before the FAF against a 5 NM rule -- the
+// vector was right, it was simply given a mile and a half too late.
+static constexpr double kVecLeadSecs      = 45.0;
 static constexpr double kVecLeadMinNm     = 1.0;  // floor, slow aircraft
 static constexpr double kVecLeadMaxNm     = 4.0;  // ceiling, fast aircraft
 static constexpr double kVecFinalNm       = 6.0;  // aimed length of the final
@@ -10343,6 +10355,15 @@ static double vec_track_nm(double s, double y) {
 // never slowed sizes the whole manoeuvre on a speed it will not have.
 static constexpr int kVecSpeedIntermediateKt = 210;
 static constexpr int kVecSpeedFinalKt        = 160;
+// How far out the final speed goes, ahead of the intercept point. A clean
+// aircraft at idle sheds roughly 10 kt per NM IN LEVEL FLIGHT, so 210 -> 160 is
+// about 5 NM; in a descent it sheds almost nothing, which is why the level must
+// be reached first (user, 2026-08-18: "en 30 sec on peut passer de 210 a 160 kts
+// alors qu'en plus on est encore en descente ?"). Issued as its own
+// transmission: bundling it with the alignment vector gives the pilot four
+// instructions at once, and leaves no time for the speed to take effect before
+// the turn -- which is the whole point of asking for it.
+static constexpr double kVecSlowLeadNm       = 5.0;
 
 // The instruction, or nothing. NO aircraft-category table -- we do not have the
 // data, and it is not needed: the target is only ever issued when the aircraft
@@ -10705,6 +10726,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     s_vtf_nudge_secs = 0.0f;
     s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
   s_vtf_recut_secs = 0.0f;
     const int cap = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
@@ -10817,6 +10839,28 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   }
 
 
+  // ── the final speed, on its own and early enough ──────────────────────────
+  // Before the alignment vector, never with it. Slowing is what keeps the last
+  // turn from overshooting the axis -- turn radius grows with the SQUARE of
+  // speed, ~1.1 NM at 210 kt against ~0.65 at 160 -- and it is what will make
+  // sequencing possible when traffic arrives. [C. P. Potter]
+  if (!aligning && !s_vtf_slow_issued &&
+      s <= kVecInterceptPointNm + kVecSlowLeadNm) {
+    const std::string sp = vec_speed_phrase(ctx, kVecSpeedFinalKt);
+    s_vtf_slow_issued = true; // one attempt, whether or not there is anything to say
+    if (!sp.empty()) {
+      *out_text = callsign + sp + ".";
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      logging::info("[vector] final speed %d kt at %.1f NM to FAF "
+                    "(%.0f kt now, intercept point %.0f NM)",
+                    kVecSpeedFinalKt, s,
+                    static_cast<double>(ctx.groundspeed_kts),
+                    kVecInterceptPointNm);
+      return true;
+    }
+  }
+
   // ── stepped descent along the leg ─────────────────────────────────────────
   // PLACED HERE ON PURPOSE. Every leg block below ends with `return false`, so
   // this block sat after them and was UNREACHABLE while any leg was active --
@@ -10898,6 +10942,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn1 + 360.0, 360.0);
       s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
   s_vtf_recut_secs = 0.0f;
       *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) + ".";
@@ -10918,6 +10963,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       s_vtf_hdg = std::fmod(course + kVecInterceptDeg * turn_sign + 360.0, 360.0);
       s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
   s_vtf_recut_secs = 0.0f;
       *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) +
@@ -11037,12 +11083,18 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
         // it the aircraft is cleared BOTH to the approach and to a level, with
         // nothing saying which prevails, and may leave protection before
         // intercepting.
-        txt += ", descend " + format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta) +
+        // "maintain" when the aircraft is already there -- which it now usually
+        // is, since the sequencing legs step it down to the platform first.
+        // "Descend 2500" to an aircraft level at 2500 is not an instruction.
+        const char *verb =
+            (ctx.altitude_ft_msl > static_cast<float>(lvl) + 200.0f)
+                ? ", descend "
+                : ", maintain ";
+        txt += verb + format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta) +
                " until established on " + vec_established_ref(ctx);
         s_vtf_cleared_ft = lvl;
         s_enroute_cleared_alt_ft = lvl;
       }
-      txt += vec_speed_phrase(ctx, kVecSpeedFinalKt);
       const std::string appr_phrase = approach_clearance_phrase(ctx);
       txt += appr_phrase.empty()
                  ? ", cleared approach, report established."
@@ -11657,6 +11709,7 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
   s_vtf_nudge_secs = 0.0f;
   s_vtf_nudged = false;
   s_vtf_abandoned = false;
+  s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
   s_vtf_recut_secs = 0.0f;
     logging::info("IFR descent: stepped-descent target %d ft DROPPED -- already "
