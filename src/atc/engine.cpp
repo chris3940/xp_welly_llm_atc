@@ -10272,22 +10272,6 @@ static double vec_intercept_rel_deg(double s, double y) {
   return std::max(-kVecInterceptMaxDeg, std::min(kVecInterceptMaxDeg, rel));
 }
 
-// Intercept angle to assign for a given geometry: the nominal 30 degrees when
-// there is room for it, steepened towards the ICAO maximum only as far as the
-// remaining axis distance forces. Returns 0 when even the maximum will not fit.
-static double vec_intercept_angle(double s, double y) {
-  if (s >= vec_required_s(y))
-    return kVecInterceptDeg;
-  const double a = std::fabs(y);
-  if (a < 0.01)
-    return kVecInterceptDeg;
-  // Smallest angle that still aligns by kVecAlignMinNm: tan(t) = |y| / (s - min)
-  const double run = s - kVecAlignMinNm;
-  if (run <= 0.0)
-    return 0.0;
-  const double t = std::atan(a / run) * 180.0 / M_PI;
-  return (t <= kVecInterceptMaxDeg) ? t : 0.0;
-}
 
 // Lateral distance from the axis at which the FINAL ALIGNMENT vector is given.
 //
@@ -10797,6 +10781,17 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     // legal; abandoning there hands the aircraft back its procedure a few miles
     // from the FAF, which is worse in every respect. Measured 2026-08-17: 1.5 NM
     // off axis at 5.1 NM, nominal wanted 5.6 and refused, ICAO wants 3.5.
+    // D1 REMAINS OPEN, and deliberately so. Judging feasibility from the
+    // PROJECTED position was tried on 2026-08-18 and backed out: it counts the
+    // turn twice. The aim is already computed from where the aircraft will be,
+    // so after the turn it converges faster than the projection assumes -- and
+    // the test abandoned a manoeuvre the replay had been completing (projected
+    // s=7.8 y=5.8 against a floor of 7.8, with 10.0 NM actually in hand).
+    //
+    // The turn cost is real -- 4.3 NM of axis distance for 0.2 NM of closure on
+    // the flight of 2026-08-17 -- but it belongs in ONE place, and the aim is
+    // that place. Adding it here as well double-counts. Judged from the current
+    // position until there is a formulation that adds it exactly once.
     if (s < vec_floor_s(y)) {
       s_vtf_leg = VecLeg::Refused;
       logging::info("[vector] cannot align even at the ICAO limit before FAF %s "
