@@ -10617,6 +10617,16 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     return false;
   if (!settings::force_app_vectoring())
     return false; // ATC-initiated vectoring (allow_vectoring) is a later step
+  // THE OUTGOING SECTOR GOES SILENT. Once "contact X on Y" has been transmitted
+  // the aircraft belongs to the next controller, and the current one must not
+  // speak again on the old frequency. Every other poll observes this -- the
+  // flag is read in 42 places -- and the vectoring was the one that did not, so
+  // on 2026-08-17 Langen handed the aircraft to Dortmund Approach at 19:44 and
+  // then said "resume own navigation direct KOLOT" at 19:51, seven seconds
+  // later, on 118.750. Cleared by the pilot's check-in on the new frequency.
+  // [C. P. Potter]
+  if (s_sector_checkin_pending)
+    return false;
   const AS st = atc_state_machine::get_state();
   if (st != AS::IFR_DESCENT && st != AS::IFR_ARRIVAL &&
       st != AS::IFR_APPROACH_CONTACT && st != AS::IFR_APPROACH_DESCENT)
