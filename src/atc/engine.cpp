@@ -10430,7 +10430,30 @@ static int vec_leg_level_ft(const xplane_context::XPlaneContext &ctx,
                             const cifp_reader::FafFix &faf, double s_nm,
                             double track_nm, float alt_now_ft, int cap_ft,
                             bool on_final_segment = false) {
+  // ONE VOCABULARY FOR THE VERTICAL. The vectoring used to hand out its own
+  // levels -- `FAF + 2000` on the first leg -- in parallel with the descent
+  // ladder, so two mechanisms owned the profile and neither knew what the other
+  // had said. That is where every "altitude qui tombe de nulle part" came from,
+  // and it also left the mid-leg step-down with nothing to do: the first leg
+  // already cleared the aircraft to the bottom of the ladder from 28 NM out.
+  //
+  // The leg level is now the LADDER's rung towards the FAF crossing altitude --
+  // the same descent_rung_ft() the descent uses -- and the vectoring only adds
+  // the two constraints that are its own: stay below the glide path, never
+  // below the platform. On the final segment the target itself is the platform,
+  // so no rung applies. [C. P. Potter]
   int want = cap_ft;
+  if (!on_final_segment && faf.alt_ft > 0) {
+    const auto dp = xplane_context::airport_pos_for(dest);
+    const int tma_ceil =
+        (dp.first != 0.0 || dp.second != 0.0)
+            ? openair_db::terminal_tma_ceiling(dp.first, dp.second,
+                                               dest_stack_walk_ok())
+            : 0;
+    const int rung = descent_rung_ft(alt_now_ft, faf.alt_ft, tma_ceil);
+    if (rung > 0)
+      want = std::max(want, rung);
+  }
   if (faf.alt_ft > 0 && s_nm > 0.0) {
     const int gp = faf.alt_ft + static_cast<int>(s_nm * kGlideSlopeFtPerNm);
     want = std::min(want, gp - kGlideClearanceFt);
@@ -10793,6 +10816,46 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     }
   }
 
+
+  // ── stepped descent along the leg ─────────────────────────────────────────
+  // PLACED HERE ON PURPOSE. Every leg block below ends with `return false`, so
+  // this block sat after them and was UNREACHABLE while any leg was active --
+  // which is why it never fired once in two flights and every replay. It runs
+  // before them now, and is suppressed while an alignment vector is due so it
+  // can never speak over one.
+  // A leg level is issued once and then goes stale: the aircraft closes on the
+  // FAF, the glide path comes down to meet it, and a level that was correctly
+  // below the path 30 NM out is above it 5 NM out. Measured 2026-08-17: cleared
+  // 4500 at 32.8 NM and never re-cleared, the aircraft reached 5.3 NM still at
+  // 4924 with the path at 4180 -- 743 ft high, and 1460 ft high by 1.6 NM.
+  //
+  // So re-evaluate the level as the geometry changes and step down when it has
+  // drifted. Heading is untouched: this is a level, not a vector. Runs LAST so
+  // it can never pre-empt an alignment vector or an abandon. [C. P. Potter]
+  if (!aligning && s_vtf_cleared_ft > 0 && s > kVecAlignNm) {
+    const int cap = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
+    const int want = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
+                                      ctx.altitude_ft_msl, cap);
+    // Only downwards, and only once it is worth a transmission.
+    // 900 ft, so a step is worth about a thousand feet. At 400 the levels came
+    // out 6000 / 5000 / 4500 -- a controller does not descend an aircraft by
+    // five hundred feet, and every extra transmission is one more thing for the
+    // pilot to read back.
+    if (want > 0 && want <= s_vtf_cleared_ft - 900) {
+      const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+      *out_text = callsign + ", descend " +
+                  format_alt_clearance(want, AltHint::Auto, ctx.qnh_hpa, ta) + ".";
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      logging::info("[vector] step down %d -> %d ft at %.1f NM to FAF "
+                    "(glide path %d ft there)",
+                    s_vtf_cleared_ft, want, s,
+                    faf.alt_ft + static_cast<int>(s * kGlideSlopeFtPerNm));
+      s_vtf_cleared_ft = want;
+      s_enroute_cleared_alt_ft = want;
+      return true;
+    }
+  }
   // ── compliance ────────────────────────────────────────────────────────────
   // A controller does NOT give up because the aircraft has not turned yet -- he
   // ASKS (user, 2026-08-16): "confirm left turn heading 027". Abandoning belongs
@@ -11089,36 +11152,6 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     return false;
   }
 
-  // ── stepped descent along the leg ─────────────────────────────────────────
-  // A leg level is issued once and then goes stale: the aircraft closes on the
-  // FAF, the glide path comes down to meet it, and a level that was correctly
-  // below the path 30 NM out is above it 5 NM out. Measured 2026-08-17: cleared
-  // 4500 at 32.8 NM and never re-cleared, the aircraft reached 5.3 NM still at
-  // 4924 with the path at 4180 -- 743 ft high, and 1460 ft high by 1.6 NM.
-  //
-  // So re-evaluate the level as the geometry changes and step down when it has
-  // drifted. Heading is untouched: this is a level, not a vector. Runs LAST so
-  // it can never pre-empt an alignment vector or an abandon. [C. P. Potter]
-  if (s_vtf_cleared_ft > 0 && s > kVecAlignNm) {
-    const int cap = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
-    const int want = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
-                                      ctx.altitude_ft_msl, cap);
-    // Only downwards, and only once it is worth a transmission.
-    if (want > 0 && want <= s_vtf_cleared_ft - 400) {
-      const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
-      *out_text = callsign + ", descend " +
-                  format_alt_clearance(want, AltHint::Auto, ctx.qnh_hpa, ta) + ".";
-      if (out_requires_readback)
-        *out_requires_readback = true;
-      logging::info("[vector] step down %d -> %d ft at %.1f NM to FAF "
-                    "(glide path %d ft there)",
-                    s_vtf_cleared_ft, want, s,
-                    faf.alt_ft + static_cast<int>(s * kGlideSlopeFtPerNm));
-      s_vtf_cleared_ft = want;
-      s_enroute_cleared_alt_ft = want;
-      return true;
-    }
-  }
   return false;
 }
 
