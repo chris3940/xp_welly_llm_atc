@@ -227,6 +227,10 @@ static bool s_callsign_full_used = false;
 // does not hand out 13 000 ft in one transmission.
 static constexpr int kMaxSingleDescentFt = 10000;
 
+// Axis distance a closure-rate sample is taken over. Shorter and the rate is
+// noise; longer and a real divergence is caught too late.
+static constexpr double kVecClosureBaseNm = 2.0;
+
 // Radar-vectoring state machine (docs/force-app-vectoring.md).
 enum class VecLeg { None, Displace, Downwind, Base, Intercept, Axis, Done, Refused };
 static VecLeg s_vtf_leg          = VecLeg::None;
@@ -250,6 +254,7 @@ static bool   s_vtf_slow_issued  = false; // the standalone 160 kt has gone out
 // Lateral deviation at the previous check, and a cooldown, for the localiser
 // intercept monitor on the AXIS leg.
 static double s_vtf_prev_y       = 0.0;
+static double s_vtf_prev_s       = 0.0; // axis distance at the previous sample
 static float  s_vtf_recut_secs   = 0.0f;
 // FAF memo. approach_faf() caches only SUCCESSFUL lookups, so an unresolved
 // position makes every call re-read earth_fix.dat -- 15 MB. Called once per frame
@@ -932,6 +937,7 @@ void reset() {
   s_vtf_abandoned = false;
   s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
+  s_vtf_prev_s = 0.0;
   s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
@@ -1077,6 +1083,7 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_vtf_abandoned = false;
   s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
+  s_vtf_prev_s = 0.0;
   s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
@@ -6201,6 +6208,7 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   s_vtf_abandoned = false;
   s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
+  s_vtf_prev_s = 0.0;
   s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
   s_descent_second_step_issued = false;
@@ -10407,6 +10415,24 @@ static std::string vec_established_ref(const xplane_context::XPlaneContext &ctx)
   return loc ? "the localiser" : "the approach";
 }
 
+// "descend 2500 feet until established on the localiser" -- the level that goes
+// out WITH the approach clearance. ICAO 8.9.4.2: once the clearance is issued
+// the aircraft maintains the last assigned level until it intercepts the glide
+// path, so this is a level to HOLD, not one to leave at will. "maintain" when
+// the aircraft is already there, which it usually is by then.
+static std::string vec_level_hold_phrase(const xplane_context::XPlaneContext &ctx,
+                                         int lvl) {
+  if (lvl <= 0)
+    return {};
+  const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+  const char *verb = (ctx.altitude_ft_msl > static_cast<float>(lvl) + 200.0f)
+                         ? "descend "
+                         : "maintain ";
+  return std::string(verb) +
+         format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta) +
+         " until established on " + vec_established_ref(ctx);
+}
+
 // Nominal 3 degree glide path, expressed as feet above the FAF crossing altitude
 // per NM before the FAF, and the margin we keep below it.
 static constexpr double kGlideSlopeFtPerNm = 318.0;
@@ -10727,24 +10753,63 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     }
     s_vtf_nudge_secs = 0.0f;
     s_vtf_nudged = false;
+    // No correction may be judged until the vector just issued has had time to
+    // take effect: the closure measured during the turn is the TURN, not the
+    // track, and acting on it re-vectors an aircraft doing exactly as told.
+    s_vtf_recut_secs = static_cast<float>(kVecLeadSecs);
+    s_vtf_prev_s = 0.0;
   s_vtf_abandoned = false;
   s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
+  s_vtf_prev_s = 0.0;
   s_vtf_recut_secs = 0.0f;
     const int cap = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
     s_vtf_cleared_ft = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
                                         ctx.altitude_ft_msl, cap);
     std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
+    // The level is spoken ONCE. On an intercept leg it goes out inside the
+    // "until established" phrase, with the clearance; on any other leg it is a
+    // plain descent.
+    const bool carries_clearance = (s_vtf_leg == VecLeg::Intercept);
     if (s_vtf_cleared_ft > 0) {
-      const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
-      txt += ", descend " + format_alt_clearance(s_vtf_cleared_ft, AltHint::Auto,
-                                                 ctx.qnh_hpa, ta);
+      if (!carries_clearance) {
+        const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+        txt += ", descend " + format_alt_clearance(s_vtf_cleared_ft, AltHint::Auto,
+                                                   ctx.qnh_hpa, ta);
+      }
       s_enroute_cleared_alt_ft = s_vtf_cleared_ft;
     }
     txt += vec_speed_phrase(ctx, kVecSpeedIntermediateKt);
     const std::string appr_phrase = approach_clearance_phrase(ctx);
-    txt += appr_phrase.empty() ? ", vectoring for the approach."
-                               : (", vectoring for " + appr_phrase + ".");
+    // THE INTERCEPT VECTOR CARRIES THE CLEARANCE, AND THE AIRCRAFT CAPTURES.
+    // ICAO Doc 4444 8.9.4.1: "Clearance for the approach should be issued prior
+    // to when the aircraft reports established... Vectoring will normally
+    // TERMINATE at the time the aircraft leaves the last assigned heading to
+    // intercept the final approach track." The heading that closes with the
+    // track is therefore the LAST vector: there is no routine second vector onto
+    // the course, and the PILOT does the interception (user, 2026-08-18). A
+    // further vector exists only as a correction, in the Intercept block below.
+    //
+    // A displace or downwind leg is not that heading, so it stays mute and the
+    // clearance goes out when the aircraft is turned onto the intercept.
+    if (carries_clearance) {
+      const std::string hold = vec_level_hold_phrase(ctx, s_vtf_cleared_ft);
+      if (!hold.empty())
+        txt += ", " + hold;
+      txt += appr_phrase.empty()
+                 ? ", cleared approach, report established."
+                 : (", cleared " + appr_phrase + ", report established.");
+      s_approach_cleared_issued = true;
+      s_approach_final_issued   = true; // opens the Approach -> Tower handoff
+      apply_direct_to(faf.ident);       // the bypassed fixes stop counting
+      if (atc_state_machine::get_state() == AS::IFR_ARRIVAL ||
+          atc_state_machine::get_state() == AS::IFR_DESCENT ||
+          atc_state_machine::get_state() == AS::IFR_APPROACH_CONTACT)
+        atc_state_machine::set_state(AS::IFR_APPROACH_DESCENT);
+    } else {
+      txt += appr_phrase.empty() ? ", vectoring for the approach."
+                                 : (", vectoring for " + appr_phrase + ".");
+    }
     *out_text = txt;
     if (out_requires_readback)
       *out_requires_readback = true;
@@ -10957,6 +11022,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   s_vtf_abandoned = false;
   s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
+  s_vtf_prev_s = 0.0;
   s_vtf_recut_secs = 0.0f;
       *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) + ".";
       if (out_requires_readback)
@@ -10978,6 +11044,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   s_vtf_abandoned = false;
   s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
+  s_vtf_prev_s = 0.0;
   s_vtf_recut_secs = 0.0f;
       *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) +
                   ", reduce speed 180 knots.";
@@ -11026,133 +11093,88 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   }
 
   if (s_vtf_leg == VecLeg::Intercept) {
-    // BEFORE the axis, not on it -- see kVecLeadNm. Still requires room to be
-    // established by kVecAlignNm, so the governing rule is unchanged; only the
-    // moment the vector is transmitted moves earlier, which is where a
-    // controller actually transmits it.
-    if (aligning) {
+    // CAPTURED, SILENTLY. The aircraft was cleared for the approach with the
+    // intercept vector and joins the track itself (8.9.4.1), so this transition
+    // transmits nothing. What used to live here -- an "alignment vector"
+    // assigning the course -- was ATC doing the pilot's job, and is now only a
+    // correction. [C. P. Potter]
+    if (std::fabs(y) <= kVecEstabNm) {
       s_vtf_leg = VecLeg::Axis;
-      // THE LAST VECTOR IS AN INTERCEPT HEADING, NOT THE COURSE. Assigning the
-      // course itself to an aircraft still off the axis flies it PARALLEL to the
-      // localiser -- it never converges, and the establishment test below then
-      // declared it established on heading alone. Measured 2026-08-17 in flight
-      // (|y|=2.2 NM at 9.1 NM, turned onto 057) and reproduced headless
-      // (|y|=1.6 NM at 7.4 NM, same turn). ICAO: the final vector shall ENABLE
-      // the aircraft to become established; the aircraft captures.
-      //
-      // The angle is sized to close |y| by kVecAlignNm and capped at the ICAO
-      // maximum; the course itself is assigned only once essentially on the
-      // axis. Right of the axis (y > 0) means turning LEFT of the course, which
-      // is the same sign convention as the first leg. [C. P. Potter]
-      {
-        double ps2 = s, py2 = y;
-        vec_project(ctx, course, &ps2, &py2);
-        double ang = 0.0;
-        if (std::fabs(py2) > kVecEstabNm) {
-          const double run = ps2 - kVecAlignNm;
-          ang = (run > 0.1)
-                    ? std::atan(std::fabs(py2) / run) * 180.0 / M_PI
-                    : kVecInterceptMaxDeg;
-          ang = std::min(ang, kVecInterceptMaxDeg);
-          ang = std::max(ang, 10.0); // a 2-degree "intercept" is not one
-        }
-        const double turn = (y >= 0.0) ? -1.0 : 1.0;
-        s_vtf_hdg = std::fmod(course + ang * turn + 360.0, 360.0);
-      }
       s_vtf_prev_y = y;
+      s_vtf_prev_s = s;
       s_vtf_recut_secs = 0.0f;
-      s_vtf_nudged = false;
-      logging::info("[vector] alignment vector at |y|=%.1f NM, %.1f NM to FAF "
-                    "(lead %.1f NM for %.0f kt, rule wants %.0f)",
-                    std::fabs(y), s, lead_nm,
-                    static_cast<double>(ctx.groundspeed_kts), kVecAlignNm);
-      // NEUTRALISE EVERY FIX THE VECTORS HAVE BYPASSED. The aircraft has been
-      // steered around the STAR and the approach transition; it will overfly
-      // none of them, so the route tracker would sit wherever the vectors left
-      // it -- at HEFME on the 2026-08-17 arrival, five fixes short of the FAF.
-      //
-      // Everything gated on route ORDER then stays false for the rest of the
-      // flight. That is why no vectored arrival ever reached Tower, why the
-      // routed distance to the IAF read 24 NM with the aircraft 2 NM from it,
-      // and why fixes that will never be flown kept being enforced. Exempting
-      // each of those rules one at a time was the wrong fix -- three were found
-      // and there are more. The fix is to make the route TRUE again: from the
-      // alignment vector on, the next fix is the FAF. [C. P. Potter]
-      apply_direct_to(faf.ident);
-      // The level of the LAST vector is the FAF crossing altitude, and the sector
-      // MSA does not floor it -- see vec_leg_level_ft(). This is the leg that
-      // carries the approach clearance, so the aircraft is on a published,
-      // obstacle-protected segment; the MSA held it at EDLW's 3700 ft for a FAF
-      // published at 2500 (user, 2026-08-17: "je ne veux pas des 3700").
-      const int cap = faf.alt_ft > 0 ? faf.alt_ft : 3000;
-      const int lvl = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
-                                       ctx.altitude_ft_msl, cap,
-                                       /*on_final_segment=*/true);
-      std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
-      if (lvl > 0) {
-        const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
-        // "... until established on the localiser" -- the level is a floor held
-        // until the aircraft joins the axis, not a level to leave at will. Without
-        // it the aircraft is cleared BOTH to the approach and to a level, with
-        // nothing saying which prevails, and may leave protection before
-        // intercepting.
-        // "maintain" when the aircraft is already there -- which it now usually
-        // is, since the sequencing legs step it down to the platform first.
-        // "Descend 2500" to an aircraft level at 2500 is not an instruction.
-        const char *verb =
-            (ctx.altitude_ft_msl > static_cast<float>(lvl) + 200.0f)
-                ? ", descend "
-                : ", maintain ";
-        txt += verb + format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta) +
-               " until established on " + vec_established_ref(ctx);
-        s_vtf_cleared_ft = lvl;
-        s_enroute_cleared_alt_ft = lvl;
+      logging::info("[vector] captured: |y|=%.1f NM, %.1f NM to FAF -- vectoring "
+                    "terminated, the aircraft has the track",
+                    std::fabs(y), s);
+      return false;
+    }
+
+    // ── corrections ─────────────────────────────────────────────────────────
+    // A controller re-vectors only when he can SEE it is not working, and only
+    // while there is room for the correction to take effect.
+    //
+    //   window    more than kVecAlignNm + lead of axis left, and one lead since
+    //             the last correction, so it has had time to bite
+    //   settled   never correct a turn that is still in progress
+    //   R1        at the OBSERVED closure rate it will not be established by
+    //             kVecAlignNm. Observation, not prediction: wind, pilot
+    //             technique and reaction time are absorbed instead of modelled,
+    //             which is what defeated two attempts at budgeting the turn.
+    //   R2        |y| growing when it should be shrinking
+    //   R3        it has crossed the track -> announced with the reason (8.9.3.7)
+    const double lead_now = vec_lead_nm(ctx, course);
+    if (settled && s > kVecAlignNm && s_vtf_recut_secs <= 0.0f &&
+        s_vtf_prev_s > s + kVecClosureBaseNm) {
+      const double prev = s_vtf_prev_y;
+      const bool crossed = (y * prev < 0.0);
+      const bool diverging = std::fabs(y) > std::fabs(prev) + 0.05;
+      bool short_of_align = false;
+      if (!crossed && !diverging) {
+        const double closed = std::fabs(prev) - std::fabs(y);
+        const double per_nm = closed / (s_vtf_prev_s - s);
+        // Closing at less than a degree of convergence is not closing at all.
+        if (per_nm > 0.02)
+          short_of_align = (s - std::fabs(y) / per_nm) < kVecAlignNm;
+        else
+          short_of_align = true;
       }
-      const std::string appr_phrase = approach_clearance_phrase(ctx);
-      txt += appr_phrase.empty()
-                 ? ", cleared approach, report established."
-                 : (", cleared " + appr_phrase + ", report established.");
-      *out_text = txt;
-      if (out_requires_readback)
-        *out_requires_readback = true;
-      s_approach_cleared_issued = true;
-      // THE GATE THAT OPENS THE TOWER HANDOFF. poll_vector_to_intercept (the IAF
-      // teardrop) sets this in both its branches; poll_vector_to_final -- the one
-      // that actually flies -- never did, so `if (s_approach_final_issued && ...)`
-      // was false for the whole arrival and the Approach -> Tower transfer could
-      // not even be evaluated. That is why the pilot's "established runway 06"
-      // went unanswered on 2026-08-16 AND 2026-08-17, in the build where the
-      // vectoring worked as well as the ones where it did not: it was never a
-      // vectoring fault at all. This leg issues the final altitude, the QNH and
-      // the approach clearance, which is exactly what the flag means.
-      // [C. P. Potter]
-      s_approach_final_issued = true;
-      // APPROACH_DESCENT, not APPROACH_CONTACT. poll_approach() returns
-      // immediately in APPROACH_CONTACT for anything but a STAR-less AFIS field
-      // (engine.cpp, "state == AS::IFR_APPROACH_CONTACT && !(...)"), so the
-      // Approach -> Tower handoff that lives further down was STRUCTURALLY
-      // unreachable for every vectored arrival. APPROACH_CONTACT means "on the
-      // approach controller's frequency, awaiting the clearance"; this leg has
-      // just ISSUED the clearance, the final altitude and the QNH, so the
-      // aircraft is descending on the approach. Getting the state wrong here is
-      // the whole of defect 6 -- the pilot's "established runway 06" was
-      // unanswered on 2026-08-16 and 2026-08-17 alike, in the build where the
-      // vectoring worked as well as in the ones where it did not. [C. P. Potter]
-      if (atc_state_machine::get_state() == AS::IFR_ARRIVAL ||
-          atc_state_machine::get_state() == AS::IFR_DESCENT ||
-          atc_state_machine::get_state() == AS::IFR_APPROACH_CONTACT)
-        atc_state_machine::set_state(AS::IFR_APPROACH_DESCENT);
-      // The two figures the governing rule is about, so the acceptance test can
-      // be run against a real flight log and not only against the replay.
-      // Print the heading ACTUALLY assigned, and the course it intercepts. The
-      // old line printed the course whatever was transmitted, so a log read
-      // "AXIS hdg 057" while the pilot had been given 037 -- which hid the
-      // parallel-vector defect for two flights.
-      logging::info("[vector] leg D AXIS assigned hdg %03d intercepting course "
-                    "%03d, |y|=%.1f NM, alt %d, %.1f NM to FAF %s",
-                    static_cast<int>(s_vtf_hdg), static_cast<int>(course),
-                    std::fabs(y), s_vtf_cleared_ft, s, faf.ident.c_str());
-      return true;
+      if (crossed || diverging || short_of_align) {
+        const double turn = (y >= 0.0) ? -1.0 : 1.0;
+        double ps3 = s, py3 = y;
+        vec_project(ctx, course, &ps3, &py3);
+        const double ang =
+            std::min(kVecInterceptMaxDeg,
+                     std::max(10.0, std::fabs(vec_intercept_rel_deg(ps3, py3))));
+        const double hdg = std::fmod(course + ang * turn + 360.0, 360.0);
+        const char *why = crossed ? "crossed"
+                          : diverging ? "diverging"
+                                      : "closing too slowly";
+        logging::info("[vector] correction (%s): |y|=%.1f NM was %.1f, %.1f NM "
+                      "to FAF, heading %03d -> %03d",
+                      why, std::fabs(y), std::fabs(prev), s,
+                      static_cast<int>(s_vtf_hdg), static_cast<int>(hdg));
+        s_vtf_hdg = hdg;
+        s_vtf_nudged = false;
+        // Half a lead between corrections: long enough for the turn to bite,
+        // short enough that a converging aircraft can still be helped twice
+        // before the alignment point.
+        s_vtf_recut_secs = static_cast<float>(kVecLeadSecs * 0.5);
+        *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, hdg) +
+                    (crossed
+                         ? ", you have passed through the final approach track."
+                         : (" for " + vec_established_ref(ctx) + "."));
+        if (out_requires_readback)
+          *out_requires_readback = true;
+        s_vtf_prev_y = y;
+        s_vtf_prev_s = s;
+        return true;
+      }
+    }
+    if (s_vtf_recut_secs > 0.0f)
+      s_vtf_recut_secs -= dt;
+    if (s_vtf_prev_s == 0.0) {
+      s_vtf_prev_y = y;
+      s_vtf_prev_s = s;
     }
     return false;
   }
@@ -11734,6 +11756,7 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
   s_vtf_abandoned = false;
   s_vtf_slow_issued = false;
   s_vtf_prev_y = 0.0;
+  s_vtf_prev_s = 0.0;
   s_vtf_recut_secs = 0.0f;
     logging::info("IFR descent: stepped-descent target %d ft DROPPED -- already "
                   "cleared to %d ft (would have been a climb)",

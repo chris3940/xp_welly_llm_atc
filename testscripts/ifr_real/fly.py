@@ -81,6 +81,17 @@ def bearing(a, b):
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
 
+def cross_track(p, faf, course_deg):
+    """Signed lateral offset of p from the track through `faf` on `course_deg`,
+    in NM. Positive = right of the track. Lets the driver judge its OWN
+    establishment instead of taking ATC's request for the event."""
+    d = nm(p, faf)
+    if d < 1e-6:
+        return 0.0
+    b = bearing(p, faf)
+    return -d * math.sin(math.radians(b - course_deg))
+
+
 def advance(a, course_deg, dist_nm):
     """Point `dist_nm` ahead of `a` on the true course `course_deg`. Flat-earth,
     which is exact enough for a final approach segment."""
@@ -204,6 +215,7 @@ class Pilot:
         self.assigned_kt = None  # speed ATC has assigned, and the pilot flies
         self.tower_called = False  # checked in on Tower
         self.tower_no_freq = False # Tower handoff arrived without a frequency
+        self.cleared_approach = False # approach clearance received
         self.hdg = None          # heading actually FLOWN (lags the assignment)
         self.react_s = 0.0       # seconds still to elapse before the turn starts
         self.events = []
@@ -219,6 +231,14 @@ class Pilot:
                 st = line.split(">> STATE", 1)[1].split("@")[0].strip()
                 self.events.append((where, alt, "STATE  " + " ".join(st.split())))
                 continue
+            # The FAF comes from a PLUGIN LOG line, not a transmission, so it has
+            # to be read before the ATC filter below. It was placed after it and
+            # therefore never ran: the driver had no axis and fell back to a
+            # bearing to the aerodrome, which is not the localiser.
+            m = RE_FAF.search(line)
+            if m:
+                self.faf = (float(m.group(2)), float(m.group(3)))
+                self.faf_track = float(m.group(5))
             if "ATC [" not in line:
                 continue
             msg = line.split("ATC [", 1)[1]
@@ -256,11 +276,6 @@ class Pilot:
                 # sequence and the geometry was sized on a speed no aircraft has.
                 self.assigned_kt = float(m.group(1))
 
-            m = RE_FAF.search(msg)
-            if m:
-                self.faf = (float(m.group(2)), float(m.group(3)))
-                self.faf_track = float(m.group(5))
-
             m = RE_HEADING.search(msg)
             if m:
                 # Under vectors the aircraft leaves the route and flies the
@@ -279,16 +294,25 @@ class Pilot:
                 self.vector_hdg = float(m.group(2))
             if RE_RESUME.search(msg):
                 self.vector_hdg = None
-            if re.search(r"report established", msg, re.I):
-                # The vectoring sequence is over. The driver used to STOP here,
-                # which is why the Tower handoff and the landing clearance were
-                # never exercised headless -- the one defect that survived two
-                # real flights. It now flies the final approach course inbound
-                # and REPORTS ESTABLISHED, so whatever ATC does (or fails to do)
-                # next is on the record.
-                self.established = True
-                self.final_course = self.vector_hdg  # the axis vector just given
-                self.vector_hdg = None
+            if re.search(r"cleared .*approach", msg, re.I):
+                # The clearance now travels WITH the intercept vector (ICAO
+                # 8.9.4.1), so "report established" is a REQUEST, not the event.
+                # Treating it as the event made the pilot announce established
+                # 33 NM out and beeline for the FAF instead of flying his vector.
+                self.cleared_approach = True
+            # THE PILOT DECIDES WHEN HE IS ESTABLISHED, by looking at his
+            # instruments -- he does not become established because ATC asked
+            # him to report it. Cleared for the approach and within half a mile
+            # of the published track, he calls it, stops flying the vector and
+            # tracks the axis inbound.
+            if (self.cleared_approach and not self.established
+                    and self.faf is not None and self.faf_track is not None
+                    and isinstance(where, tuple)):
+                off = abs(cross_track(where, self.faf, self.faf_track))
+                if off < 0.5:
+                    self.established = True
+                    self.final_course = self.faf_track
+                    self.vector_hdg = None
             if re.search(r"cleared to land", msg, re.I):
                 self.finished = True
 
