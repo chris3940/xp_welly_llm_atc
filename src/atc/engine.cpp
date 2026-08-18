@@ -222,6 +222,11 @@ static bool s_vector_mode_logged = false;    // vectoring-mode decision, once pe
 // Whether the FULL registration has been spoken yet on this flight.
 // See spoken_callsign().
 static bool s_callsign_full_used = false;
+// The most any SINGLE descent clearance may ask for. Beyond this the descent is
+// split and the remainder deferred to poll_descent_second_step: a controller
+// does not hand out 13 000 ft in one transmission.
+static constexpr int kMaxSingleDescentFt = 10000;
+
 // Radar-vectoring state machine (docs/force-app-vectoring.md).
 enum class VecLeg { None, Displace, Downwind, Base, Intercept, Axis, Done, Refused };
 static VecLeg s_vtf_leg          = VecLeg::None;
@@ -6135,17 +6140,36 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   // always a valid intermediate, so this block now only logs the first
   // constraint for diagnostics and leaves star_alt_ft at the intermediate.
   // See [[project_star_entry_alt_heuristic]].
+  // THE FIRST PUBLISHED CEILING IS THE TARGET. Until 2026-08-18 this block only
+  // LOGGED it and left the initial clearance at cruise * 0.66 -- a percentage
+  // that knows nothing about the procedure. A note recorded on 2026-07-09 said
+  // this was resolved; `git log -S` shows no commit ever assigned star_alt_ft
+  // from this scan, so a P0 sat open for six weeks behind a false status.
+  //
+  // The data was there the whole time. LFLP, from the CIFP:
+  //     SALE3P   LUVOB  -FL090        first at-or-below
+  //              GOVNA  B FL090/6500  block, ceiling FL090
+  //     ROMA3P   GOVNA  B FL090/6500  first constraint, a block
+  // `is_ceiling` already covers both forms ("-" and "B"), so the scan finds
+  // them; it simply threw the answer away. [C. P. Potter]
   if (!star_name.empty() && !ctx.cifp_dir.empty() &&
       !ofp.destination_icao.empty()) {
     auto star_wps = cifp_reader::star_waypoints(ctx.cifp_dir,
                                                 ofp.destination_icao, star_name);
     for (const auto &w : star_wps) {
       if (w.is_ceiling && w.alt.feet > 0) {
-        logging::info("[approach] STAR first at-or-below %d ft at %s on %s; "
-                      "initial descent kept at intermediate %d ft "
-                      "(walker steps down to constraints)",
-                      w.alt.feet, w.ident.c_str(), star_name.c_str(),
-                      star_alt_ft);
+        if (w.alt.feet < star_alt_ft && w.alt.feet < cruise_ref_dc) {
+          logging::info("[approach] STAR first at-or-below %d ft at %s on %s -- "
+                        "TARGET (was the %d ft intermediate)",
+                        w.alt.feet, w.ident.c_str(), star_name.c_str(),
+                        star_alt_ft);
+          star_alt_ft = w.alt.feet;
+        } else {
+          logging::info("[approach] STAR first at-or-below %d ft at %s on %s; "
+                        "intermediate %d ft is already below it",
+                        w.alt.feet, w.ident.c_str(), star_name.c_str(),
+                        star_alt_ft);
+        }
         break;
       }
     }
@@ -6179,14 +6203,25 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
   // Restricted to a real STAR arrival (star_name set): the no-STAR direct-to-IAF
   // path (2c below) builds its own "direct X, descend <iaf alt>" phrase, so
   // capping star_alt_ft there would double-speak the descent.
-  if (!star_name.empty() && cruise_ref_dc > 24000 && star_alt_ft > 0 &&
-      star_alt_ft < 18000) {
+  // Stepping is now driven by the DROP, not by a cruise threshold. Taking the
+  // published ceiling as the target makes the first clearance much lower, and on
+  // a FL220 arrival to a STAR capped at FL090 that is 13 000 ft in one
+  // transmission -- the "collapse" the old comment warned about. No single
+  // clearance asks for more than kMaxSingleDescentFt; the rest is deferred to
+  // poll_descent_second_step. Above FL240 the FL200 convention is kept, because
+  // that is the behaviour that has been flown. [C. P. Potter]
+  const bool step_needed =
+      !star_name.empty() && star_alt_ft > 0 &&
+      (cruise_ref_dc - star_alt_ft) > kMaxSingleDescentFt;
+  if (step_needed) {
     s_descent_final_target_ft = star_alt_ft; // remember the ultimate target
     // First step: FL200 by default, but never BELOW the top of the highest TMA
     // currently overflown -- stay ABOVE an enroute TMA (LOWI/DOLSKO tops FL245
     // -> first step FL250) instead of diving into it. Rounds up to the next FL
     // above the ceiling. [[project_stepped_descent]]
-    int first_step = 20000;
+    int first_step = ((cruise_ref_dc - kMaxSingleDescentFt) / 1000) * 1000;
+    if (cruise_ref_dc > 24000 && star_alt_ft < 18000)
+      first_step = 20000; // unchanged for the high-cruise case already flown
     const int hi_ceil = openair_db::ready()
                             ? openair_db::highest_tma_ceiling(ctx.latitude,
                                                               ctx.longitude)
@@ -6196,8 +6231,12 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
       if (above > first_step)
         first_step = above;
     }
-    star_alt_ft = first_step;
-    s_descent_first_step_ft = first_step;
+    if (first_step <= star_alt_ft) {
+      s_descent_final_target_ft = 0; // nothing worth deferring
+    } else {
+      star_alt_ft = first_step;
+      s_descent_first_step_ft = first_step;
+    }
     logging::info(
         "IFR descent: stepping high cruise %d ft -> FL%d first (TMA top %d), then %d ft (deferred)",
         cruise_ref_dc, first_step / 100, hi_ceil, s_descent_final_target_ft);
@@ -10121,6 +10160,7 @@ static constexpr double kVecInterceptMaxDeg = 45.0; // ICAO maximum, used when t
 // re-evaluation re-aims, so drift, wind and a slow turn are absorbed instead of
 // accumulating. [C. P. Potter]
 static constexpr double kVecInterceptPointNm = 4.0;
+
 static constexpr double kVecFloorNm       = 15.0; // below this, do not start
 static constexpr double kVecEstabNm       = 0.6;  // |y| counted as established
 // Lateral offset at which the FINAL ALIGNMENT vector is given. A controller does
