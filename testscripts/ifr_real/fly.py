@@ -175,6 +175,12 @@ RE_MAINTAIN_FL = re.compile(r"maintain flight level (\d{2,3})", re.I)
 RE_HEADING = re.compile(r"turn (left|right) heading (\d{2,3})", re.I)
 RE_RESUME = re.compile(r"resume own navigation", re.I)
 RE_SPEED = re.compile(r"reduce speed(?: to)?,? (\d{3}) knots", re.I)
+# "contact Tower" arrives WITHOUT a frequency when the engine fails to resolve
+# one -- which is the state of things today. RE_CONTACT needs "on NNN.NNN", so
+# the driver used to ignore it entirely and the arrival simply stopped. Matching
+# it separately makes the gap visible instead of silent.
+RE_TOWER = re.compile(r"contact tower", re.I)
+RE_LAND  = re.compile(r"cleared to land", re.I)
 # The engine prints the FAF it resolved. Parsing it gives the driver the REAL
 # axis -- position AND published final track -- instead of guessing. Without it
 # the driver flew the last INTERCEPT heading (037) as though it were the
@@ -196,6 +202,8 @@ class Pilot:
         self.faf = None          # (lat, lon) of the FAF, from the engine's own log
         self.faf_track = None    # published final approach track
         self.assigned_kt = None  # speed ATC has assigned, and the pilot flies
+        self.tower_called = False  # checked in on Tower
+        self.tower_no_freq = False # Tower handoff arrived without a frequency
         self.hdg = None          # heading actually FLOWN (lags the assignment)
         self.react_s = 0.0       # seconds still to elapse before the turn starts
         self.events = []
@@ -229,6 +237,17 @@ class Pilot:
                 self.repl.sync()
                 self.events.append((where, alt, ">> pilot: checks in on %s (%s)" % (freq, who)))
                 continue
+
+            if RE_TOWER.search(msg) and not self.tower_called:
+                # A frequency-less handoff cannot be complied with: there is
+                # nothing to tune. Record it rather than pretend.
+                if not RE_CONTACT.search(msg):
+                    self.tower_no_freq = True
+                    self.events.append(
+                        (where, alt,
+                         "!! pilot: cannot comply -- 'contact Tower' with NO frequency"))
+                else:
+                    self.tower_called = True
 
             m = RE_SPEED.search(msg)
             if m:
@@ -464,6 +483,20 @@ def main():
                                  ">> harness: final loop ended %.1f NM out" % nm(prev, dest)))
 
     repl.close()
+
+    # Acceptance summary: the handful of numbers an arrival is judged on, so a
+    # replay is read at a glance instead of by scrolling the timeline.
+    print("\n=== acceptance ===")
+    est = [e for e in pilot.events if "established" in str(e[2]).lower()]
+    print("  %-34s %s" % ("established reported by the pilot",
+                          "yes" if pilot.established else "NO"))
+    print("  %-34s %s" % ("Tower handoff received",
+                          "NO" if not (pilot.tower_called or pilot.tower_no_freq)
+                          else ("yes, but WITHOUT a frequency" if pilot.tower_no_freq
+                                else "yes, with a frequency")))
+    print("  %-34s %s" % ("cleared to land", "yes" if pilot.finished else "NO"))
+    print("  %-34s %s" % ("final speed assigned",
+                          ("%.0f kt" % pilot.assigned_kt) if pilot.assigned_kt else "none"))
 
     print("\n%-9s %-8s %s" % ("dist", "level", "event"))
     print("-" * 78)
