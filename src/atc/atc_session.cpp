@@ -1812,9 +1812,20 @@ static void submit_recording_to_stt() {
     // Tag the configured encoding mode so A/B runs are traceable in transcript.log
     // (underscore|comma|quote|off|auto). For "auto" the ACTUAL discovered method is
     // in Log.txt "[STT-MISTRAL] context_bias method '...'".
-    std::fprintf(g_transcript_log_, "-- BIAS [%s]: %s --\n",
-                 settings::mistral_context_bias_encoding().c_str(),
-                 context_bias.c_str());
+    // Same treatment as CTX: the vocabulary list is long and mostly stable from
+    // one transmission to the next, so repeating it in full every time buries
+    // the exchange it is meant to annotate. Print it only when it CHANGES --
+    // which is also what makes a change visible at a glance (user, 2026-08-18).
+    static std::string s_last_logged_bias;
+    if (context_bias != s_last_logged_bias) {
+      std::fprintf(g_transcript_log_, "-- BIAS [%s]: %s --\n",
+                   settings::mistral_context_bias_encoding().c_str(),
+                   context_bias.c_str());
+      s_last_logged_bias = context_bias;
+    } else {
+      std::fprintf(g_transcript_log_, "-- BIAS [%s]: (unchanged) --\n",
+                   settings::mistral_context_bias_encoding().c_str());
+    }
     std::fflush(g_transcript_log_);
   }
 

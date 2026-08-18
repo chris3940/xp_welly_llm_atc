@@ -76,6 +76,24 @@ static FlightPhase current_phase_ = FlightPhase::PARKED;
 static FlightPhase candidate_phase_ = FlightPhase::PARKED;
 static float candidate_timer_ = 0.0f;
 static bool was_airborne_ = false;
+// THE AIRCRAFT HAS LANDED THIS SESSION, and has not departed since.
+// `was_airborne_` cannot answer that question: it goes false the moment the
+// aircraft settles into TAXI after the landing roll, so an arrival that stops at
+// a holding point before calling Ground looks exactly like a departure. On the
+// EDLW arrival of 2026-08-18 that is precisely what happened -- Ground answered
+// "say position, information Alpha current, runway 24, QNH 1013" and invited a
+// taxi request to an aircraft that had just landed on 06. This latch is set on
+// touchdown and cleared only by a new take-off roll. [C. P. Potter]
+static bool has_landed_ = false;
+// Seconds the aircraft has been continuously PARKED. The has_landed_ latch is
+// cleared by a take-off roll -- but a pilot who lands, parks and then starts a
+// NEW flight from that same stand without the plugin being restarted would still
+// carry the latch, and his departure call to Ground would be answered "taxi to
+// parking". Five minutes parked cannot happen between vacating the runway and
+// calling Ground, and always elapses before a new flight is set up, so it
+// separates the two cases without a false clear. [C. P. Potter]
+static float parked_secs_ = 0.0f;
+static constexpr float kParkedClearsLandedSecs = 300.0f;
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -573,6 +591,8 @@ void stop() {
   candidate_phase_ = FlightPhase::PARKED;
   candidate_timer_ = 0.0f;
   was_airborne_ = false;
+  has_landed_ = false;
+  parked_secs_ = 0.0f;
 }
 
 void reload() { load_from_file(); }
@@ -580,6 +600,11 @@ void reload() { load_from_file(); }
 FlightPhase get() { return current_phase_; }
 
 void update(const xplane_context::XPlaneContext &ctx, float dt) {
+  if (current_phase_ == FlightPhase::PARKED) {
+    parked_secs_ += dt;
+    if (parked_secs_ > kParkedClearsLandedSecs)
+      has_landed_ = false;
+  }
   FlightPhase raw = detect_raw(ctx);
 
   // Drive the State-Machine's session-lifecycle was_airborne flag
@@ -617,6 +642,13 @@ void update(const xplane_context::XPlaneContext &ctx, float dt) {
   current_phase_ = raw;
 
   // Track airborne state for takeoff/landing disambiguation
+  if (current_phase_ == FlightPhase::LANDING_ROLL && was_airborne_)
+    has_landed_ = true;
+  else if (current_phase_ == FlightPhase::TAKEOFF_ROLL)
+    has_landed_ = false;
+  if (current_phase_ != FlightPhase::PARKED)
+    parked_secs_ = 0.0f;
+
   if (is_airborne(current_phase_))
     was_airborne_ = true;
   else if (is_on_ground(current_phase_) &&
@@ -794,5 +826,7 @@ std::string get_tower_only_auto_advance(const std::string &state) {
 const FrequencyHint *get_frequency_hint() {
   return frequency_hint_set_ ? &frequency_hint_ : nullptr;
 }
+
+bool has_landed() { return has_landed_; }
 
 } // namespace flight_phase

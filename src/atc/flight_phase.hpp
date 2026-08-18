@@ -173,6 +173,12 @@ void reload();
 
 FlightPhase get();
 const char *phase_name(FlightPhase phase);
+// True once the aircraft has touched down and until it next starts a take-off
+// roll. Unlike atc_state_machine::was_airborne(), this survives the aircraft
+// settling into TAXI, so a post-landing call to Ground is still recognisable as
+// an arrival however long the pilot waits before making it.
+bool has_landed();
+
 bool is_airborne(FlightPhase phase);
 bool is_on_ground(FlightPhase phase);
 

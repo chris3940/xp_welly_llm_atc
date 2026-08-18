@@ -28,14 +28,30 @@ positions the aircraft onto the final approach course with headings instead of
 sending it round the published procedure:
 
 ```
-39 NM  turn left heading 027, descend 4500 feet QNH 1024,
-       vectoring for ILS approach runway 06
-18 NM  turn left heading 057, descend 3700 feet QNH 1024,
-       cleared ILS approach runway 06, report established
+28 NM  turn left heading 026, reduce speed to 210 knots,
+       descend flight level 60, vectoring for ILS approach runway 06
+18 NM  descend 5000 feet, QNH 1024
+12 NM  12 miles from KOLOT, descend 2500 feet, QNH 1024
+       until established on the localiser, cleared ILS approach
+       runway 06, report established on the localiser
+ 9 NM  reduce speed to 160 knots
+ 6 NM  (silent — the aircraft is on the localiser and has the track)
 ```
 
-The rule it is built around: **the last vector assigns the final approach course,
-and the aircraft is established on it at least 2–3 NM before the FAF.**
+The rule it is built around: **one heading closes with the final approach course,
+the pilot makes the interception himself, and he is on the track at least 5 NM
+before the FAF.** ICAO Doc 4444 8.9.4.1 puts it plainly — vectoring *terminates
+at the time the aircraft leaves the last assigned heading to intercept the final
+approach track* — so there is no routine second vector onto the course. A further
+heading exists only as a **correction**, when the controller can see the
+interception is not working.
+
+The clearance is a package, not a line (6.7.3.2.7): **position relative to a fix
+on the final approach track, the altitude to be maintained until established, and
+the approach clearance** travel together — and that altitude is the **published
+platform**, the FAF crossing altitude, so the aircraft meets the glide path from
+below as 8.9.3.6 requires. On the simulated Dortmund arrival it crosses 5.9 NM
+from the FAF at 2685 ft with the path at 4360: 1675 ft below it.
 
 - Geometry follows the runway axis and the side the aircraft arrives from —
   intercept straight away when there is room, displace first when sitting on the
@@ -44,13 +60,21 @@ and the aircraft is established on it at least 2–3 NM before the FAF.**
 - **Every leg level is floored by the sector MSA, then by grid MORA.** Where
   neither source answers, ATC refuses to vector and the panel says
   `DISABLED: NO MSA` rather than inventing a safe altitude.
-- Two settings: `ALLOW VECTORING` (ATC may choose) and `FORCE APP VECTORING`
-  (always, for practice). Both default off; with them off nothing changes.
+- `FORCE APP VECTORING` (every arrival vectored, for practice) is the setting
+  that works. `ALLOW VECTORING` -- ATC choosing to vector when it makes
+  operational sense -- is **declared but NOT active in this build**: the
+  per-arrival decision is still a placeholder, so the checkbox is greyed out and
+  labelled "not yet active". Both default off; with them off nothing changes.
 - Two modes are decided per arrival and logged — vectors to final, or vectors to
   the IAF where terrain or a curved final forbid the first. **The IAF mode is not
   implemented**; those arrivals keep the published procedure.
 - Non-compliance is met with a re-issued vector or a confirmation, never a silent
-  abandon.
+  abandon. A re-cut that lands on the heading already assigned is not
+  transmitted — below 3° there is nothing to fly.
+- **Speed is controlled**: 210 kt with the intercept heading for sequencing,
+  160 kt separately about 9 NM from the FAF (EUROCONTROL's 160 kt from 8 NM),
+  so the pilot is not handed a turn, a descent and a speed in one breath, and
+  the last turn does not overshoot the axis.
 
 New readers: `msa_db` (sector minimum altitudes) and `mora_db` (worldwide grid
 MORA) were added as prerequisites and are used wherever a floor is needed.

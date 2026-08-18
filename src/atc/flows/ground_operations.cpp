@@ -1448,9 +1448,23 @@ bool check_freq_precondition(const PilotMessage &msg, const XPlaneContext &ctx,
   // (was_airborne + on GROUND) both mean the same thing here (user 2026-07-20:
   // "leaving a runway you can report the holding point where you are, it should
   // work"). was_airborne() keeps the PRE-departure holding-short report untouched.
+  // INITIAL_CALL_GROUND belongs here too. An aircraft that has just landed and
+  // calls Ground is checking in for the taxi IN, whatever words the STT made of
+  // it -- on 2026-08-18 Voxtral turned "runway zero six vacated" into "runway
+  // zero six vacay", the parser reasonably chose INITIAL_CALL_GROUND, and the
+  // plugin opened a DEPARTURE: it locked runway 06, then announced runway 24
+  // with the ATIS letter and invited a taxi request. The arrival must not depend
+  // on one word surviving speech recognition.
+  //
+  // And the gate is flight_phase::has_landed(), not was_airborne(): the latter
+  // goes false as soon as the aircraft settles into TAXI, so an arrival that
+  // stops at a holding point before calling Ground had already lost it.
+  const bool post_landing =
+      atc_state_machine::was_airborne() || flight_phase::has_landed();
   if ((msg.intent == PI::RUNWAY_VACATED ||
-       msg.intent == PI::REPORT_HOLDING_SHORT) &&
-      ctx.frequency_type == FT::GROUND && atc_state_machine::was_airborne()) {
+       msg.intent == PI::REPORT_HOLDING_SHORT ||
+       msg.intent == PI::INITIAL_CALL_GROUND) &&
+      ctx.frequency_type == FT::GROUND && post_landing) {
     auto vars_v = build_vars(msg, ctx);
     // Pick a size/type-appropriate general-aviation STAND from apt.dat (rows
     // 1300/1301) for the arriving aircraft -- a Falcon 7X (Code C jet) and a TBM
@@ -1488,8 +1502,12 @@ bool check_freq_precondition(const PilotMessage &msg, const XPlaneContext &ctx,
     // taxi readback (contains "taxi") is re-classified REQUEST_TAXI -> a second
     // taxi clearance (the double).
     internal::set_readback_pending(true);
-    logging::info("Post-landing RUNWAY_VACATED on Ground -- taxi to parking (not "
-                  "contact Tower, single reply)");
+    logging::info("Post-landing taxi-in on Ground: intent=%s, was_airborne=%d "
+                  "has_landed=%d -- taxi to parking (not contact Tower, single "
+                  "reply)",
+                  intent_parser::intent_template_key(msg.intent),
+                  atc_state_machine::was_airborne() ? 1 : 0,
+                  flight_phase::has_landed() ? 1 : 0);
     return true;
   }
   std::string intent_key = intent_parser::intent_template_key(msg.intent);

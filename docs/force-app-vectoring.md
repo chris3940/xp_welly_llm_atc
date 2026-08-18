@@ -382,6 +382,30 @@ holding 4500 all the way to the FAF.
 The alignment leg targets **the FAF crossing altitude itself**, not a round
 number above it.
 
+### The last descent is the platform, not another rung (build 89)
+
+Chasing the glide path down in rungs does not reach it. With a 900 ft step the
+last eligible rung fell at **5.97 NM from the FAF** -- the very moment of
+capture -- so it never went out, and the simulated EDLW arrival intercepted at
+**5000 ft with the path at 4376: 624 ft high, from above**, which 8.9.3.6
+forbids.
+
+A controller does not chase the path. He puts the aircraft on the **published
+platform** -- the FAF crossing altitude -- before the intercept, and the aircraft
+then meets the path from below. Inside `kVecPlatformNm` (12 NM, the intermediate
+segment) the level assigned is the platform:
+
+- the sector MSA does not apply there (the aircraft is cleared for a published
+  approach whose crossing altitude is itself obstacle-protected);
+- the 300 ft glide-path margin is meaningless -- the platform *is* the crossing
+  altitude;
+- the ceiling handed to `vec_leg_level_ft()` must be the platform itself. The
+  function starts from the ceiling it is given and only ever pushes it back up,
+  so passing the usual `FAF + 2000` produced 4500 and no transmission at all.
+
+Simulated result: `FL60 -> 5000 (17.9 NM) -> 2500 (11.9 NM)`, captured at 5.9 NM
+at 2685 ft with the path at 4360 -- **1675 ft below it**.
+
 This closes the rule settled on 2026-08-16
 (`coding_last_assigned_altitude`): the FAF altitude is **wrong** on a published
 transition — there the assignment is the *first point of the cleared approach*
@@ -619,13 +643,80 @@ and clears the approach with it:
 cleared direct <IAF>, cleared <approach> runway <NN>.
 ```
 
+## The clearance package (2026-08-18, build 89)
+
+**ICAO Doc 4444 6.7.3.2.7** -- *when assigning the final heading to intercept the
+final approach course or track, the runway shall be confirmed, and the aircraft
+shall be advised of:*
+
+> *a) its position relative to a fix on the final approach course or track;*
+> *b) the altitude to be maintained until established on the final approach
+> course or track, to the glide path or vertical path intercept point; and*
+> *c) if required, clearance for the appropriate approach.*
+
+Those three travel together, and **(b) is the intercept altitude** -- not any
+level that happens to be assigned at the time. Our intercept heading goes out
+around 28 NM from the FAF, where the level is still FL60 and the platform is
+below the sector MSA, so pairing the clearance with the level assigned *there*
+promised an interception at a level the aircraft leaves long before the
+localiser.
+
+So the intercept vector is now a **plain vector** -- `vectoring for <approach>`,
+a heads-up, not a clearance -- and the whole package goes out with the platform:
+
+```
+<callsign>, 12 miles from KOLOT, descend 2500 feet, QNH 1024
+until established on the localiser, cleared ILS approach runway 06,
+report established on the localiser.
+```
+
+Two related rules fall out of the same paragraph set:
+
+- **`until established on <ref>` qualifies the intercept altitude and nothing
+  else.** On any higher level it promises an interception that will not happen
+  there. Above the platform the level is an ordinary descent and is spoken as
+  one.
+- **`report established` carries its reference.** 12.4.2.2 (e) is *REPORT
+  ESTABLISHED ON LOCALIZER (or ON [GLS/RNP/MLS] [FINAL] APPROACH [COURSE])*. The
+  bare form exists only bracketed onto another instruction -- (f) `CLOSING FROM
+  LEFT`, (g) `TURN LEFT HEADING (three digits)`, (m) `INTERCEPT (LOCALIZER)`.
+  Following an approach clearance, which is item (d), it needs the reference.
+
+**Open, for a controller to settle.** Our single vector doubles as two things the
+document distinguishes: the *closing* vector, which carries neither clearance nor
+platform, and the *final heading to intercept*, which carries all three items.
+The question is at what distance a real controller assigns the final intercept
+heading, and whether he clears the approach before or with it.
+
+## Alignment is judged at capture (build 89)
+
+The alignment rule -- aligned at least `kVecAlignNm` before the FAF -- is about
+where the aircraft **joined** the track, and that instant is the capture. Judging
+it on a later frame cannot work: at capture the aircraft is still on the intercept
+heading, 31° off the axis, so a test that *also* demands a settled heading can
+only pass after the roll-out. A good capture at 5.9 NM was therefore reported as
+`established LATE ... 2.9 NM (rule wants 5)`. The distance is now recorded at
+capture and judged against that.
+
+Two smaller rules, same build:
+
+- **A correction that changes nothing is not a correction.** Re-cutting the
+  intercept can land on the heading already assigned; below 3° there is nothing
+  to fly, and the transmission is noise the pilot must read back. Suppressed, and
+  logged as suppressed.
+- **The capture line states the altitude against the glide path.** Whether the
+  aircraft meets the path from below is the one thing that line has to answer,
+  and it did not -- the 624 ft high intercept had to be reconstructed by hand
+  from two other lines.
+
 ## Known defects (2026-08-17, build `11365b5`)
 
 Flown twice on LFLP → EDLW. **Neither flight completed the arrival.**
 
 | | defect | status |
 |---|---|---|
-| **The Tower handoff never fires.** On build 85 the manoeuvre worked end to end, the pilot reported *"established as 06"* — and ATC never answered. `[approach] profile enforcement yielded to Tower handoff` was logged 2 400 times: the profile stands aside for a transfer that never comes. | **open**, deferred by the user |
+| ~~**The Tower handoff never fires.**~~ On build 85 the manoeuvre worked end to end, the pilot reported *"established as 06"* — and ATC never answered. `[approach] profile enforcement yielded to Tower handoff` was logged 2 400 times: the profile stands aside for a transfer that never comes. | **root cause found, build 89.** The state never reached `IFR_APPROACH_DESCENT`: it was set on the first vector, overwritten to `IFR_ARRIVAL` on the same frame by the `st == IFR_DESCENT` line below it, and the approach-state reset then cleared `s_approach_cleared_issued` every frame. The state now switches **with the clearance**, at the platform. The handoff fires in the simulated arrival — **but with no frequency**, which is the next defect |
+| **The Tower handoff carries no frequency.** Fires at ~6 NM, state reaches `IFR_APPROACH_TOWER`, no frequency spoken and no landing clearance follows. | open, deferred by the user until the rest is settled |
 | **The feasibility margin does not budget the turn.** The sequence armed with 6.7 NM of margin; the turn onto the intercept heading then ate 11 NM of axis distance for 4 NM of lateral closure, at an effective 26° against the 30° assumed. The ICAO floor now absorbs this, but the arithmetic is still wrong. | open |
 | ~~No speed control anywhere in the manoeuvre.~~ | **done** — see *Speed control* above |
 | **The route tracker is re-initialised behind the aircraft** when the approach waypoints are appended, which cancels any direct-to and made the routed distance to the IAF read 24 NM with the aircraft 2 NM from it. | open |
@@ -634,6 +725,7 @@ Flown twice on LFLP → EDLW. **Neither flight completed the arrival.**
 
 | version | date | build | change |
 |---|---|---|---|
+| 2.3 | 2026-08-18 | v4.4.0-beta (pkg 89) | **the clearance package (6.7.3.2.7)**: the intercept vector becomes a plain `vectoring for <approach>`, and position + intercept altitude + approach clearance go out together with the **platform**; `until established on <ref>` restricted to the intercept altitude; `report established` carries its reference (12.4.2.2 e). **The last descent is the platform**, not another glide-path rung — the simulated arrival intercepted 624 ft high, from above, because the last rung fell at the moment of capture. **Alignment judged at capture** instead of after the roll-out. No-op corrections suppressed. Capture line now states altitude vs glide path. Tower-handoff root cause found (state overwritten to `IFR_ARRIVAL`) |
 | 1.x | 2026-08-16 | — | specification, written before implementation |
 | 2.2 | 2026-08-18 | v4.4.0-beta (`7d7dfe6`) | ICAO Doc 4444 quoted verbatim from the document instead of from a search summary, **and a correction**: the 2.0 NM and the 30° that 2.0/2.1 attributed to ICAO come from 6.7.3.2.4, which governs INDEPENDENT PARALLEL approaches only. The general rule is 8.9.3.6 -- 45° or less, established before the glide path intercept from below, no distance figure. Our 3 NM and 2 NM are ours, not the standard's. Terminating the manoeuvre now REJOINS the procedure at the IAF (12.3.3.2 d/e/f) instead of "resume own navigation direct <FAF>", which the approach-instruction set does not contain |
 | 2.1 | 2026-08-17 | v4.4.0-beta (`11365b5`) | speed control on the vectors (210 kt sequencing, 160 kt with the approach clearance, EUROCONTROL); no category table -- the target is only issued when the aircraft is faster than it. Records that the lead is a TIME and the alignment rule a DISTANCE, so the margin narrows as speed drops |

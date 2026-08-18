@@ -474,7 +474,14 @@ replay: ifr-repl
 	@echo "--- vectoring trace (build/replay-raw.log) ---"
 	@grep -h "\[vector\]" build/replay-raw.log | grep -v "turn word" || true
 
-package:
+# DEPENDS ON build ON PURPOSE. This target used to only CHECK that
+# build/xp_wellys_atc.xpl existed and then copy it -- and `make replay` builds
+# the engine and the REPL but never the .xpl. On 2026-08-18 that shipped package
+# 89 with the previous day's plugin: the user flew an hour-long test of code
+# that was not in the binary, and every defect he reported had already been
+# fixed. A stale copy passes the existence check silently, which is the worst
+# possible failure mode for a packaging step. [C. P. Potter]
+package: build
 	@if [ ! -f "build/xp_wellys_atc.xpl" ]; then \
 	    echo "Plugin not built. Run 'make build' first."; exit 1; \
 	fi

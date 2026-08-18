@@ -359,3 +359,43 @@ applied globally, so the eight correctly-named countries cannot regress. The
 open sub-questions below are unchanged: the walk anchors on the point it is
 given, so anchoring it on the FAF rather than the airport is still not done, and
 departures are not covered. Not yet flown.
+
+---
+
+## Q5 — The QNH-once rule is bolted on, not factored — **OPEN, noted 2026-08-18**
+
+**The rule.** A controller states the QNH with the first altitude he assigns
+below the transition level, and does **not** repeat it in his later altitude
+instructions. The next controller states it again. It is a property of the
+**controller/frequency**, and has nothing to do with vectoring, the descent
+profile, or any other phase.
+
+**How it is implemented today.** `alt_clearance_qnh_once()` keys the suppression
+on the active frequency (`s_qnh_stated` + `s_qnh_stated_freq`), which is the
+right criterion — change frequency and the match fails on its own, so no hook is
+needed in the dozen places a handoff is issued. But only **5** call sites go
+through it, all of them in the vectoring plus two descent sites patched by hand.
+**8 call sites still call `format_alt_clearance(..., ctx.qnh_hpa, ...)`
+directly** and will therefore repeat a QNH the same controller has already
+given:
+
+```
+engine.cpp:2671   readback / cleared-level restatement
+engine.cpp:7992   approach-profile clearance
+engine.cpp:9902   level-compliance challenge
+engine.cpp:11259  vectoring leg text (plain descent branch)
+engine.cpp:11718  "maintain <alt>" path
+engine.cpp:11987  step-down target
+engine.cpp:12944  descent clearance builder
+```
+
+**The fix is a factorisation, not a patch.** Every altitude clearance spoken to
+the pilot should go through one function that owns both the FL-vs-feet decision
+*and* the QNH-once rule; `format_alt_clearance()` should become private to it.
+This belongs with the IFR-enforcement centralisation already listed for 4.4
+(`current_flight_airport` / `DirectMonitor` / `format_alt_clearance`) — the same
+symptom: one rule, many call sites, each free to forget it.
+
+**Why it was not done now.** Touching eight clearance-building sites at once, on
+the day of a test flight, is exactly the change that needs its own replay and its
+own flight. Noted for a future build (user, 2026-08-18).

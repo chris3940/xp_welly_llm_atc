@@ -2598,14 +2598,23 @@ static void draw_ifr_tab() {
     // indistinguishable from a bug. The box is NOT un-ticked -- the label
     // reports why the setting is inert, and the setting stays where the user
     // put it. Plain ASCII: ImGui renders UTF-8 as '?'.
+    // NOT IMPLEMENTED YET, and the label says so. The setting is declared,
+    // persisted and gates the MSA availability check, but the per-arrival
+    // decision is still a placeholder in engine.cpp (arrival_is_vectored():
+    // "not forced means not vectored"). A control that silently does nothing is
+    // worse than an absent one -- the user ticks it, expects to be vectored one
+    // arrival in three, and concludes the vectoring is broken. [C. P. Potter]
     bool allow_vec = settings::allow_vectoring();
-    if (ImGui::Checkbox("ALLOW VECTORING", &allow_vec))
+    ImGui::BeginDisabled(true);
+    if (ImGui::Checkbox("ALLOW VECTORING (not yet active)", &allow_vec))
       settings::set_allow_vectoring(allow_vec);
+    ImGui::EndDisabled();
     if (ImGui::IsItemHovered())
-      tooltip("When ON, ATC MAY vector you when it makes operational "
-                        "sense -- recovering a route deviation, a reversal that "
-                        "cannot be flown, or sequencing. ATC decides. Turn OFF "
-                        "to never be vectored.");
+      tooltip("NOT ACTIVE IN THIS BUILD. Planned: ATC MAY vector you when it "
+                        "makes operational sense -- recovering a route "
+                        "deviation, a reversal that cannot be flown, or "
+                        "sequencing. Today only FORCE APP VECTORING vectors an "
+                        "arrival.");
 
     bool force_vec = settings::force_app_vectoring();
     if (ImGui::Checkbox("FORCE APP VECTORING", &force_vec))
