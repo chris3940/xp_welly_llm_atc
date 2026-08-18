@@ -12918,6 +12918,27 @@ std::vector<std::string> upcoming_route_fix_idents() {
   return out;
 }
 
+std::vector<RouteFixInfo> route_fixes_info(int *out_idx) {
+  if (out_idx)
+    *out_idx = s_route_fix_idx;
+  std::vector<RouteFixInfo> out;
+  out.reserve(s_route_fixes.size());
+  for (const auto &f : s_route_fixes) {
+    RouteFixInfo i;
+    i.ident = f.ident;
+    i.lat = f.lat;
+    i.lon = f.lon;
+    i.alt_ft = f.alt.feet;
+    i.is_fl = f.alt.is_fl;
+    i.is_ceiling = f.is_ceiling;
+    i.is_floor = f.is_floor;
+    i.speed_kt = f.speed_kt;
+    i.is_approach = f.is_approach_proc;
+    out.push_back(i);
+  }
+  return out;
+}
+
 std::vector<std::string> route_fixes_all_debug(int *out_idx) {
   if (out_idx)
     *out_idx = s_route_fix_idx;

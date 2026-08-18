@@ -449,6 +449,8 @@ void cmd_goto(const std::string &fix) {
               up.c_str(), ctx.latitude, ctx.longitude);
 }
 
+void reset_track_vs(); // defined with the track state below
+
 void cmd_jump(const std::string &rest) {
   auto [sub, arg] = split_first(rest);
   if (sub == "approach") {
@@ -490,6 +492,7 @@ void cmd_jump(const std::string &rest) {
   } else {
     std::fprintf(stderr, "Usage: jump approach|enroute <alt_ft>|descent <alt_ft>|predep\n");
   }
+  reset_track_vs();
 }
 
 void cmd_enc() {
@@ -536,6 +539,15 @@ void cmd_enc() {
 // Replay a single track point: teleport to lat/lon/alt, refresh enclosing, run one
 // poll step. Scriptable line-by-line to walk a real flight path and watch the
 // handoff chain fire. Usage: track <lat> <lon> <alt_ft> [dt]
+// Altitude at the previous `track`, so the vertical speed can be derived.
+// WITHOUT THIS THE AIRCRAFT IS ALWAYS LEVEL as far as the engine is concerned:
+// cmd_track moved it and changed its altitude but left vertical_speed_fpm at
+// zero, so poll_altitude_compliance -- which fires only when the aircraft is
+// NOT moving toward its cleared level -- challenged a perfectly obedient
+// descent three times over one arrival. The engine was right; the harness was
+// flying a teleporting aircraft. [C. P. Potter]
+static float s_prev_track_alt_ft = -1e9f;
+
 void cmd_track(const std::string &rest) {
   std::istringstream iss(rest);
   double lat, lon;
@@ -549,6 +561,9 @@ void cmd_track(const std::string &rest) {
   auto &ctx = xplane_context::g_cli_ctx;
   ctx.latitude = lat;
   ctx.longitude = lon;
+  if (s_prev_track_alt_ft > -1e8f && dt > 0.0f)
+    ctx.vertical_speed_fpm = (alt - s_prev_track_alt_ft) / dt * 60.0f;
+  s_prev_track_alt_ft = alt;
   ctx.altitude_ft_msl = alt;
   ctx.pressure_alt_ft = alt;
   run_polls(dt);
@@ -588,12 +603,17 @@ void cmd_state(const std::string &callsign) {
   std::printf("Region:    %s\n", settings::atc_profile().c_str());
 }
 
+// A reset or a jump breaks the altitude continuity: the next track must not
+// derive a vertical speed from a position the aircraft never flew through.
+void reset_track_vs() { s_prev_track_alt_ft = -1e9f; }
+
 void cmd_reset() {
   atc_state_machine::reset();
   engine::reset();
   g_now_secs = 0.0;
   xplane_context::g_cli_ctx.now_secs = 0.0;
   std::fprintf(stderr, "Engine state reset (context unchanged, t=0).\n");
+  reset_track_vs();
 }
 
 // load_ofp <file>: replay a saved SimBrief last_ofp.json (raw API response) --
@@ -764,6 +784,20 @@ int run(xplane_context::XPlaneContext ctx, std::string callsign) {
         engine::training_set_arrival(dest, star, appr);
         std::printf("arrival set: dest=%s STAR=%s approach=%s\n",
                     dest.c_str(), star.c_str(), appr.c_str());
+      }
+    }
+    else if (cmd == "fmsroute") {
+      // The cleared route WITH geometry, for a driver that flies like an FMS.
+      // One fix per line: idx ident lat lon alt fl ceil floor spd app
+      int idx = 0;
+      const auto all = engine::route_fixes_info(&idx);
+      std::printf("fmsroute idx=%d n=%zu\n", idx, all.size());
+      for (size_t i = 0; i < all.size(); ++i) {
+        const auto &f = all[i];
+        std::printf("  %zu %s %.6f %.6f %d %d %d %d %d %d\n", i,
+                    f.ident.empty() ? "?" : f.ident.c_str(), f.lat, f.lon,
+                    f.alt_ft, f.is_fl ? 1 : 0, f.is_ceiling ? 1 : 0,
+                    f.is_floor ? 1 : 0, f.speed_kt, f.is_approach ? 1 : 0);
       }
     }
     else if (cmd == "route") {

@@ -47,7 +47,7 @@ LINT_EXCLUDE := $(LINT_EXCLUDE_WIN) src/audio/audio_input_coreaudio.cpp
 endif
 LINT_SOURCES := $(filter-out $(LINT_EXCLUDE),$(wildcard src/main.cpp src/*/*.cpp))
 
-.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay test test-unit test-scenarios test-afis test-stars ci-remote win-artifact skunkcrafts
+.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay replay-star test test-unit test-scenarios test-afis test-stars ci-remote win-artifact skunkcrafts
 
 .DEFAULT_GOAL := help
 
@@ -465,6 +465,21 @@ DIST_STAGE    := dist/$(DIST_NAME)/xp_wellys_atc
 # without it; the replay found the defects in one run afterwards -- the last
 # vector assigning the axis course instead of an intercept, and "established"
 # declared on heading alone. Both were visible in this output. [C. P. Potter]
+# The SAME route flown as a PUBLISHED PROCEDURE: no vectors, the pilot flies the
+# cleared route read back from the engine (`fmsroute`) exactly as an FMS would --
+# flight-plan fixes, then the cleared STAR, then the approach transition. A direct
+# to an IAF rewrites that route and the pilot follows it, so this one target covers
+# the full STAR and the shortcut alike. Until it existed, every defect of the
+# non-vectored arrival could only be found by flying it. [C. P. Potter]
+replay-star: ifr-repl
+	@echo "=== Replay: DIK -> EDLW, PUBLISHED procedure (no vectors), ILS ==="
+	@ATC_FMS=1 XP_ATC_FORCE_ILS=1 XP_ATC_HOLD_PCT=0 \
+	    ATC_RAW=build/replay-star-raw.log \
+	    python3 testscripts/ifr_real/fly.py testscripts/ifr_real/route_dik_edlw.json
+	@echo
+	@echo "--- route the pilot flew (build/replay-star-raw.log) ---"
+	@grep -h "\[fms\]" build/replay-star-raw.log || true
+
 replay: ifr-repl
 	@echo "=== Replay: DIK -> EDLW, forced vectoring, ILS ==="
 	@XP_ATC_FORCE_ILS=1 XP_ATC_FORCE_VECTORING=1 \

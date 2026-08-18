@@ -60,6 +60,30 @@ FPM = 1800.0
 # 3 deg/s is standard rate. Both matter: together they consume axis distance
 # while closing almost nothing laterally, which is what makes a vectored
 # intercept run out of room.
+# Measured on an EMBRAER PHENOM 300 (Data.txt, EDLW arrival 2026-08-18): 189 kt
+# to 161 kt in 24 s, essentially level -- about 1.2 kt/s. A light jet in descent,
+# with no speedbrake out, does noticeably worse.
+#
+# THE AIRFRAME MATTERS and this figure is the conservative end: the user normally
+# flies a TBM or a Piper Meridian, and a turboprop with the propellers acting as
+# drag slows down considerably faster. Those aircraft also arrive slower, so the
+# 210 kt and 160 kt targets are frequently not issued at all -- vec_speed_phrase()
+# only speaks when the aircraft is more than 10 kt above the target, which is the
+# right behaviour and needs no per-type table. Holding the harness to the jet's
+# rate therefore tests the WORST case, which is what a harness is for.
+#
+# The driver used to jump straight to the assigned speed, which made every
+# distance-to-go optimistic and hid the question the user actually asked: can 210
+# be turned into 160 before the intercept point? [C. P. Potter]
+DECEL_KT_PER_S = 1.2
+ACCEL_KT_PER_S = 0.8
+
+# Fly the CLEARED route (read back from the engine) instead of the recorded
+# ground track. Opt-in while it is being proved against the vectored replay.
+FMS_MODE = os.environ.get("ATC_FMS", "") not in ("", "0")
+FMS_CAPTURE_NM = 1.5   # a fix is flown over within this
+FMS_BEHIND_NM = 12.0   # inside this, a fix more than 120 deg off the nose is behind
+
 REACT_SECS = 35.0
 TURN_RATE_DEG_S = 3.0
 
@@ -79,6 +103,46 @@ def bearing(a, b):
     y = math.sin(dlon) * math.cos(la2)
     x = math.cos(la1) * math.sin(la2) - math.sin(la1) * math.cos(la2) * math.cos(dlon)
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+RE_FMS_HDR = re.compile(r"fmsroute idx=(\d+) n=(\d+)")
+RE_FMS_FIX = re.compile(
+    r"^\s+(\d+) (\S+) (-?\d+\.\d+) (-?\d+\.\d+) (-?\d+) (\d) (\d) (\d) (\d+) (\d)")
+
+
+def parse_fmsroute(lines):
+    """Return (idx, fixes) from a fmsroute block, or (None, None) if absent."""
+    idx, fixes, seen = None, [], False
+    for ln in lines:
+        m = RE_FMS_HDR.search(ln)
+        if m:
+            idx, fixes, seen = int(m.group(1)), [], True
+            continue
+        if not seen:
+            continue
+        m = RE_FMS_FIX.match(ln.rstrip("\n"))
+        if m:
+            fixes.append({
+                "ident": m.group(2),
+                "lat": float(m.group(3)),
+                "lon": float(m.group(4)),
+                "alt_ft": int(m.group(5)),
+                "is_fl": m.group(6) == "1",
+                "spd": int(m.group(9)),
+                "app": m.group(10) == "1",
+            })
+    return (idx, fixes) if seen else (None, None)
+
+
+def ramp_speed(current, target, secs):
+    """Move the speed toward the target at the aircraft's real rate."""
+    if current is None:
+        return target
+    d = target - current
+    lim = (ACCEL_KT_PER_S if d > 0 else DECEL_KT_PER_S) * secs
+    if abs(d) <= lim:
+        return target
+    return current + (lim if d > 0 else -lim)
 
 
 def cross_track(p, faf, course_deg):
@@ -213,6 +277,19 @@ class Pilot:
         self.faf = None          # (lat, lon) of the FAF, from the engine's own log
         self.faf_track = None    # published final approach track
         self.assigned_kt = None  # speed ATC has assigned, and the pilot flies
+        # THE CLEARED ROUTE, as the engine itself is tracking it. Read back from
+        # the REPL every step (`fmsroute`), so the driver flies what it has been
+        # CLEARED rather than a recorded ground track. This is what lets one
+        # route file exercise all three arrivals: the full STAR, the STAR cut
+        # short by a direct to an IAF (which rewrites this list), and the
+        # vectored arrival (which abandons it for a heading). A recorded track
+        # can only ever reproduce the arrival it was recorded from -- ours was
+        # recorded vectored, which is why the published-procedure mode could
+        # never be replayed and every one of its defects had to be found in a
+        # real flight. [C. P. Potter]
+        self.fms = []       # [{ident, lat, lon, alt_ft, is_fl, spd, app}]
+        self.fms_idx = 0    # the engine's own tracker index
+        self.fms_i = None   # the PILOT's own index -- see fms_advance()
         self.tower_called = False  # checked in on Tower
         self.tower_no_freq = False # Tower handoff arrived without a frequency
         self.cleared_approach = False # approach clearance received
@@ -300,19 +377,6 @@ class Pilot:
                 # Treating it as the event made the pilot announce established
                 # 33 NM out and beeline for the FAF instead of flying his vector.
                 self.cleared_approach = True
-            # THE PILOT DECIDES WHEN HE IS ESTABLISHED, by looking at his
-            # instruments -- he does not become established because ATC asked
-            # him to report it. Cleared for the approach and within half a mile
-            # of the published track, he calls it, stops flying the vector and
-            # tracks the axis inbound.
-            if (self.cleared_approach and not self.established
-                    and self.faf is not None and self.faf_track is not None
-                    and isinstance(where, tuple)):
-                off = abs(cross_track(where, self.faf, self.faf_track))
-                if off < 0.5:
-                    self.established = True
-                    self.final_course = self.faf_track
-                    self.vector_hdg = None
             if re.search(r"cleared to land", msg, re.I):
                 self.finished = True
 
@@ -327,6 +391,135 @@ class Pilot:
             m = RE_MAINTAIN_FL.search(msg)
             if m:
                 self.cleared_ft = int(m.group(1)) * 100
+
+    @staticmethod
+    def strip_fmsroute(lines):
+        """Remove the fmsroute block before the lines reach react().
+
+        Those lines are numbers -- "2 DOR 51.525342 7.631056 3000 0 0 1 210 1" --
+        and react() matches instructions by pattern, so feeding them in let a
+        route dump be read as a clearance. It moved the measured capture from
+        5.9 NM to 5.4 NM the moment the query was added, which is a harness
+        artefact of exactly the kind these replays exist to rule out."""
+        out, inside = [], False
+        for ln in lines:
+            if RE_FMS_HDR.search(ln):
+                inside = True
+                continue
+            if inside and RE_FMS_FIX.match(ln.rstrip("\n")):
+                continue
+            inside = False
+            out.append(ln)
+        return out
+
+    def read_route(self, lines):
+        """Absorb a fmsroute block and keep the pilot's own place in it.
+
+        The engine's tracker index is its opinion of where the aircraft is; the
+        pilot keeps his own, because the two legitimately differ (the tracker
+        advances on proximity, the pilot on having actually flown the leg). On
+        the FIRST read the engine's index seeds ours -- otherwise the driver
+        would set off toward fixes already behind it. When ATC rewrites the
+        route -- a direct to an IAF replaces the remaining STAR -- we keep the
+        fix we were flying to if it survived, else fall back to the engine's
+        index."""
+        idx, fixes = parse_fmsroute(lines)
+        if idx is None:
+            return
+        now = [f["ident"] for f in fixes]
+        if self.fms_i is None:
+            self.fms, self.fms_idx, self.fms_i = fixes, idx, idx
+            return
+        prev = [f["ident"] for f in self.fms]
+        if prev != now:
+            cur = (self.fms[self.fms_i]["ident"]
+                   if 0 <= self.fms_i < len(self.fms) else None)
+            self.fms_i = now.index(cur) if cur in now else idx
+            if _raw_fh:
+                _raw_fh.write("  [fms] route changed: %s -> %s (now at %s)\n"
+                              % (" ".join(prev), " ".join(now),
+                                 now[self.fms_i] if self.fms_i < len(now)
+                                 else "END"))
+        self.fms, self.fms_idx = fixes, idx
+
+    def fms_advance(self, pos):
+        """Sequence the cleared route like an FMS, and return the fix to fly to.
+
+        Two ways a fix stops being the target: the aircraft REACHES it (within
+        the capture radius), or it ends up BEHIND -- which happens after a route
+        change, or when a leg is cut short. Chasing a fix that is behind is what
+        sent the first version of this driver back out to 40 NM after passing the
+        field. Fixes the CIFP gives no coordinates for (runway ends, some
+        transitions) are skipped. Returns None when the route is flown out, which
+        is the signal to hand over to the final-approach segment. [C. P. Potter]"""
+        while self.fms_i is not None and self.fms_i < len(self.fms):
+            f = self.fms[self.fms_i]
+            if abs(f["lat"]) < 1e-4 and abs(f["lon"]) < 1e-4:
+                self.fms_i += 1
+                continue
+            d = nm(pos, (f["lat"], f["lon"]))
+            if d <= FMS_CAPTURE_NM:
+                if _raw_fh:
+                    _raw_fh.write("  [fms] captured %s\n" % f["ident"])
+                self.fms_i += 1
+                continue
+            if self.hdg is not None and d < FMS_BEHIND_NM:
+                rel = abs((bearing(pos, (f["lat"], f["lon"])) - self.hdg
+                           + 540.0) % 360.0 - 180.0)
+                if rel > 120.0:
+                    if _raw_fh:
+                        _raw_fh.write("  [fms] skipped %s (behind, rel %.0f, "
+                                      "d %.1f)\n" % (f["ident"], rel, d))
+                    self.fms_i += 1
+                    continue
+            return f
+        if _raw_fh:
+            _raw_fh.write("  [fms] route exhausted at i=%s of %d\n"
+                          % (self.fms_i, len(self.fms)))
+        return None
+
+    def check_established(self, where):
+        """THE PILOT DECIDES WHEN HE IS ESTABLISHED, by looking at his
+        instruments -- he does not become established because ATC asked him to
+        report it. Cleared for the approach and within half a mile of the
+        published track, he calls it, stops flying the vector and tracks the
+        axis inbound.
+
+        Called once per FLOWN STEP, not per ATC line. Buried inside react()'s
+        per-line loop it ran only when ATC happened to speak -- eleven times in
+        a whole arrival -- so the aircraft sailed past the localiser between
+        transmissions and the capture was never seen."""
+        if (self.established or not self.cleared_approach
+                or self.faf is None or self.faf_track is None
+                or not isinstance(where, tuple)):
+            return
+        # ESTABLISHED MEANS ESTABLISHED INBOUND. Lateral offset alone is not
+        # enough: on a published transition the route passes over the field
+        # (DOR is the aerodrome VOR) and back out to the approach fixes, so the
+        # aircraft crosses the EXTENDED axis while flying away from the runway.
+        # Testing only |y| declared it established there, one mile from the
+        # field, and the final segment then flew it 40 NM outbound. Two more
+        # conditions: the FAF must be AHEAD along the axis, and the aircraft
+        # must be pointing down the final approach track. [C. P. Potter]
+        d_faf = nm(where, self.faf)
+        rel = math.radians(bearing(where, self.faf) - self.faf_track)
+        if d_faf * math.cos(rel) <= 0.5:
+            return  # the FAF is behind -- this is not an inbound capture
+        if self.hdg is not None:
+            err = abs((self.hdg - self.faf_track + 540.0) % 360.0 - 180.0)
+            # 50 deg, not 30: the intercept heading is up to 45 deg off the
+            # axis (ICAO 8.9.3.6), and the aircraft is ON that heading at the
+            # moment it captures -- it turns onto the course as it captures, it
+            # is not already on it. A 30 deg gate refused our own 31 deg
+            # intercept and silently killed the vectored replay. What this test
+            # is really for is rejecting a crossing at a large angle, such as
+            # overflying the field VOR on the extended axis.
+            if err > 50.0:
+                return  # crossing the axis, not tracking it
+        if abs(cross_track(where, self.faf, self.faf_track)) < 0.5:
+            self.established = True
+            self.final_course = self.faf_track
+            self.vector_hdg = None
 
     @staticmethod
     def _level_words(alt):
@@ -387,10 +580,17 @@ def main():
 
     pilot.runway = str(route.get("runway", ""))
     repl.send("poll 5")
-    pilot.react(repl.sync(), prev, int(alt))
+    repl.send("fmsroute")          # seed the pilot's route before the first leg
+    _l0 = repl.sync()
+    pilot.read_route(_l0)
+    pilot.react(Pilot.strip_fmsroute(_l0), prev, int(alt))
 
     idx = 1
-    while idx < len(path):
+    # In FMS mode the route, not the recorded track, decides when the enroute
+    # phase ends -- so the loop is bounded by a step budget and exits when the
+    # cleared route has been flown out.
+    steps_cap = 4000 if FMS_MODE else len(path)
+    while idx < steps_cap:
         if pilot.vector_hdg is not None:
             # Dead-reckon, but as an aircraft flies: 1 NM steps, a reaction delay
             # before the turn begins, then a standard-rate turn onto the assigned
@@ -410,12 +610,25 @@ def main():
             pt = (prev[0] + step * math.cos(hdg) / 60.0,
                   prev[1] + step * math.sin(hdg) /
                   (60.0 * math.cos(math.radians(prev[0]))))
+        elif FMS_MODE and pilot.fms:
+            tgt = pilot.fms_advance(prev)
+            if tgt is None:
+                break  # route flown out -- the final approach segment takes over
+            brg = bearing(prev, (tgt["lat"], tgt["lon"]))
+            d_t = nm(prev, (tgt["lat"], tgt["lon"]))
+            step = min(4.0, max(0.3, d_t))
+            pt = advance(prev, brg, step)
+            pilot.hdg = brg
+            idx += 1
         else:
             pt = path[idx]
             idx += 1
-        if pilot.assigned_kt is not None:
-            gs = pilot.assigned_kt
         leg = nm(prev, pt)
+        # AFTER leg is known: `step` exists only on the vectored branch, and the
+        # ramp needs the duration of the segment actually flown.
+        if pilot.assigned_kt is not None:
+            gs = ramp_speed(gs, pilot.assigned_kt,
+                            max(5.0, leg / max(gs, 1.0) * 3600.0))
         if pilot.vector_hdg is not None:
             actual = bearing(prev, pt)
             err = (actual - pilot.vector_hdg + 540.0) % 360.0 - 180.0
@@ -438,7 +651,11 @@ def main():
         repl.send("set heading %.0f" % bearing(prev, pt))
         pilot.react(repl.sync(), prev, int(alt))
         repl.send("track %.4f %.4f %d %d" % (pt[0], pt[1], int(alt), dt))
-        pilot.react(repl.sync(), pt, int(alt))
+        repl.send("fmsroute")
+        lines = repl.sync()
+        pilot.read_route(lines)
+        pilot.react(Pilot.strip_fmsroute(lines), pt, int(alt))
+        pilot.check_established(pt)
         prev = pt
         if pilot.finished or pilot.established:
             break
@@ -473,8 +690,10 @@ def main():
             # here. [C. P. Potter]
             # ATC's assigned speed wins; otherwise EUROCONTROL's 160 kt from
             # 8 NM to touchdown.
-            gs = (pilot.assigned_kt if pilot.assigned_kt is not None
-                  else (160.0 if d < 8.0 else float(route.get("gs_kt", 280))))
+            want_kt = (pilot.assigned_kt if pilot.assigned_kt is not None
+                       else (160.0 if d < 8.0 else float(route.get("gs_kt", 280))))
+            gs = ramp_speed(gs, want_kt,
+                            max(5.0, step / max(gs, 1.0) * 3600.0))
             # Steer at the destination once inside 6 NM: the published course and
             # a straight line differ a little, and drifting off it here would look
             # like a lateral deviation the plugin would rightly challenge.
@@ -482,15 +701,29 @@ def main():
             # the field dragged the aircraft off the axis and produced a bogus
             # "established LATE, 2.1 NM off" that was the harness, not the
             # plugin. Only inside 3 NM does the runway itself become the target.
-            # Capture the localiser, then track it: steer at the FAF until
-            # reaching it, then follow the published track to the runway.
-            if pilot.faf is not None and nm(prev, pilot.faf) > 0.6:
+            # Capture the localiser, then track it: steer at the FAF while the
+            # FAF is still AHEAD, then follow the published track to the runway.
+            # "Ahead" is the ALONG-TRACK distance, not the plain range: past the
+            # FAF the range grows again, so a range test turned the aircraft
+            # round and the aircraft shuttled back and forth across the FAF
+            # forever -- 40 steps spent between 5.5 and 6.5 NM, and the runway
+            # never reached. [C. P. Potter]
+            ahead = 0.0
+            if pilot.faf is not None:
+                dfaf = nm(prev, pilot.faf)
+                ahead = dfaf * math.cos(math.radians(bearing(prev, pilot.faf) - crs))
+            if ahead > 0.6:
                 crs_now = bearing(prev, pilot.faf)
             else:
                 crs_now = crs
             pt = advance(prev, crs_now, step)
             alt = max(500.0, alt - step * 318.0)
-            if pilot.cleared_ft is not None:
+            # The assigned level holds until the FAF; from the FAF inbound the
+            # aircraft is on the glide path and ATC's floor no longer applies
+            # (ICAO 8.9.4.2 -- maintain the last level until intercepting the
+            # glide path). Keeping the floor past the FAF pinned the aircraft at
+            # 4900 ft all the way to the field.
+            if pilot.cleared_ft is not None and ahead > 0.6:
                 alt = max(alt, float(pilot.cleared_ft) - 100.0)
             repl.send("set gs %.0f" % gs)
             repl.send("set heading %.0f" % crs_now)

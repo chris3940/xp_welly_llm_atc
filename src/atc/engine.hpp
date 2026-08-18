@@ -323,6 +323,25 @@ std::vector<std::string> upcoming_route_fix_idents();
 // which fixes are in the plugin after a STAR shortcut rebuild.
 std::vector<std::string> route_fixes_all_debug(int *out_idx);
 
+// The route the engine is actually tracking, with the geometry a pilot needs to
+// FLY it. Exposed so a test driver can behave like an FMS -- follow the cleared
+// route, and follow it again when ATC changes it (a STAR shortcut direct to an
+// IAF rewrites this list, a vector abandons it) -- instead of replaying a
+// recorded ground track, which can only ever reproduce the arrival it was
+// recorded from. [C. P. Potter]
+struct RouteFixInfo {
+  std::string ident;
+  double lat = 0.0;
+  double lon = 0.0;
+  int alt_ft = 0;      // 0 = no altitude constraint
+  bool is_fl = false;
+  bool is_ceiling = false; // at-or-below
+  bool is_floor = false;   // at-or-above
+  int speed_kt = 0;        // 0 = no speed constraint
+  bool is_approach = false;
+};
+std::vector<RouteFixInfo> route_fixes_info(int *out_idx);
+
 // Most recent ATC-assigned altitude in feet MSL, or 0 when none is active.
 // Precedence: approach initial FL (once Approach has issued a target) >
 // en-route cleared altitude (covers cruise + step-ups / step-downs) >
