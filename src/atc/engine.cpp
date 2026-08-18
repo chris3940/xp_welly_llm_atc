@@ -10258,8 +10258,16 @@ static void vec_project(const xplane_context::XPlaneContext &ctx, double course,
   const double gs = std::max(80.0, static_cast<double>(ctx.groundspeed_kts));
   const double d = gs * kVecLeadSecs / 3600.0; // NM flown before the turn bites
   const double rel = (static_cast<double>(ctx.heading_mag) - course) * M_PI / 180.0;
+  // Signs, because one of them was wrong and it cost a wrong turn. In this
+  // frame s counts DOWN as the aircraft closes on the FAF, so it is subtracted;
+  // y is positive to the RIGHT of the axis, so flying right of the course must
+  // INCREASE it. Subtracting both drove the projected offset away from the axis
+  // instead of towards it: at |y|=0.4 NM on a 025 heading the alignment angle
+  // was computed on 1.46 NM, clamped to the 45 degree maximum, and the aircraft
+  // was turned LEFT to 012 when the runway is 06 and the turn is to the RIGHT
+  // (user, 2026-08-18: "la piste est en 06 ce n'est pas un virage a droite ?").
   *s -= d * std::cos(rel);
-  *y -= d * std::sin(rel);
+  *y += d * std::sin(rel);
 }
 
 static double vec_intercept_rel_deg(double s, double y) {
