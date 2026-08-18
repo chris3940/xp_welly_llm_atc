@@ -11182,11 +11182,21 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
           std::fmod(course + kVecInterceptDeg * sign + 360.0, 360.0);
       s_vtf_hdg = hdg;
       s_vtf_nudged = false;
+      // ICAO phraseology, not a field idiom. "CLOSING" exists in Doc 4444 only
+      // in the TRAFFIC INFORMATION vocabulary (12.4.1.8: "...CLOSING; OPPOSITE
+      // (or SAME) DIRECTION"), never in the vectoring set. What 12.4.1.3 e)
+      // provides is TURN LEFT (or RIGHT) HEADING (three digits) [reason] -- and
+      // that bracket is exactly where the reason 8.9.3.7 demands belongs, when a
+      // vector has taken the aircraft through the final approach track.
+      // [C. P. Potter]
+      // 12.4.1.3 e) is "TURN LEFT (or RIGHT) HEADING (three digits) [reason]" --
+      // the reason follows the heading with no comma. When the aircraft has been
+      // taken through the track, 8.9.3.7 requires saying so, and "final approach
+      // track" is that paragraph's own term, correct for an ILS and an RNP alike.
       *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, hdg) +
-                  (crossed ? ", you have passed through the localiser, "
-                             "closing from the "
-                           : ", closing from the ") +
-                  ((y > 0.0) ? "right." : "left.");
+                  (crossed
+                       ? ", you have passed through the final approach track."
+                       : (" for " + vec_established_ref(ctx) + "."));
       if (out_requires_readback)
         *out_requires_readback = true;
       logging::info("[vector] re-intercept: %.1f NM %s of the axis (%s), "
