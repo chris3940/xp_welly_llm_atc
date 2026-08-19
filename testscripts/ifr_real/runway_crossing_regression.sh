@@ -100,18 +100,39 @@ poll 3
 SCRIPT
 }
 
-# KNOWN GAP, not a failure: the taxi clearance itself does not yet carry the
-# hold-short. engine::runway_to_cross() answers correctly on the Tower path at
-# these very coordinates, and the hold-short REPORT below is named properly, but
-# the initial "taxi to holding point ..." comes out bare. Reported as a note so
-# the suite stays green and the gap stays visible. [C. P. Potter]
-echo "--- Ground: the taxi clearance itself (KNOWN GAP) ---"
-run "$(ground 43.661325 7.213975 GROUND_CONTACT "November Romeo Charlie ready to taxi")"
-if grep -qiE "hold short of runway" <<<"$OUT"; then
-  echo "  PASS  the taxi clearance names the runway to hold short of"
-else
-  echo "  NOTE  the taxi clearance is still bare -- known gap, see the comment"
-fi
+# The TAXI CLEARANCE needs the whole pre-departure sequence: a taxi request
+# before the IFR clearance is refused outright, which is what made this look like
+# a code gap the first time round. The hold-short REPORT cases below do NOT use
+# it -- the clearance assigns a squawk, and the squawk check then answers before
+# the holding-short template ever runs.
+ground_full() {
+  cat <<SCRIPT
+clear_runways
+add_runway 04R 43.64673731 7.20249753 22L 43.66561481 7.22846925
+add_runway 04L 43.65180616 7.20403478 22R 43.66855734 7.22708757
+set airport LFMN
+set runway 04R
+set on_ground 1
+set gs 0
+set heading 135
+set lat $1
+set lon $2
+set com 121.700
+set freq_type GROUND
+set dest LSGG
+say November Romeo Charlie request IFR clearance to Geneva
+say November Romeo Charlie cleared to Geneva squawk two zero one two
+say November Romeo Charlie ready to taxi
+poll 3
+SCRIPT
+}
+
+# The taxi clearance must STOP at the runway. This needs the full pre-departure
+# sequence: a taxi request before the IFR clearance is refused outright, which is
+# what made this look like a code gap the first time round.
+echo "--- Ground: the taxi clearance stops at the runway ---"
+run "$(ground_full 43.661325 7.213975)"
+want "the taxi clearance names the runway to hold short of" "hold short of runway 04L"
 
 echo "--- Ground: the hold-short report is answered with the runway named ---"
 run "$(ground 43.661325 7.213975 TAXI_CLEARED "November Romeo Charlie holding point alpha one")"
