@@ -96,6 +96,27 @@ TEST_CASE("eu-tower-contact: Whisper typo 'depature' is normalized to "
              m.intent == PilotIntent::READY_FOR_DEPARTURE_VFR));
 }
 
+TEST_CASE("eu-tower-contact: Voxtral SPLITS 'runway' into 'one way' and the "
+          "normalizer puts it back",
+          "[intent][eu][normalize]") {
+    EuRegionGuard g;
+    atc_state_machine::init();
+    atc_state_machine::set_state(ATCState::TOWER_CONTACT);
+    auto ctx = ground_ctx();
+
+    // Verbatim from the LSGG arrival of 2026-08-19: "runway two two" came back
+    // as "One way to 2", which lost the runway from the readback entirely. The
+    // split is the mishearing, and it is what the normalizer has to undo.
+    auto split = parse(
+        "Bern Tower November One Seven Two Sierra Papa short one way 14 ready for departure",
+        ctx);
+    auto whole = parse(
+        "Bern Tower November One Seven Two Sierra Papa short runway 14 ready for departure",
+        ctx);
+    REQUIRE(split.intent == whole.intent);
+    REQUIRE(split.runway == whole.runway);
+}
+
 // ── 2. Regression checks (must stay green) ──────────────────────────
 
 TEST_CASE("eu-initial-contact: pure 'Bern Tower N172SP' in IDLE still "
