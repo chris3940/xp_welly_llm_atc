@@ -128,6 +128,7 @@ def parse_fmsroute(lines):
                 "lon": float(m.group(4)),
                 "alt_ft": int(m.group(5)),
                 "is_fl": m.group(6) == "1",
+                "ceil": m.group(7) == "1",
                 "spd": int(m.group(9)),
                 "app": m.group(10) == "1",
             })
@@ -487,6 +488,29 @@ class Pilot:
                                  else "END"))
         self.fms, self.fms_idx = fixes, idx
 
+    def constraint_ceiling(self, pos, alt, ft_per_nm):
+        """Highest altitude allowed HERE by the published at-or-below constraints
+        still ahead on the cleared route.
+
+        "DESCEND VIA (STAR)" delegates the profile to the pilot: he flies the
+        published constraints on the way down. This driver descended flat toward
+        the cleared level and crossed GG502 at 12010 ft against a FL100 cap and
+        BIVLO at 9000 against 7000 -- while the constraints were sitting unread in
+        the fmsroute dump all along (user, 2026-08-19). [C. P. Potter]"""
+        if self.fms_i is None or not self.fms:
+            return None  # the route has not been read yet
+        cap = None
+        for i in range(max(0, self.fms_i), len(self.fms)):
+            f = self.fms[i]
+            if f["alt_ft"] <= 0 or not f.get("ceil") or f["app"]:
+                continue
+            if abs(f["lat"]) < 1e-4 and abs(f["lon"]) < 1e-4:
+                continue
+            d = nm(pos, (f["lat"], f["lon"]))
+            here = f["alt_ft"] + d * ft_per_nm
+            cap = here if cap is None else min(cap, here)
+        return cap
+
     def fms_advance(self, pos):
         """Sequence the cleared route like an FMS, and return the fix to fly to.
 
@@ -689,6 +713,11 @@ def main():
                 print("  [dr] assigned %.0f actual %.0f err %+.0f"
                       % (pilot.vector_hdg, actual, err))
         flown += leg
+        # Published at-or-below constraints bind BEFORE the cleared level: they
+        # are the pilot's to fly under a "descend via".
+        cap_here = pilot.constraint_ceiling(pt, alt, ft_per_nm)
+        if cap_here is not None and alt > cap_here:
+            alt = max(cap_here, alt - leg * ft_per_nm)
         # Fly toward the cleared level -- never below it, never ahead of it.
         if pilot.cleared_ft is not None:
             if alt > pilot.cleared_ft:

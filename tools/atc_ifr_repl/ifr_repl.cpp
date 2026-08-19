@@ -27,6 +27,7 @@
 #include "core/xplane_context.hpp"
 #include "data/airspace_db.hpp"
 #include "data/cifp_reader.hpp"
+#include "data/traffic_geometry.hpp"
 #include "data/openair_db.hpp"
 #include "backends/simbrief_client.hpp"
 #include "data/simbrief_ofp.hpp"
@@ -797,6 +798,35 @@ int run(xplane_context::XPlaneContext ctx, std::string callsign) {
         std::printf("arrival set: dest=%s STAR=%s approach=%s\n",
                     dest.c_str(), star.c_str(), appr.c_str());
       }
+    }
+    else if (cmd == "add_runway") {
+      // add_runway <n1> <lat1> <lon1> <n2> <lat2> <lon2>
+      // The runway table comes from apt.dat, parsed plugin-side, so headless
+      // ctx.runways is empty -- and the runway-crossing decision, which reads it,
+      // could not be exercised at all.
+      std::istringstream ri(rest);
+      xplane_context::RunwayInfo rw;
+      if (!(ri >> rw.end1.number >> rw.end1.lat >> rw.end1.lon >>
+                 rw.end2.number >> rw.end2.lat >> rw.end2.lon)) {
+        std::fprintf(stderr,
+                     "Usage: add_runway <n1> <lat1> <lon1> <n2> <lat2> <lon2>\n");
+      } else {
+        rw.end1.heading_deg = static_cast<float>(traffic_geometry::bearing_deg(
+            rw.end1.lat, rw.end1.lon, rw.end2.lat, rw.end2.lon));
+        rw.end2.heading_deg =
+            std::fmod(rw.end1.heading_deg + 180.0f, 360.0f);
+        rw.length_m = static_cast<float>(
+            traffic_geometry::distance_nm(rw.end1.lat, rw.end1.lon, rw.end2.lat,
+                                          rw.end2.lon) * 1852.0);
+        xplane_context::g_cli_ctx.runways.push_back(rw);
+        std::printf("add_runway %s/%s, %.0f m\n", rw.end1.number.c_str(),
+                    rw.end2.number.c_str(),
+                    static_cast<double>(rw.length_m));
+      }
+    }
+    else if (cmd == "clear_runways") {
+      xplane_context::g_cli_ctx.runways.clear();
+      std::printf("runways cleared\n");
     }
     else if (cmd == "tower_freq") {
       std::istringstream ai(rest);

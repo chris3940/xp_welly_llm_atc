@@ -1900,13 +1900,37 @@ crossing_runway_at_position(const xplane_context::XPlaneContext &ctx,
       return {};
   }
   constexpr double kHoldShortNm = 0.135; // ~250 m
+  // DISTANCE TO THE RUNWAY, NOT TO ITS THRESHOLD. The test used to measure the
+  // range to a runway END, so it could only fire at a hold-short within 250 m of
+  // a threshold. Most crossings are nothing like that: at LFML the taxi to 31R
+  // stops at Foxtrot 7, a hold-short partway ALONG 31L and kilometres from either
+  // end, so no crossing was ever detected and the aircraft crossed an active
+  // runway with no clearance at all (real flight 2026-08-19). What matters is the
+  // perpendicular distance to the CENTRELINE SEGMENT. The transverse-heading
+  // guard below is unchanged and still does its job -- it is what removed the
+  // LFLU false positive. [C. P. Potter]
+  auto dist_to_segment_nm = [](double plat, double plon, double alat, double alon,
+                               double blat, double blon) {
+    // Local flat-earth projection in NM; runways are short enough for it.
+    const double k = std::cos(plat * M_PI / 180.0);
+    const double px = (plon - alon) * 60.0 * k, py = (plat - alat) * 60.0;
+    const double bx = (blon - alon) * 60.0 * k, by = (blat - alat) * 60.0;
+    const double len2 = bx * bx + by * by;
+    double t = len2 > 0.0 ? (px * bx + py * by) / len2 : 0.0;
+    t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+    const double dx = px - t * bx, dy = py - t * by;
+    return std::sqrt(dx * dx + dy * dy);
+  };
   for (const auto &rwy : ctx.runways) {
+    if (rwy.end1.number == dep_rwy || rwy.end2.number == dep_rwy)
+      continue; // the departure runway itself is never a crossing
+    const double dseg = dist_to_segment_nm(ctx.latitude, ctx.longitude,
+                                           rwy.end1.lat, rwy.end1.lon,
+                                           rwy.end2.lat, rwy.end2.lon);
+    if (dseg >= kHoldShortNm)
+      continue;
     for (const auto *end : {&rwy.end1, &rwy.end2}) {
-      if (end->number.empty() || end->number == dep_rwy)
-        continue; // the departure runway itself is never a crossing
-      const double d = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
-                                                     end->lat, end->lon);
-      if (d >= kHoldShortNm)
+      if (end->number.empty())
         continue;
       // A crossing is offered ONLY when the aircraft is holding short FACING ACROSS
       // that runway -- i.e. its heading is roughly TRANSVERSE to the runway axis
@@ -1926,7 +1950,24 @@ crossing_runway_at_position(const xplane_context::XPlaneContext &ctx,
         off = 360.0 - off;
       if (std::fabs(off - 90.0) > 45.0)
         continue; // heading too parallel to this runway -> alongside, not crossing
-      return end->number;
+      // Name the end that reads like the departure runway: crossing 31L on the
+      // way to 31R is "cross runway 31 Left", never "13 Right".
+      const auto *named = end;
+      if (!dep_rwy.empty()) {
+        const std::string dnum = dep_rwy.substr(0, dep_rwy.find_first_not_of("0123456789"));
+        for (const auto *e : {&rwy.end1, &rwy.end2}) {
+          const std::string enum_ = e->number.substr(
+              0, e->number.find_first_not_of("0123456789"));
+          if (!enum_.empty() && enum_ == dnum) {
+            named = e;
+            break;
+          }
+        }
+      }
+      logging::info("[ground] crossing detected: %s at %.0f m from its axis "
+                    "(departing %s)", named->number.c_str(), dseg * 1852.0,
+                    dep_rwy.c_str());
+      return named->number;
     }
   }
   return {};
@@ -6584,6 +6625,41 @@ static bool build_descent_clearance(const xplane_context::XPlaneContext &ctx,
           danc.first, danc.second, dest_stack_walk_ok());
       if (dest_ceil > 1000)
         descend_via_level_ft = ((dest_ceil - 100) / 1000) * 1000;
+    }
+  }
+  // THE LEVEL MUST BE BELOW THE PUBLISHED CONSTRAINTS, not just below the TMA.
+  // "DESCEND VIA (STAR) TO (level)" delegates the profile to the pilot: he flies
+  // the published at-or-below constraints on the way down and levels at the level
+  // given. So that level has to be low enough for them to be MEETABLE. Taking it
+  // from the terminal TMA ceiling alone produced "descend via BELUS Three Romeo
+  // arrival to flight level 190" on a STAR whose very next fix, RILTI, is capped
+  // at FL180 -- an instruction that forbids compliance with the procedure it
+  // clears. Measured: RILTI crossed at 19000 ft, 1000 ft above its cap, and BELUS
+  // is only 5.5 NM upstream, so no rate could have saved it (user, 2026-08-19).
+  {
+    // Read the constraints from the CIFP, NOT from s_route_fixes: the route is
+    // appended AFTER this clearance is built, so the loop found nothing there.
+    int lowest_cap = 0;
+    // The destination here is the OFP's, not s_assigned_dest_icao -- that member
+    // is set later in the arrival and was empty at this point, so the loop below
+    // never ran.
+    if (!ctx.cifp_dir.empty() && !ofp.destination_icao.empty() &&
+        !star_name.empty()) {
+      const auto sw = cifp_reader::star_waypoints(ctx.cifp_dir,
+                                                  ofp.destination_icao, star_name);
+      for (const auto &w : sw) {
+        if (w.alt.feet <= 0 || !w.is_ceiling)
+          continue;
+        if (lowest_cap == 0 || w.alt.feet < lowest_cap)
+          lowest_cap = w.alt.feet;
+      }
+    }
+    if (lowest_cap > 0 &&
+        (descend_via_level_ft <= 0 || lowest_cap < descend_via_level_ft)) {
+      logging::info("[descent] descend-via level %d -> %d ft: the STAR caps it "
+                    "(lowest published at-or-below)",
+                    descend_via_level_ft, lowest_cap);
+      descend_via_level_ft = lowest_cap;
     }
   }
   const int prior_cleared_via = s_enroute_cleared_alt_ft > 0

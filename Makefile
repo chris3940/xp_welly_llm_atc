@@ -47,7 +47,7 @@ LINT_EXCLUDE := $(LINT_EXCLUDE_WIN) src/audio/audio_input_coreaudio.cpp
 endif
 LINT_SOURCES := $(filter-out $(LINT_EXCLUDE),$(wildcard src/main.cpp src/*/*.cpp))
 
-.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay replay-star replay-lsgg test test-unit test-scenarios test-afis test-stars ci-remote win-artifact skunkcrafts
+.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay replay-star replay-lsgg test test-unit test-scenarios test-afis test-stars test-crossing ci-remote win-artifact skunkcrafts
 
 .DEFAULT_GOAL := help
 
@@ -296,6 +296,13 @@ test-scenarios-ifr: repl
 test-stars: ifr-repl
 	@echo "=== Running STAR tracker regression (real CIFP) ==="
 	@./testscripts/ifr_real/star_tracker_regression.sh
+
+# Runway crossings, on the real LFMN geometry. The decision used to measure the
+# range to a runway THRESHOLD, so it only fired within 250 m of a runway end --
+# and missed the ordinary case of a hold-short partway ALONG the runway, which is
+# how an aircraft crossed 31L at Marseille with no clearance (2026-08-19).
+test-crossing: ifr-repl
+	@./testscripts/ifr_real/runway_crossing_regression.sh
 
 test-afis: ifr-repl
 	@echo "=== Running AFIS real-data scenario (LFLU->LFLP) ==="
