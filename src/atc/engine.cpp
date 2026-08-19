@@ -8461,6 +8461,8 @@ bool poll_profile_enforcement(const xplane_context::XPlaneContext &ctx, float dt
   // it worked, which is why the gap stayed hidden. [C. P. Potter]
   if (poll_speed_release(ctx, out_text))
     return true;
+  if (poll_speed_compliance(ctx, dt, out_text))
+    return true;
 
   // Log-only vectoring-mode verdict. Placed here because this poll runs EVERY
   // frame in every airborne IFR phase: hanging it off the FAF-resolution block in
@@ -9946,6 +9948,77 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
 // (small |VS| or wrong direction), prompt "confirm descending/climbing <level>".
 // Once per assignment. Firing gates (45 s grace, 500 ft, 200 fpm) are
 // placeholders mirroring 2.4 -- tune in-sim. Runs every frame (real dt).
+// SPEED COMPLIANCE. There is a net for the assigned ALTITUDE and there was none
+// for the assigned SPEED, which went unnoticed while the generic "250 knots or
+// less" was still being transmitted -- it happened to catch the gross cases. On
+// 2026-08-19 that generic limit was suppressed whenever a TIGHTER speed was
+// already assigned, which is right for the transmission (a controller does not
+// follow "reduce to 210" with a looser 250) but removed the only thing watching:
+// the aircraft then flew FL090 above 250 kt with 210 assigned and nothing was
+// said (user, same day). Suppressing the message must not suppress the monitoring.
+//
+// Shape borrowed from poll_altitude_compliance: one query per assignment, after a
+// grace period, only when the aircraft is meaningfully fast. A controller asks --
+// "confirm speed 210 knots" -- he does not re-clear. [C. P. Potter]
+static int   s_spd_comp_target_kt = 0;
+static float s_spd_comp_arm_sec = 0.0f;
+static bool  s_spd_comp_sent = false;
+static float s_spd_comp_prev_kt = 0.0f;
+
+bool poll_speed_compliance(const xplane_context::XPlaneContext &ctx, float dt,
+                           std::string *out_text) {
+  // 60 s, not 45: at the real 1.2 kt/s a jet needs 58 s to shed 70 kt, so a
+  // shorter grace challenges an aircraft that is simply still slowing down.
+  constexpr float kGraceSecs = 60.0f;
+  constexpr float kToleranceKt = 15.0f;
+  const int target = s_atc_assigned_speed_kt;
+  if (target <= 0) {
+    s_spd_comp_target_kt = 0;
+    s_spd_comp_arm_sec = 0.0f;
+    s_spd_comp_sent = false;
+    return false;
+  }
+  if (target != s_spd_comp_target_kt) { // new assignment -> re-arm the grace
+    s_spd_comp_target_kt = target;
+    s_spd_comp_arm_sec = 0.0f;
+    s_spd_comp_sent = false;
+    s_spd_comp_prev_kt = 0.0f;
+    return false;
+  }
+  s_spd_comp_arm_sec += dt;
+  if (s_spd_comp_sent || atc_state_machine::is_readback_pending())
+    return false;
+  if (s_spd_comp_arm_sec < kGraceSecs)
+    return false;
+  float ias = ctx.indicated_airspeed_kts;
+  if (ias <= 0.0f)
+    ias = ctx.groundspeed_kts; // a source without IAS must not disable the net
+  if (ias <= static_cast<float>(target) + kToleranceKt)
+    return false;
+  // IS IT SLOWING? An aircraft on its way down to the assigned speed is complying,
+  // and challenging it is the same mistake the altitude net made: the test pilot
+  // decelerates at the real 1.2 kt/s and needs 58 s to go from 280 to 210, so a
+  // 45 s grace alone called correct behaviour a fault. Only an aircraft that is
+  // NOT converging gets the question.
+  const float rate = (s_spd_comp_prev_kt > 0.0f && dt > 0.0f)
+                         ? (ias - s_spd_comp_prev_kt) / std::max(dt, 0.001f)
+                         : 0.0f;
+  s_spd_comp_prev_kt = ias;
+  if (rate < -0.4f)
+    return false; // converging on the assigned speed
+  s_spd_comp_sent = true;
+  logging::info("[phraseo] speed challenge: assigned %d kt, flying %.0f kt after "
+                "%.0f s (not slowing)", target, static_cast<double>(ias),
+                static_cast<double>(s_spd_comp_arm_sec));
+  if (out_text) {
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "%s, confirm speed %d knots.",
+                  spoken_callsign(ctx).c_str(), target);
+    *out_text = buf;
+  }
+  return true;
+}
+
 // ICAO Doc 4444 4.6.1.2: "Speed control instructions shall remain in effect
 // unless explicitly cancelled or amended by the controller." They do NOT lapse
 // on their own -- an aircraft told "reduce speed to 160 knots" for sequencing is

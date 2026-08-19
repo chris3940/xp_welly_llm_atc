@@ -239,6 +239,12 @@ bool poll_star_clearance_safety_net(const xplane_context::XPlaneContext &ctx,
 std::string runway_to_cross(const xplane_context::XPlaneContext &ctx,
                             const std::string &dep_rwy);
 
+// Queries an aircraft flying faster than the speed it was assigned. The generic
+// "250 knots or less" is suppressed while a tighter speed is in force, so without
+// this nothing watches the assignment at all.
+bool poll_speed_compliance(const xplane_context::XPlaneContext &ctx, float dt,
+                           std::string *out_text);
+
 bool poll_speed_release(const xplane_context::XPlaneContext &ctx,
                         std::string *out_text);
 
