@@ -582,6 +582,22 @@ static std::string spoken_procedure_name(const std::string &name,
 
 // IFR approach STAR constraint tracking (IFR_APPROACH_CONTACT / IFR_APPROACH_DESCENT).
 static std::string s_assigned_star_name;             // set by build_descent_clearance
+// ── who authorises the vectoring ──────────────────────────────────────────
+// THREE SOURCES, ONE PLACE. They were scattered as bare
+// settings::force_app_vectoring() tests, which is why the CIFP could say
+// "expect vectors" and be ignored (user, 2026-08-19).
+//
+//   1. THE DATA        the cleared STAR ends in a VECTOR leg -- FM, VM, VI, VA,
+//                      VD, VR. The procedure itself hands the aircraft to radar,
+//                      so ATC must vector whatever the settings say. LSGG BELU3R
+//                      ends on an FM leg at GG512.
+//   2. ATC's JUDGEMENT allow_vectoring -- vector when it makes operational sense.
+//                      Still a placeholder; see docs/force-app-vectoring.md.
+//   3. TRAINING        force_app_vectoring -- EVERY arrival is vectored.
+static bool        s_star_vectors_known = false;
+static bool        s_star_vectors = false;
+static std::string s_star_vectors_fix;
+static int         s_star_vectors_course = 0; // magnetic course the leg carries
 static std::string s_assigned_star_entry_fix;        // full naming fix (ABDIL) for the spoken designator
 static std::string s_assigned_dest_icao;             // set by build_descent_clearance
 static std::string s_assigned_approach_designator;   // set by build_descent_clearance
@@ -867,6 +883,50 @@ static std::string current_flight_airport(
 // single place marked for it. [C. P. Potter]
 static int s_arrival_vectored = -1; // -1 undecided, 0 no, 1 yes
 
+// Does the CLEARED STAR itself prescribe vectors? Read once per arrival.
+static bool star_prescribes_vectors(const xplane_context::XPlaneContext &ctx) {
+  if (s_star_vectors_known)
+    return s_star_vectors;
+  if (ctx.cifp_dir.empty() || s_assigned_dest_icao.empty() ||
+      s_assigned_star_name.empty())
+    return false; // not known yet -- ask again next frame
+  // TWO PLACES TO LOOK, and most procedures use the second. The STAR may end on
+  // a vector leg (LSGG BELU3R, FM at GG512), or it may end on an ordinary TF at
+  // a fix which then names an APPROACH TRANSITION that begins with one (LFMN:
+  // MUS and NERAS carry FM legs on every 04 approach). Reading only the STAR
+  // answered "no vectors at Nice", which is wrong (user, 2026-08-19).
+  std::string last_fix;
+  s_star_vectors = cifp_reader::star_ends_in_vectors(
+      ctx.cifp_dir, s_assigned_dest_icao, s_assigned_star_name, &last_fix,
+      &s_star_vectors_course);
+  const char *where = "the arrival";
+  if (s_star_vectors) {
+    s_star_vectors_fix = last_fix;
+  } else if (!last_fix.empty() && !s_assigned_approach_designator.empty()) {
+    s_star_vectors = cifp_reader::approach_transition_prescribes_vectors(
+        ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator,
+        last_fix, &s_star_vectors_fix);
+    where = "the approach transition";
+  }
+  s_star_vectors_known = true;
+  logging::info("[vector] %s %s/%s: %s %s vectors%s%s",
+                s_assigned_dest_icao.c_str(), s_assigned_star_name.c_str(),
+                s_assigned_approach_designator.empty()
+                    ? "-" : s_assigned_approach_designator.c_str(),
+                where, s_star_vectors ? "PRESCRIBES" : "does not prescribe",
+                s_star_vectors_fix.empty() ? "" : " from ",
+                s_star_vectors_fix.c_str());
+  if (s_star_vectors && s_star_vectors_course > 0)
+    logging::info("[vector] the leg prescribes heading %03d from %s",
+                  s_star_vectors_course, s_star_vectors_fix.c_str());
+  return s_star_vectors;
+}
+
+// The single authority. See the three sources above.
+static bool vectoring_authorised(const xplane_context::XPlaneContext &ctx) {
+  return settings::force_app_vectoring() || star_prescribes_vectors(ctx);
+}
+
 static bool arrival_is_vectored(const xplane_context::XPlaneContext &ctx) {
   (void)ctx;
   if (s_arrival_vectored >= 0)
@@ -875,8 +935,8 @@ static bool arrival_is_vectored(const xplane_context::XPlaneContext &ctx) {
   // is not certain. Answer from the setting without committing, so a forced
   // arrival still behaves before the latch closes.
   if (s_assigned_approach_designator.empty())
-    return settings::force_app_vectoring();
-  if (settings::force_app_vectoring())
+    return vectoring_authorised(ctx);
+  if (vectoring_authorised(ctx))
     s_arrival_vectored = 1;
   else
     // FUTURE: allow_vectoring() -> the per-arrival draw belongs HERE and
@@ -1055,6 +1115,9 @@ void reset() {
   s_crossing_cleared_runway.clear();
   s_ground_last_announced_runway.clear();
   s_assigned_star_name.clear();
+  s_star_vectors_known = false;
+  s_star_vectors = false;
+  s_star_vectors_fix.clear();
   s_assigned_dest_icao.clear();
   s_assigned_approach_designator.clear();
   s_approach_waypoints.clear();
@@ -1265,6 +1328,9 @@ void training_jump_approach() {
                   "before jumping to APP.");
   s_assigned_dest_icao = ofp.destination_icao;
   s_assigned_star_name.clear();
+  s_star_vectors_known = false;
+  s_star_vectors = false;
+  s_star_vectors_fix.clear();
   s_assigned_approach_designator.clear();
   s_assigned_landing_runway.clear();
   s_approach_waypoints.clear();
@@ -1339,6 +1405,9 @@ void training_jump_arrival() {
   // STAR / approach derived later: the approach handoff (CIFP + dest) and the
   // check-in handler both handle the training-jump case (engine.cpp ~1190).
   s_assigned_star_name.clear();
+  s_star_vectors_known = false;
+  s_star_vectors = false;
+  s_star_vectors_fix.clear();
   s_assigned_approach_designator.clear();
   s_assigned_landing_runway.clear();
   // Reset approach + route trackers (mirror training_jump_approach).
@@ -10253,7 +10322,7 @@ static constexpr int kVectorTerrainMarginFt = 6000;
 static void log_vector_mode_decision(const xplane_context::XPlaneContext &ctx) {
   if (s_vector_mode_logged)
     return;
-  if (!settings::force_app_vectoring() && !settings::allow_vectoring())
+  if (!vectoring_authorised(ctx) && !settings::allow_vectoring())
     return;
   if (s_assigned_dest_icao.empty() || s_assigned_approach_designator.empty() ||
       ctx.cifp_dir.empty())
@@ -10901,8 +10970,8 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     *out_requires_readback = false;
   if (!out_text || s_vtf_leg == VecLeg::Done || s_vtf_leg == VecLeg::Refused)
     return false;
-  if (!settings::force_app_vectoring())
-    return false; // ATC-initiated vectoring (allow_vectoring) is a later step
+  if (!vectoring_authorised(ctx))
+    return false; // neither the procedure, nor ATC, nor training asks for it
   {
     static std::string s_top_diag;
     char g[160];
@@ -10978,6 +11047,76 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
           st_now == AS::IFR_APPROACH_CONTACT || st_now == AS::IFR_APPROACH_DESCENT;
       if (!in_arrival_descent)
         return false;
+    }
+    bool at_prescribed_fix = false;
+    // THE PROCEDURE SAYS VECTORS **FROM** A NAMED FIX -- so fly to it first.
+    // An FM leg means "track to this fix, then expect vectors": at LSGG that is
+    // GG512, and the aircraft owes the whole BELU3R -- PITOM, BIVLO, GG525,
+    // GG512 -- before anything is transmitted. Arming as soon as the geometry
+    // allowed cut the arrival short at GG502 and threw four published fixes away
+    // (user, 2026-08-19). Training mode is exempt: FORCE APP VECTORING exists to
+    // vector every arrival wherever it is. [C. P. Potter]
+    if (s_star_vectors && !s_star_vectors_fix.empty() &&
+        !settings::force_app_vectoring()) {
+      int fix_idx = -1;
+      for (size_t i = 0; i < s_route_fixes.size(); ++i)
+        if (s_route_fixes[i].ident == s_star_vectors_fix) {
+          fix_idx = static_cast<int>(i);
+          break;
+        }
+      // Release on PROXIMITY to the prescribed fix, not on the tracker index.
+      // The tracker advances on proximity and so lags by a fix: waiting for it to
+      // pass GG512 formally left the aircraft 6 NM from the FAF, with no room for
+      // anything. Being within a few miles of the fix is being at it.
+      bool at_fix = false;
+      if (fix_idx >= 0 && fix_idx < static_cast<int>(s_route_fixes.size())) {
+        const auto &pf = s_route_fixes[fix_idx];
+        if (pf.lat != 0.0 || pf.lon != 0.0)
+          at_fix = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
+                                                 pf.lat, pf.lon) <= 4.0;
+      }
+      at_prescribed_fix = at_fix || (fix_idx >= 0 && s_route_fix_idx >= fix_idx);
+      if (fix_idx >= 0 && s_route_fix_idx < fix_idx && !at_fix) {
+        static int s_await_logged = -1;
+        if (s_await_logged != s_route_fix_idx) {
+          s_await_logged = s_route_fix_idx;
+          logging::info("[vector] holding off: the procedure prescribes vectors "
+                        "from %s, still %d fixes upstream",
+                        s_star_vectors_fix.c_str(), fix_idx - s_route_fix_idx);
+        }
+        return false;
+      }
+    }
+    // AT THE PRESCRIBED FIX, FLY THE PRESCRIBED HEADING. The leg carries its own
+    // magnetic course -- 043 at GG512, the reciprocal of the 223 final -- so the
+    // first vector is the PROCEDURE's, not a geometric guess, and it is a
+    // SEQUENCING vector: the aircraft is taken outbound and the existing Downwind
+    // leg then extends it until the intercept has room. This also sidesteps the
+    // arming window entirely, which had no answer for an aircraft delivered 6 NM
+    // from its FAF (user, 2026-08-19). [C. P. Potter]
+    if (s_star_vectors && s_star_vectors_course > 0 && at_prescribed_fix &&
+        !settings::force_app_vectoring()) {
+      s_vtf_leg = VecLeg::Downwind;
+      s_vtf_hdg = static_cast<double>(s_star_vectors_course);
+      s_vtf_cleared_ft = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
+                                          ctx.altitude_ft_msl,
+                                          faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000);
+      s_vtf_clearance_pending = true;
+      s_vtf_nudge_secs = 0.0f;
+      s_vtf_nudged = false;
+      s_vtf_recut_secs = static_cast<float>(kVecLeadSecs);
+      logging::info("[vector] procedure vector from %s: heading %03d, alt %d "
+                    "(s=%.1f y=%.1f) -- sequencing outbound",
+                    s_star_vectors_fix.c_str(), s_star_vectors_course,
+                    s_vtf_cleared_ft, s, y);
+      *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) +
+                  vec_speed_phrase(ctx, kVecSpeedIntermediateKt) +
+                  ", vectoring for " + approach_clearance_phrase(ctx) + ".";
+      if (out_requires_readback)
+        *out_requires_readback = true;
+      if (st == AS::IFR_DESCENT)
+        atc_state_machine::set_state(AS::IFR_ARRIVAL);
+      return true;
     }
     if (!s_vtf_to_final) {
       s_vtf_leg = VecLeg::Refused; // mode 2 keeps the published procedure

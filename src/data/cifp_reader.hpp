@@ -228,6 +228,38 @@ struct StarWaypoint {
 // speed constraint (back-compat for the step-down walker). Pass false to get
 // the COMPLETE ordered STAR fix list -- every fix, unconstrained ones with
 // alt.feet==0/speed_kt==0 -- for the full arrival route table.
+// Does this STAR END IN A VECTORING TERMINATION? The CIFP marks legs that have
+// no fixed endpoint and hand the aircraft to radar: FM (course from fix to
+// manual termination), and the VM/VI/VA/VD/VR family (heading to manual, to an
+// intercept, to an altitude, to a DME distance, to a radial). A procedure that
+// ends on one of these is not "the STAR stopped" -- it is the chart saying
+// EXPECT VECTORS, and the plugin should take over there rather than infer it
+// from geometry. LSGG BELU3R ends on an FM leg at GG512. [C. P. Potter]
+// `out_course_deg` -- the MAGNETIC COURSE the vector leg carries. An FM leg is
+// "course from fix to manual termination", and that course is in the data: the
+// BELU3R's leg at GG512 gives 043 deg, the exact reciprocal of the 223 final.
+// The first vector is therefore PRESCRIBED, not computed, and reading it is what
+// makes the manoeuvre the procedure's rather than ours (user, 2026-08-19).
+// 0 when the field is empty.
+bool star_ends_in_vectors(const std::string &cifp_dir, const std::string &icao,
+                          const std::string &star,
+                          std::string *out_last_fix = nullptr,
+                          int *out_course_deg = nullptr);
+
+// Same question for the APPROACH TRANSITION. This is where most procedures put
+// it: LFMN carries 28 vector legs, all of them FM on the MUS and NERAS approach
+// transitions -- the STAR delivers the aircraft to MUS on an ordinary TF leg and
+// the APPROACH then says "from MUS, expect vectors". Looking only at the STAR
+// answered "no vectors at Nice", which is wrong (user, 2026-08-19).
+//
+// Missed-approach legs are excluded: they carry VM terminations too and have
+// nothing to do with sequencing an arrival.
+bool approach_transition_prescribes_vectors(const std::string &cifp_dir,
+                                            const std::string &icao,
+                                            const std::string &approach,
+                                            const std::string &transition,
+                                            std::string *out_fix = nullptr);
+
 std::vector<StarWaypoint> star_waypoints(const std::string &cifp_dir,
                                           const std::string &icao,
                                           const std::string &star_name,

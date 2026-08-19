@@ -487,8 +487,11 @@ replay-star: ifr-repl
 # inside the terrain gate: MSA 7000 over a field at 1411 gives 5589 ft, 411 ft
 # under the 6000 ft threshold. [C. P. Potter]
 replay-lsgg: ifr-repl
-	@echo "=== Replay: BELU3R -> LSGG 22, forced vectoring, ILS ==="
-	@ATC_FMS=1 XP_ATC_FORCE_ILS=1 XP_ATC_FORCE_VECTORING=1 XP_ATC_HOLD_PCT=0 \
+	@echo "=== Replay: BELU3R -> LSGG 22, CIFP-prescribed vectors, ILS ==="
+	@# NO FORCE_VECTORING: the BELU3R ends on a CIFP 'FM' leg, so the procedure
+	@# itself prescribes the vectors. This target now proves that the data alone
+	@# triggers them -- which is what a controller expects.
+	@ATC_FMS=1 XP_ATC_FORCE_ILS=1 XP_ATC_HOLD_PCT=0 \
 	    ATC_RAW=build/replay-lsgg-raw.log \
 	    python3 testscripts/ifr_real/fly.py testscripts/ifr_real/route_belus_lsgg.json
 	@echo

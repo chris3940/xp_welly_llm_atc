@@ -1425,6 +1425,7 @@ std::string first_star_for_runway(const std::string &cifp_dir,
     return {};
   }
 
+
   std::string rwy_match = dest_runway.empty() ? "" : "RW" + dest_runway;
 
   // Collect all STARs (no entry-fix filter), just runway filter.
@@ -1515,6 +1516,77 @@ std::string runway_for_star(const std::string &cifp_dir,
 
 static std::unordered_map<std::string, std::vector<StarWaypoint>>
     g_star_waypoints_cache;
+
+// ── approach_transition_prescribes_vectors ────────────────────────────────
+bool approach_transition_prescribes_vectors(const std::string &cifp_dir,
+                                            const std::string &icao,
+                                            const std::string &approach,
+                                            const std::string &transition,
+                                            std::string *out_fix) {
+  if (cifp_dir.empty() || icao.empty() || approach.empty() || transition.empty())
+    return false;
+  std::ifstream in(cifp_dir + "/" + icao + ".dat");
+  if (!in)
+    return false;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.size() < 6 || line.compare(0, 6, "APPCH:") != 0) continue;
+    auto f = split_csv(line);
+    if (f.size() < 12) continue;
+    if (trim(f[2]) != approach) continue;
+    // Route type "A" is a NAMED transition. The final segment and the missed
+    // approach are not transitions and must not answer this question.
+    if (trim(f[1]) != "A") continue;
+    if (trim(f[3]) != transition) continue;
+    const std::string pt = trim(f[11]);
+    if (pt == "FM" || pt == "VM" || pt == "VI" || pt == "VA" || pt == "VD" ||
+        pt == "VR") {
+      if (out_fix)
+        *out_fix = trim(f[4]);
+      return true;
+    }
+  }
+  return false;
+}
+
+// ── star_ends_in_vectors ──────────────────────────────────────────────────
+bool star_ends_in_vectors(const std::string &cifp_dir, const std::string &icao,
+                          const std::string &star, std::string *out_last_fix,
+                          int *out_course_deg) {
+  if (cifp_dir.empty() || icao.empty() || star.empty())
+    return false;
+  std::ifstream in(cifp_dir + "/" + icao + ".dat");
+  if (!in)
+    return false;
+  std::string line, last_pt, last_fix, last_course;
+  int last_seq = -1;
+  while (std::getline(in, line)) {
+    if (line.size() < 5 || line.compare(0, 5, "STAR:") != 0)
+      continue;
+    auto f = split_csv(line);
+    if (f.size() < 12) continue;
+    if (trim(f[2]) != star) continue;
+    const std::string seq_str = trim(f[0]);
+    if (seq_str.size() <= 5) continue;
+    const int seq = std::atoi(seq_str.c_str() + 5);
+    if (seq < last_seq) continue; // keep the highest sequence seen
+    last_seq = seq;
+    last_pt = trim(f[11]);
+    last_fix = trim(f[4]);
+    // Field 21 (0-based 20) is the magnetic course, in tenths of a degree.
+    last_course = f.size() > 20 ? trim(f[20]) : std::string();
+  }
+  // The last fix is reported WHATEVER the termination: when the STAR ends on an
+  // ordinary TF, that fix names the APPROACH TRANSITION which may itself
+  // prescribe the vectors (LFMN: MUS, NERAS).
+  if (out_last_fix)
+    *out_last_fix = last_fix;
+  if (out_course_deg)
+    *out_course_deg =
+        last_course.empty() ? 0 : (std::atoi(last_course.c_str()) + 5) / 10;
+  return last_pt == "FM" || last_pt == "VM" || last_pt == "VI" ||
+         last_pt == "VA" || last_pt == "VD" || last_pt == "VR";
+}
 
 std::vector<StarWaypoint> star_waypoints(const std::string &cifp_dir,
                                           const std::string &icao,

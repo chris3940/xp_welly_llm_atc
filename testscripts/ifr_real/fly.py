@@ -726,9 +726,15 @@ def main():
     # and the landing clearance are due; without it the harness stopped one
     # transmission short of the only part that has never worked.
     if pilot.established and dest:
-        pilot.events.append((prev, int(alt), ">> pilot: reports established"))
-        repl.send("say %s established runway %s" % (pilot.callsign, pilot.runway))
-        pilot.react(repl.sync(), prev, int(alt))
+        # ESTABLISHED IS REPORTED TO WHOEVER ASKED FOR IT, and nobody has yet.
+        # "report established" was removed from the approach clearance -- it is
+        # the Tower handoff that asks for it a few miles later -- so announcing
+        # it here transmits to a controller who is not expecting it, and the
+        # engine answers "your transmission was garbled, say again". The pilot
+        # knows he is established (the geometric test above); he simply keeps it
+        # to himself until Tower asks (user, 2026-08-19). [C. P. Potter]
+        pilot.events.append((prev, int(alt),
+                             ">> pilot: established (no report -- none requested)"))
         # The axis is the published final approach track through the FAF, which
         # the engine logged. The last vector was an INTERCEPT heading, so flying
         # it onward would take the aircraft across the localiser and off it.
