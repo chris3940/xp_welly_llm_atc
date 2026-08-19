@@ -22,70 +22,256 @@
       }
     }
   },
-
   "LFMN": {
     "runway_config": [
-      { "arrival": "04L", "departure": "04R", "max_tailwind_kt": 7 },
-      { "arrival": "22R", "departure": "22L" }
+      {
+        "arrival": "04L",
+        "departure": "04R",
+        "max_tailwind_kt": 7
+      },
+      {
+        "arrival": "22R",
+        "departure": "22L"
+      }
     ],
     "approaches": [
-      { "runway": "04L", "designator": "R04LA", "min_vis_m": 10000, "min_ceiling_ft": 2500 },
-      { "runway": "04L", "designator": "I04LZ", "_comment": "ILS 04L Zulu as the below-minima fallback, replacing RNP R04LZ (2026-08-10). This list is a FILTER, not a preference: preferred_approach returns the FIRST rule matching the runway, and an ungated rule always matches, so cifp_reader::best_approach is unreachable for 04L and any designator absent here can never be selected. With R04LZ ungated the ILS was therefore never offered at LFMN -- confirmed over the archived flight logs, which contain RNAV Alpha and Zulu and no ILS at all. I04LZ (not I04LY) because it shares the MUS->LEMPU transition family with R04LZ, so the STAR feeds it unchanged; I04LY routes via D222X/CF0LY. R04LZ is now unreachable in turn: that is the cost of first-match-wins and is TEMPORARY -- the intended end state is one entry carrying EQUIVALENT designators picked at random (CAT I minima are typically identical, so there is no objective tiebreak), which needs a schema + code change." }
+      {
+        "runway": "04L",
+        "designator": "R04LA",
+        "min_vis_m": 10000,
+        "min_ceiling_ft": 2500
+      },
+      {
+        "runway": "04L",
+        "designator": "I04LZ",
+        "_comment": "ILS 04L Zulu as the below-minima fallback, replacing RNP R04LZ (2026-08-10). This list is a FILTER, not a preference: preferred_approach returns the FIRST rule matching the runway, and an ungated rule always matches, so cifp_reader::best_approach is unreachable for 04L and any designator absent here can never be selected. With R04LZ ungated the ILS was therefore never offered at LFMN -- confirmed over the archived flight logs, which contain RNAV Alpha and Zulu and no ILS at all. I04LZ (not I04LY) because it shares the MUS->LEMPU transition family with R04LZ, so the STAR feeds it unchanged; I04LY routes via D222X/CF0LY. R04LZ is now unreachable in turn: that is the cost of first-match-wins and is TEMPORARY -- the intended end state is one entry carrying EQUIVALENT designators picked at random (CAT I minima are typically identical, so there is no objective tiebreak), which needs a schema + code change."
+      }
     ],
     "sid_initial_climb": [
-      { "match_sids": ["BASI8X"], "jet_alt_ft": 10000, "prop_alt_ft": 7000, "_comment": "BASIP 8X RNAV DEP (rwys 22L/R). Published initial climb clearance: JETS FL100 / PROP FL070. NOT in CIFP LFMN.dat (BASI8X fixes carry no FL100/FL070 constraint -- verified). Trans alt 5000." },
-      { "match_sids": ["PERU8A"], "alt_ft": 13000, "_comment": "PERUS 8A RNAV DEP (rwys 04L/R). Published initial climb clearance: FL130 (single value, no jet/prop split; RFL above FL135). NOT in CIFP. ORKAC has MAX 210 KT / FL070 but that is a fix constraint, separate. Trans alt 5000." },
-      { "match_sids": ["EPOL8A"], "alt_ft": 10000, "_comment": "EPOLO 8A RNAV DEP (rwys 04L/R), JET acft. Published initial climb clearance FL100 (RFL above FL125; 042 track to 420 then right direct MN044). Distinct SID from EPOLO 8B (props). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["EPOL8B"], "alt_ft": 7000, "_comment": "EPOLO 8B RNAV DEP (rwys 04L/R), PROP acft. Published initial climb clearance FL070 (042 track to 420 then right direct MN044 via MN147/MN422). Distinct SID from EPOLO 8A (jets). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["BADO8A"], "alt_ft": 13000, "_comment": "BODRU 8A RNAV DEP (rwys 04L/R). CIFP name BADO8A (BODRU = fix BODRU). Published initial climb clearance FL130 (single value, RFL above FL195). NOT in CIFP. Trans alt 5000. BODR8C variant = 'BY ATC' -> no entry." },
-      { "match_sids": ["BODR8A"], "alt_ft": 13000, "_comment": "BODRU 8A RNAV DEP (rwys 04L/R). CIFP designator BODR8A. Published initial climb clearance FL130 (single value, RFL above FL195; 042 track to 420 then right direct MN047->MN064->ORKAC->BODRU). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["BASI8A"], "jet_alt_ft": 10000, "prop_alt_ft": 7000, "_comment": "BASIP 8A RNAV DEP (rwys 04L/R). CIFP name BASI8A. Published initial climb clearance JETS FL100 / PROP FL070. NOT in CIFP. Trans alt 5000. (BASI8X = the 22L/R variant, above.)" },
-      { "match_sids": ["LANK8A"], "alt_ft": 10000, "_comment": "LANKO 8A RNAV DEP (rwys 04L/R), JET acft. CIFP name LANK8A. Published initial climb clearance FL100. Distinct from LANK8B (props). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["LANK8B"], "alt_ft": 7000, "_comment": "LANKO 8B RNAV DEP (rwys 04L/R), PROP acft. CIFP name LANK8B. Published initial climb clearance FL070. Distinct from LANK8A (jets). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["TURI8A"], "alt_ft": 10000, "_comment": "TURIL 8A RNAV DEP (rwys 04L/R), JET acft. CIFP name TURI8A. Published initial climb clearance FL100. Distinct from TURI8B (props). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["TURI8B"], "alt_ft": 7000, "_comment": "TURIL 8B RNAV DEP (rwys 04L/R), PROP acft. CIFP name TURI8B. Published initial climb clearance FL070. Distinct from TURI8A (jets). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["IRMA8A"], "alt_ft": 13000, "_comment": "IRMAR 8A RNAV DEP (rwys 04L/R). CIFP name IRMA8A. Published initial climb clearance FL130 (042 track to 420, right direct MN047->MN064->ORKAC->BARSO->IRMAR). NOT in CIFP. Trans alt 5000. IRMA8C variant = 'BY ATC' -> no entry." },
-      { "match_sids": ["VARE8A"], "alt_ft": 10000, "_comment": "VAREK 8A RNAV DEP (rwys 04L/R), JET acft. CIFP name VARE8A. Published initial climb clearance FL100 (042 track to 420, right direct MN044 via MN046/OMARD to VAREK). Distinct from VARE8B (props). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["VARE8B"], "alt_ft": 7000, "_comment": "VAREK 8B RNAV DEP (rwys 04L/R), PROP acft. CIFP name VARE8B. Published initial climb clearance FL070 (042 track to 420, right direct MN044 via MN147/MN422 to VAREK). Distinct from VARE8A (jets). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["RUBA8A"], "alt_ft": 10000, "_comment": "RUBAS 8A RNAV DEP (rwys 04L/R), JET acft. CIFP name RUBA8A. Published initial climb clearance FL100 (single value; RFL above FL195). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["SODR8A"], "alt_ft": 10000, "_comment": "SODRI 8A RNAV DEP (rwys 04L/R), JET acft. CIFP name SODR8A. Published initial climb clearance FL100 (042 track to 420, right direct MN044 via MN046/OMARD to SODRI via MERLU). Distinct from SODR8B (props). NOT in CIFP. Trans alt 5000." },
-      { "match_sids": ["SODR8B"], "alt_ft": 7000, "_comment": "SODRI 8B RNAV DEP (rwys 04L/R), PROP acft. CIFP name SODR8B. Published initial climb clearance FL070 (042 track to 420, right direct MN044 via MN147/MN422 to SODRI via MERLU). Distinct from SODR8A (jets). NOT in CIFP. Trans alt 5000." }
+      {
+        "match_sids": [
+          "BASI8X"
+        ],
+        "jet_alt_ft": 10000,
+        "prop_alt_ft": 7000,
+        "_comment": "BASIP 8X RNAV DEP (rwys 22L/R). Published initial climb clearance: JETS FL100 / PROP FL070. NOT in CIFP LFMN.dat (BASI8X fixes carry no FL100/FL070 constraint -- verified). Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "PERU8A"
+        ],
+        "alt_ft": 13000,
+        "_comment": "PERUS 8A RNAV DEP (rwys 04L/R). Published initial climb clearance: FL130 (single value, no jet/prop split; RFL above FL135). NOT in CIFP. ORKAC has MAX 210 KT / FL070 but that is a fix constraint, separate. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "EPOL8A"
+        ],
+        "alt_ft": 10000,
+        "_comment": "EPOLO 8A RNAV DEP (rwys 04L/R), JET acft. Published initial climb clearance FL100 (RFL above FL125; 042 track to 420 then right direct MN044). Distinct SID from EPOLO 8B (props). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "EPOL8B"
+        ],
+        "alt_ft": 7000,
+        "_comment": "EPOLO 8B RNAV DEP (rwys 04L/R), PROP acft. Published initial climb clearance FL070 (042 track to 420 then right direct MN044 via MN147/MN422). Distinct SID from EPOLO 8A (jets). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "BADO8A"
+        ],
+        "alt_ft": 13000,
+        "_comment": "BODRU 8A RNAV DEP (rwys 04L/R). CIFP name BADO8A (BODRU = fix BODRU). Published initial climb clearance FL130 (single value, RFL above FL195). NOT in CIFP. Trans alt 5000. BODR8C variant = 'BY ATC' -> no entry."
+      },
+      {
+        "match_sids": [
+          "BODR8A"
+        ],
+        "alt_ft": 13000,
+        "_comment": "BODRU 8A RNAV DEP (rwys 04L/R). CIFP designator BODR8A. Published initial climb clearance FL130 (single value, RFL above FL195; 042 track to 420 then right direct MN047->MN064->ORKAC->BODRU). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "BASI8A"
+        ],
+        "jet_alt_ft": 10000,
+        "prop_alt_ft": 7000,
+        "_comment": "BASIP 8A RNAV DEP (rwys 04L/R). CIFP name BASI8A. Published initial climb clearance JETS FL100 / PROP FL070. NOT in CIFP. Trans alt 5000. (BASI8X = the 22L/R variant, above.)"
+      },
+      {
+        "match_sids": [
+          "LANK8A"
+        ],
+        "alt_ft": 10000,
+        "_comment": "LANKO 8A RNAV DEP (rwys 04L/R), JET acft. CIFP name LANK8A. Published initial climb clearance FL100. Distinct from LANK8B (props). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "LANK8B"
+        ],
+        "alt_ft": 7000,
+        "_comment": "LANKO 8B RNAV DEP (rwys 04L/R), PROP acft. CIFP name LANK8B. Published initial climb clearance FL070. Distinct from LANK8A (jets). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "TURI8A"
+        ],
+        "alt_ft": 10000,
+        "_comment": "TURIL 8A RNAV DEP (rwys 04L/R), JET acft. CIFP name TURI8A. Published initial climb clearance FL100. Distinct from TURI8B (props). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "TURI8B"
+        ],
+        "alt_ft": 7000,
+        "_comment": "TURIL 8B RNAV DEP (rwys 04L/R), PROP acft. CIFP name TURI8B. Published initial climb clearance FL070. Distinct from TURI8A (jets). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "IRMA8A"
+        ],
+        "alt_ft": 13000,
+        "_comment": "IRMAR 8A RNAV DEP (rwys 04L/R). CIFP name IRMA8A. Published initial climb clearance FL130 (042 track to 420, right direct MN047->MN064->ORKAC->BARSO->IRMAR). NOT in CIFP. Trans alt 5000. IRMA8C variant = 'BY ATC' -> no entry."
+      },
+      {
+        "match_sids": [
+          "VARE8A"
+        ],
+        "alt_ft": 10000,
+        "_comment": "VAREK 8A RNAV DEP (rwys 04L/R), JET acft. CIFP name VARE8A. Published initial climb clearance FL100 (042 track to 420, right direct MN044 via MN046/OMARD to VAREK). Distinct from VARE8B (props). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "VARE8B"
+        ],
+        "alt_ft": 7000,
+        "_comment": "VAREK 8B RNAV DEP (rwys 04L/R), PROP acft. CIFP name VARE8B. Published initial climb clearance FL070 (042 track to 420, right direct MN044 via MN147/MN422 to VAREK). Distinct from VARE8A (jets). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "RUBA8A"
+        ],
+        "alt_ft": 10000,
+        "_comment": "RUBAS 8A RNAV DEP (rwys 04L/R), JET acft. CIFP name RUBA8A. Published initial climb clearance FL100 (single value; RFL above FL195). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "SODR8A"
+        ],
+        "alt_ft": 10000,
+        "_comment": "SODRI 8A RNAV DEP (rwys 04L/R), JET acft. CIFP name SODR8A. Published initial climb clearance FL100 (042 track to 420, right direct MN044 via MN046/OMARD to SODRI via MERLU). Distinct from SODR8B (props). NOT in CIFP. Trans alt 5000."
+      },
+      {
+        "match_sids": [
+          "SODR8B"
+        ],
+        "alt_ft": 7000,
+        "_comment": "SODRI 8B RNAV DEP (rwys 04L/R), PROP acft. CIFP name SODR8B. Published initial climb clearance FL070 (042 track to 420, right direct MN044 via MN147/MN422 to SODRI via MERLU). Distinct from SODR8A (jets). NOT in CIFP. Trans alt 5000."
+      }
     ]
   },
-
+  "LFML": {
+    "_comment": "Marseille Provence. The two runways are PREFERENTIAL BY USE, not by wind, and they are interdependent -- no simultaneous operations. Departures use 13L/31R (2370 m), landings use 13R/31L (3500 m). Letting wind pick the runway therefore gets it wrong half the time, and it matters on the ground: the west-side parking is on the far side of 31L, so the taxi to 31R crosses an active runway -- the crossing that went unannounced on 2026-08-19. Source: AIP France / IVAO LFML.",
+    "runway_config": [
+      {
+        "arrival": "31L",
+        "departure": "31R",
+        "max_tailwind_kt": 7
+      },
+      {
+        "arrival": "13R",
+        "departure": "13L"
+      }
+    ]
+  },
   "LFLU": {
     "controllers": [
-      { "role": "info", "name": "Valence Information", "freq_mhz": 120.105, "_comment": "LFLU Valence-Chabeuil is an AFIS field: Jeppesen 10-9 + AIP = VALENCE Information 120.105 (AFIS during ATS hrs / A/A 120.105 outside). NOT a controlled Tower -- the 'Control Tower' on the chart is the building only. AFIS gives INFORMATION ONLY (runway in use, QNH, known traffic); it issues NO clearances (no line-up/takeoff/cross). The user's apt.dat mislabels 120.100 as TOWER, so the raw 'no Ground AND no Approach = AFIS' test is defeated on departure (clearance_controller has(TOWER) -> 'Tower'). This 'info' role marks LFLU AFIS. All runways are PARALLEL (186/006: main 19/01 + grass 19L/19R + glider strip) -- no intersecting runways, so a 'cross runway' offer is always a false positive here." },
-      { "role": "delivery", "name": "Lyon Control", "freq_mhz": 125.155, "_comment": "IFR clearance at an AFIS field is delivered by the overlying ACC/Approach, NOT the AFIS -- for LFLU that is LYON Approche/Controle. Taken ON THE GROUND (EU: radio if reachable, else phone; airborne clearances are rare). The plugin already resolves Lyon Approach (IFR-tab panel: Lyon 125.155/131.315/136.075); this pins the clearance-delivery controller to Lyon 125.155 (user pick 2026-08-02). After departure the pilot contacts Lyon on this freq." }
+      {
+        "role": "info",
+        "name": "Valence Information",
+        "freq_mhz": 120.105,
+        "_comment": "LFLU Valence-Chabeuil is an AFIS field: Jeppesen 10-9 + AIP = VALENCE Information 120.105 (AFIS during ATS hrs / A/A 120.105 outside). NOT a controlled Tower -- the 'Control Tower' on the chart is the building only. AFIS gives INFORMATION ONLY (runway in use, QNH, known traffic); it issues NO clearances (no line-up/takeoff/cross). The user's apt.dat mislabels 120.100 as TOWER, so the raw 'no Ground AND no Approach = AFIS' test is defeated on departure (clearance_controller has(TOWER) -> 'Tower'). This 'info' role marks LFLU AFIS. All runways are PARALLEL (186/006: main 19/01 + grass 19L/19R + glider strip) -- no intersecting runways, so a 'cross runway' offer is always a false positive here."
+      },
+      {
+        "role": "delivery",
+        "name": "Lyon Control",
+        "freq_mhz": 125.155,
+        "_comment": "IFR clearance at an AFIS field is delivered by the overlying ACC/Approach, NOT the AFIS -- for LFLU that is LYON Approche/Controle. Taken ON THE GROUND (EU: radio if reachable, else phone; airborne clearances are rare). The plugin already resolves Lyon Approach (IFR-tab panel: Lyon 125.155/131.315/136.075); this pins the clearance-delivery controller to Lyon 125.155 (user pick 2026-08-02). After departure the pilot contacts Lyon on this freq."
+      }
     ]
   },
-
   "LFLP": {
     "runway_config": [
-      { "arrival": "04", "departure": "22", "max_tailwind_kt": 7 },
-      { "arrival": "22", "departure": "04" }
+      {
+        "arrival": "04",
+        "departure": "22",
+        "max_tailwind_kt": 7
+      },
+      {
+        "arrival": "22",
+        "departure": "04"
+      }
     ],
     "approaches": [
-      { "runway": "04", "designator": "R04-Z" }
+      {
+        "runway": "04",
+        "designator": "R04-Z"
+      }
     ],
     "controllers": [
-      { "role": "approach", "name": "Chambery Approach", "freq_mhz": 121.205, "alt_freqs_mhz": [123.700] }
+      {
+        "role": "approach",
+        "name": "Chambery Approach",
+        "freq_mhz": 121.205,
+        "alt_freqs_mhz": [
+          123.7
+        ]
+      }
     ],
     "departure_holds": [
-      { "match_fixes": ["ROMAM", "PIRUV", "BULOL", "BUSIL", "LSE", "LTP"], "hold_alt_ft": 11000, "release_nm": 30, "_comment": "Annecy WESTBOUND departures ONLY (ROMAM 219deg, LTP 226deg, LSE 255deg, PIRUV 258deg, BULOL 279deg, BUSIL 291deg): hold FL110 for 30 NM. Verified airspace.txt along the ROMA2A (BELUS->GIRED) track: the Geneva TMA S10 sliver ends ~27.5 NM GC out, so 30 NM lands the handoff ~2.5 NM inside LYON CTA -> hands to Lyon 120.230, not the Geneva sliver. FL140 second step stays generic. Scoped 2026-08-09: it used to be a catch-all and also applied to the EASTBOUND SIDs (ESAP2A/ODIK2A/VENA2A), where FL110 is a TERRAIN trap -- the Alps rise east of Annecy and those SIDs publish +FL130 then +FL150. PAS2A (PAS 343deg, Passeiry) is NORTHBOUND and deliberately left unmatched -- it needs its own review." }
+      {
+        "match_fixes": [
+          "ROMAM",
+          "PIRUV",
+          "BULOL",
+          "BUSIL",
+          "LSE",
+          "LTP"
+        ],
+        "hold_alt_ft": 11000,
+        "release_nm": 30,
+        "_comment": "Annecy WESTBOUND departures ONLY (ROMAM 219deg, LTP 226deg, LSE 255deg, PIRUV 258deg, BULOL 279deg, BUSIL 291deg): hold FL110 for 30 NM. Verified airspace.txt along the ROMA2A (BELUS->GIRED) track: the Geneva TMA S10 sliver ends ~27.5 NM GC out, so 30 NM lands the handoff ~2.5 NM inside LYON CTA -> hands to Lyon 120.230, not the Geneva sliver. FL140 second step stays generic. Scoped 2026-08-09: it used to be a catch-all and also applied to the EASTBOUND SIDs (ESAP2A/ODIK2A/VENA2A), where FL110 is a TERRAIN trap -- the Alps rise east of Annecy and those SIDs publish +FL130 then +FL150. PAS2A (PAS 343deg, Passeiry) is NORTHBOUND and deliberately left unmatched -- it needs its own review."
+      }
     ]
   },
-
   "LIMF": {
     "controllers": [
-      { "role": "approach", "name": "Milan Radar", "freq_mhz": 129.275, "_comment": "Torino Caselle departures worked by Milan Radar (ACC). The controlling volume above TORINO CTR (ceiling 3500) is MILAN CTA ZONE 24 in airspace.txt. Freq 129.275 per Navigraph (Torino ACC = MILAN RADAR 125.275 / 129.275). The sim atc.dat has Milan but with STALE freqs (MILAN ctr 118.675, MILAN RADAR tracon 126.750) that do not match Navigraph -- Navigraph updates nav+airspace, not atc.dat -- so this override injects the correct freq. Alt sector freq 125.275: switch here if 129.275 is the wrong Torino dep sector. Verified Navigraph 2026-07-27." }
+      {
+        "role": "approach",
+        "name": "Milan Radar",
+        "freq_mhz": 129.275,
+        "_comment": "Torino Caselle departures worked by Milan Radar (ACC). The controlling volume above TORINO CTR (ceiling 3500) is MILAN CTA ZONE 24 in airspace.txt. Freq 129.275 per Navigraph (Torino ACC = MILAN RADAR 125.275 / 129.275). The sim atc.dat has Milan but with STALE freqs (MILAN ctr 118.675, MILAN RADAR tracon 126.750) that do not match Navigraph -- Navigraph updates nav+airspace, not atc.dat -- so this override injects the correct freq. Alt sector freq 125.275: switch here if 129.275 is the wrong Torino dep sector. Verified Navigraph 2026-07-27."
+      }
     ]
   },
-
   "LOWI": {
     "controllers": [
-      { "role": "approach", "name": "Innsbruck Radar", "freq_mhz": 128.975, "alt_freqs_mhz": [119.275], "_comment": "Innsbruck approach is worked within the INNSBRUCK TMA 1 (openair D 7000-FL195), but atc.dat has NO tracon for LOWI -- only INNSBRUCK twr 120.10 (polygon 0-7000 = the CTR), so resolve_sector_controller falls back to the Tower freq for the approach handoff. The real Innsbruck Radar/Approach = 128.975 (Navigraph) and 119.275 (apt.dat APP / OurAirports); VACC Austria also lists Arrival 130.475. This override injects 128.975 for the TMA-triggered approach handoff (the VOLUME stays the openair Innsbruck TMA); the Tower handoff at the FAF keeps 120.10. Switch to 119.275 if 128.975 is the wrong arrival radar sector. Verified web 2026-07-30." },
-      { "role": "tower", "name": "Innsbruck Tower", "freq_mhz": 120.100, "_comment": "LOWI is a CONTROLLED field: 120.100 is INNSBRUCK TOWER (atc.dat 'INNSBRUCK twr 120.10', CTR polygon 0-7000). The user's apt.dat carries no separate Ground and no Approach freq for LOWI, so the raw 'no Ground AND no Approach = AFIS' test mislabelled the FAF handoff 'Innsbruck Kranebitten Information' and (via dest_is_afis) kept issuing per-fix step-downs after cleared-approach (bogus 'descend flight level 135' on speed-only fix WI751, real vol 2026-08-02). This override marks LOWI controlled: FAF handoff -> 'Innsbruck Tower 120.100, report established', and the post-clearance profile goes silent. user 2026-08-02: 'Innsbruck Kranebitten Information => c'est la Tour, il faut surcharger dans airport+.json'." }
+      {
+        "role": "approach",
+        "name": "Innsbruck Radar",
+        "freq_mhz": 128.975,
+        "alt_freqs_mhz": [
+          119.275
+        ],
+        "_comment": "Innsbruck approach is worked within the INNSBRUCK TMA 1 (openair D 7000-FL195), but atc.dat has NO tracon for LOWI -- only INNSBRUCK twr 120.10 (polygon 0-7000 = the CTR), so resolve_sector_controller falls back to the Tower freq for the approach handoff. The real Innsbruck Radar/Approach = 128.975 (Navigraph) and 119.275 (apt.dat APP / OurAirports); VACC Austria also lists Arrival 130.475. This override injects 128.975 for the TMA-triggered approach handoff (the VOLUME stays the openair Innsbruck TMA); the Tower handoff at the FAF keeps 120.10. Switch to 119.275 if 128.975 is the wrong arrival radar sector. Verified web 2026-07-30."
+      },
+      {
+        "role": "tower",
+        "name": "Innsbruck Tower",
+        "freq_mhz": 120.1,
+        "_comment": "LOWI is a CONTROLLED field: 120.100 is INNSBRUCK TOWER (atc.dat 'INNSBRUCK twr 120.10', CTR polygon 0-7000). The user's apt.dat carries no separate Ground and no Approach freq for LOWI, so the raw 'no Ground AND no Approach = AFIS' test mislabelled the FAF handoff 'Innsbruck Kranebitten Information' and (via dest_is_afis) kept issuing per-fix step-downs after cleared-approach (bogus 'descend flight level 135' on speed-only fix WI751, real vol 2026-08-02). This override marks LOWI controlled: FAF handoff -> 'Innsbruck Tower 120.100, report established', and the post-clearance profile goes silent. user 2026-08-02: 'Innsbruck Kranebitten Information => c'est la Tour, il faut surcharger dans airport+.json'."
+      }
     ],
     "tower_handoff_fixes": {
       "R08-Z": "WI754",
@@ -93,7 +279,6 @@
       "_comment": "Approach->Tower handoff trigger fix, REPLACING the FAF, for the curved RNP finals. The FAF sits far out (R08-Z FAF WI749 ~28 NM from RW08; the RNP snakes down the Inn valley), so the FAF-based handoff fires far too early and the pilot is not yet 'established' -- VACC Austria LOWI: 'once established on final you are transferred to Innsbruck Tower 120.10'. Handoff fix = the last-turn fix where the track rolls onto the straight-in: R08-Z -> WI754 (WI754->RW08 leg ~081 deg = runway 08, ~3 NM final); R26-Z -> WI103 (WI103->RW26 leg ~261 deg = runway 26, ~4.5 NM final). Adjust per the published chart if the established point differs. (_comment key is ignored by the reader.)"
     }
   },
-
   "LSGS": {
     "tower_handoff_fixes": {
       "R25": "GS604",
