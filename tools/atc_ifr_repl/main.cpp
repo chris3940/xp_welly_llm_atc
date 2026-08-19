@@ -21,6 +21,7 @@
  * IFR approach sequence can be simulated without X-Plane running.
  */
 
+#include <map>
 #include "ifr_repl.hpp"
 
 #include "atc/atc_state_machine.hpp"
@@ -53,7 +54,41 @@ bool has_ground_freq_for(const std::string &icao) { return !icao.empty(); }
 // Real dest position so on_destination_terminal() actually runs (the weak stub
 // returns 0,0 which the function treats as "unknown -> permissive", masking the
 // in-sim behaviour). LFLP = Annecy.
+// Positions injected by the scenario (`airport_pos <ICAO> <lat> <lon>`), tried
+// FIRST. A hard-coded table cannot keep up with the airports the replays use, and
+// a MISSING one is not harmless: lookup_fix_positions() disambiguates cross-world
+// homonyms by proximity to the destination, so with no position it falls back to
+// "first match wins" -- and on the LSGG BELU3R arrival the CBY of the STAR
+// resolved to the SYDNEY racecourse fix, 10 000 NM away. The route then contained
+// a point in Australia, the aircraft flew towards it, and ATC rightly reported a
+// deviation. [C. P. Potter]
+static std::map<std::string, std::pair<double, double>> g_airport_pos;
+// Tower frequencies, injected by the scenario. The real ones come from apt.dat,
+// parsed plugin-side, so headless tower_mhz_for() is a weak stub returning 0 --
+// and every replay ended on "contact Tower" with NO frequency, which the driver
+// cannot comply with. The landing clearance was therefore unreachable on the
+// bench while it worked perfectly in the real flight of 2026-08-18. [C. P. Potter]
+static std::map<std::string, float> g_tower_mhz;
+
+void set_tower_mhz(const std::string &icao, float mhz) {
+  g_tower_mhz[icao] = mhz;
+}
+
+float tower_mhz_for(const std::string &icao) {
+  auto it = g_tower_mhz.find(icao);
+  return it == g_tower_mhz.end() ? 0.0f : it->second;
+}
+
+void set_airport_pos(const std::string &icao, double lat, double lon) {
+  g_airport_pos[icao] = {lat, lon};
+}
+
 std::pair<double, double> airport_pos_for(const std::string &icao) {
+  auto it = g_airport_pos.find(icao);
+  if (it != g_airport_pos.end())
+    return it->second;
+  if (icao == "LSGG")
+    return {46.238, 6.109}; // Geneva
   if (icao == "LFLP")
     return {45.929, 6.099};
   if (icao == "LOWI")

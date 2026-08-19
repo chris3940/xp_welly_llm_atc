@@ -399,3 +399,25 @@ symptom: one rule, many call sites, each free to forget it.
 **Why it was not done now.** Touching eight clearance-building sites at once, on
 the day of a test flight, is exactly the change that needs its own replay and its
 own flight. Noted for a future build (user, 2026-08-18).
+
+---
+
+## Q6 - No record of the last level actually SPOKEN - **OPEN, noted 2026-08-18**
+
+The vector restates the level the previous controller has just assigned whenever
+the descent ladder's rung happens to equal it: `"descend flight level 100"` to an
+aircraft already cleared to FL100 and descending through it, then
+`"descend flight level 60"` fourteen seconds later (real flight, log 25). Two
+altitudes back to back, the first of them empty.
+
+**Two attempts to suppress it were reverted.** Neither `current_cleared_alt_ft()`
+nor `s_enroute_cleared_alt_ft` distinguishes a level that has been TRANSMITTED
+from one the approach profile has merely planned -- both already hold the
+vectoring's own newly-computed level by the time the text is built, so the test
+compared equal on every arrival and the descent was never issued at all. The
+replay then intercepted **3325 ft ABOVE** the glide path.
+
+A redundant transmission is a nuisance; an approach that cannot be flown is not.
+Closing this needs a "last level actually spoken to the pilot" record, written
+where the text is emitted rather than where the level is computed. That is the
+same shape as the QNH-once debt in Q5, and belongs with it.

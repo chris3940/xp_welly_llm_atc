@@ -228,6 +228,12 @@ bool poll_star_clearance_safety_net(const xplane_context::XPlaneContext &ctx,
 // Altitude-compliance courtesy prompt for IFR_DESCENT + IFR_ARRIVAL (the gap
 // where the en-route verify and approach verify-descending don't run). Advisory
 // only (no readback). See engine.cpp for the firing gates.
+// Cancels an ATC-assigned speed once the aircraft is past the FAF. ICAO 4444
+// 4.6.1.2 (a speed instruction stays in force until cancelled) + 4.6.1.7 (the
+// aircraft SHALL be advised when it is no longer required).
+bool poll_speed_release(const xplane_context::XPlaneContext &ctx,
+                        std::string *out_text);
+
 bool poll_altitude_compliance(const xplane_context::XPlaneContext &ctx, float dt,
                               std::string *out_text);
 

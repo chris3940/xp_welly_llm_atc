@@ -527,8 +527,19 @@ std::vector<Mismatch> check(const std::string &clearance_text,
       m.field    = "speed";
       m.expected = std::to_string(cl_spd);
       m.stated   = rb_spd > 0 ? std::to_string(rb_spd) : "";
-      char buf[40];
-      std::snprintf(buf, sizeof(buf), "%d knots or less", cl_spd);
+      // "REDUCE SPEED TO (number) KNOTS" and "... KNOTS OR LESS" are two
+      // DIFFERENT instructions: an assigned speed, which sequencing and spacing
+      // require the aircraft to fly, and a maximum it must not exceed. Restating
+      // an assigned speed as a maximum quietly relaxes it. The re-issue now
+      // mirrors the form the clearance actually used (user, 2026-08-18: the
+      // vectoring said "reduce speed to 160 knots" and the challenge came back
+      // "160 knots or less"). [C. P. Potter]
+      const bool as_max = cl.find("or less") != std::string::npos;
+      char buf[56];
+      if (as_max)
+        std::snprintf(buf, sizeof(buf), "%d knots or less", cl_spd);
+      else
+        std::snprintf(buf, sizeof(buf), "reduce speed to %d knots", cl_spd);
       m.correction = std::string("negative, I say again, ") + buf;
       out.push_back(std::move(m));
     }

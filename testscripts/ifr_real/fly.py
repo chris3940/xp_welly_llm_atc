@@ -244,7 +244,13 @@ class Repl:
 # ── what ATC said, and what a pilot does about it ─────────────────────────
 
 RE_CONTACT = re.compile(r"contact ([A-Za-z .'-]+?) on (\d{3}\.\d{2,3})", re.I)
-RE_FL = re.compile(r"(descend|climb)(?: to)? flight level (\d{2,3})", re.I)
+# "DESCEND VIA (STAR) TO (level)" is the ICAO form for a STAR descent and is what
+# the engine issues on an arrival with published constraints. The driver knew
+# only the bare "descend flight level NN", so on the LSGG BELU3R scenario it
+# never learned it was cleared to FL90 and flew the entire arrival at FL240.
+# [C. P. Potter]
+RE_FL = re.compile(
+    r"(descend|climb)(?:\s+via\s+.+?)?(?:\s+to)?\s+flight level (\d{2,3})", re.I)
 RE_ALT = re.compile(r"(descend|climb)(?: to)? ([\d ,]+) feet", re.I)
 RE_MAINTAIN_FL = re.compile(r"maintain flight level (\d{2,3})", re.I)
 RE_HEADING = re.compile(r"turn (left|right) heading (\d{2,3})", re.I)
@@ -254,6 +260,9 @@ RE_SPEED = re.compile(r"reduce speed(?: to)?,? (\d{3}) knots", re.I)
 # one -- which is the state of things today. RE_CONTACT needs "on NNN.NNN", so
 # the driver used to ignore it entirely and the arrival simply stopped. Matching
 # it separately makes the gap visible instead of silent.
+# The REPL prints "ATC   : <text>" for a reply and "ATC state: IFR/..." for its
+# state dump. Only the first is speech.
+RE_ATC_REPLY = re.compile(r"^ATC\s+:")
 RE_TOWER = re.compile(r"contact tower", re.I)
 RE_LAND  = re.compile(r"cleared to land", re.I)
 # The engine prints the FAF it resolved. Parsing it gives the driver the REAL
@@ -316,10 +325,24 @@ class Pilot:
             if m:
                 self.faf = (float(m.group(2)), float(m.group(3)))
                 self.faf_track = float(m.group(5))
-            if "ATC [" not in line:
+            # TWO SHAPES OF ATC LINE, and the driver only ever read one.
+            #   "ATC [vector]: ..."  an UNSOLICITED call from a poll
+            #   "ATC   : ..."        the REPLY to something the pilot just said
+            # Reading only the first meant every answer to the pilot's own
+            # transmissions was discarded -- including "runway 06, cleared to
+            # land", which the engine issued correctly and which the replay then
+            # scored as never received (user, 2026-08-19: "pourquoi ton outil de
+            # test ne fait pas les choses jusqu'au bout ?"). [C. P. Potter]
+            if "ATC [" in line:
+                msg = line.split("ATC [", 1)[1]
+                self.events.append((where, alt, "ATC [" + msg))
+            elif RE_ATC_REPLY.match(line.lstrip()):
+                msg = line.split(":", 1)[1].strip()
+                if not msg:
+                    continue
+                self.events.append((where, alt, "ATC (reply): " + msg))
+            else:
                 continue
-            msg = line.split("ATC [", 1)[1]
-            self.events.append((where, alt, "ATC [" + msg))
 
             m = RE_CONTACT.search(msg)
             if m:
@@ -333,6 +356,28 @@ class Pilot:
                 )
                 self.repl.sync()
                 self.events.append((where, alt, ">> pilot: checks in on %s (%s)" % (freq, who)))
+                # A handoff that names TOWER is the Tower handoff, frequency and
+                # all. The generic handler runs first and continues, so the Tower
+                # test further down never saw it and the arrival was scored as
+                # "no Tower handoff" the moment the frequency started being
+                # resolved (2026-08-19).
+                if RE_TOWER.search(msg):
+                    self.tower_called = True
+                    # ON TOWER, THE PILOT REPORTS ESTABLISHED. A bare "with you"
+                    # is not what Tower is waiting for: the handoff asked for the
+                    # established report, and the landing clearance answers it.
+                    # Announcing it only once, on the Approach frequency before
+                    # the transfer, is why every replay stopped one transmission
+                    # short of the clearance while the real flight got it
+                    # (user, 2026-08-19: "pourquoi ton outil de test ne fait pas
+                    # les choses jusqu'au bout ?").
+                    if self.established and self.runway:
+                        self.repl.send("say %s established ILS runway %s"
+                                       % (self.callsign, self.runway))
+                        self.repl.sync()
+                        self.events.append(
+                            (where, alt,
+                             ">> pilot: reports established to Tower on %s" % freq))
                 continue
 
             if RE_TOWER.search(msg) and not self.tower_called:
@@ -559,6 +604,14 @@ def main():
         "set freq_type UNKNOWN",
         "jump enroute %d" % route["start_ft"],
     ]
+    if isinstance(route.get("field"), list) and len(route["field"]) == 2:
+        setup.append("airport_pos %s %.4f %.4f"
+                     % (route["dest"], route["field"][0], route["field"][1]))
+    if route.get("tower_freq") is not None:
+        setup.append("tower_freq %s %s" % (route["dest"], route["tower_freq"]))
+    if route.get("field_elev_ft") is not None:
+        setup.append("airport_elev %s %d"
+                     % (route["dest"], int(route["field_elev_ft"])))
     for c in setup:
         repl.send(c)
         repl.sync()
@@ -659,6 +712,11 @@ def main():
         prev = pt
         if pilot.finished or pilot.established:
             break
+        if dest and nm(prev, dest) > 400.0:
+            pilot.events.append((prev, int(alt),
+                                 "!! harness: runaway, %.0f NM from the field"
+                                 % nm(prev, dest)))
+            break
         if pilot.vector_hdg is not None and flown > 900.0:
             break  # runaway guard: a vector that is never cancelled
 
@@ -676,8 +734,11 @@ def main():
         # it onward would take the aircraft across the localiser and off it.
         crs = pilot.faf_track if pilot.faf_track is not None else bearing(prev, dest)
         for _ in range(40):
-            if pilot.finished:
-                break
+            # KEEP FLYING AFTER THE LANDING CLEARANCE. Stopping there ended the
+            # replay 9 NM out at Geneva, before the aircraft had even passed its
+            # FAF -- so everything the FAF triggers, the speed release among them,
+            # simply never happened. The arrival ends at the runway, not at the
+            # last clearance. [C. P. Potter]
             d = nm(prev, dest)
             if d < 0.8:
                 pilot.events.append((prev, int(alt), ">> pilot: over the field"))
@@ -723,8 +784,13 @@ def main():
             # (ICAO 8.9.4.2 -- maintain the last level until intercepting the
             # glide path). Keeping the floor past the FAF pinned the aircraft at
             # 4900 ft all the way to the field.
+            # HOLD THE CLEARED LEVEL EXACTLY. The 100 ft of slack that used to be
+            # allowed here is not something a pilot flies -- he levels AT the
+            # platform -- and it would hide a genuine descent below it by exactly
+            # that margin. It showed up as 3900 ft on a 4000 ft platform
+            # (user, 2026-08-19: "pourquoi 3900 ft et pas 4000 ?").
             if pilot.cleared_ft is not None and ahead > 0.6:
-                alt = max(alt, float(pilot.cleared_ft) - 100.0)
+                alt = max(alt, float(pilot.cleared_ft))
             repl.send("set gs %.0f" % gs)
             repl.send("set heading %.0f" % crs_now)
             pilot.react(repl.sync(), prev, int(alt))

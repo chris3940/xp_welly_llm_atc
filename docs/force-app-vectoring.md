@@ -281,6 +281,33 @@ rule -- but it must be visible when it happens.
 
 ## Where the manoeuvre starts
 
+> **DEFECT, measured 2026-08-19 — this section describes the only case that
+> works.** `D_start` is a distance measured back from the FAF ALONG THE FINAL
+> APPROACH TRACK, and it is positive. An aircraft arriving from the far side of
+> the field has a NEGATIVE along-track distance and never enters the arming
+> window at all, so the choice between the three shapes below never happens and
+> the `Downwind` leg -- written, documented, and commented "otherwise -> DOWNWIND
+> to gain axis distance" -- is **unreachable**.
+>
+> Measured on LSGG BELU3R runway 22 (`make replay-lsgg`), final track 223 deg,
+> arrival from the south-west:
+>
+> ```
+> [vector] arm check: -81.0 NM to FAF GG808 (window 15-30.5), y=-23.8
+> [vector] arm check: -52.7 NM to FAF GG808 (window 15-30.5), y=-9.1
+> [vector] refused: 2.4 NM to FAF GG808, below the 15 NM floor
+> ```
+>
+> The vectoring only armed once the aircraft had passed the field and the
+> projection turned positive -- 2.4 NM out, far too late, so the arrival kept the
+> published procedure. EDLW and LFMN never showed it because both are approached
+> from the inbound side.
+>
+> **What it needs:** arming on the TRACK DISTANCE STILL TO FLY -- turn, downwind,
+> base, final -- instead of on the along-track projection alone. That is what
+> makes the downwind shape reachable. It is a real piece of work, not a
+> threshold change. [C. P. Potter]
+
 Measured backwards from the FAF, never forwards from the aircraft:
 
 ```
@@ -621,6 +648,77 @@ a 0.5 NM tolerance.
 
 ---
 
+## Never re-issue an instruction already in force (2026-08-19)
+
+**General rule, not a vectoring rule.** ATC does not repeat an instruction the
+pilot is already flying, and it holds **across controllers**: an instruction
+survives a handoff, and the receiving unit does not restate it (user,
+2026-08-19).
+
+What it cost when it was missing: the flown arrival of 2026-08-19 heard
+`"descend flight level 100"` from the vector while already cleared to and
+descending through FL100, then `"descend flight level 60"` fifteen seconds later
+-- and was then challenged, `"negative, I say again, flight level six zero"`, for
+correctly reading back the first of the two.
+
+| what | how it is held | where it is compared |
+|---|---|---|
+| level | `s_last_transmitted_alt_ft` | the vector's leg level |
+| speed | `s_atc_assigned_speed_kt` | `vec_speed_phrase()` |
+| heading | `s_vtf_hdg` | a recut within 3 deg is not transmitted |
+
+Two mechanics decide whether this works at all:
+
+- **The record must be written where the words are emitted**, not where the value
+  is computed. `current_cleared_alt_ft()` and `s_enroute_cleared_alt_ft` also
+  hold levels the approach profile has merely PLANNED, and both already contain
+  the vectoring's freshly computed level by the time its text is built. Two
+  earlier attempts used them, compared equal on every arrival, and suppressed the
+  descent itself -- the replay then intercepted 3325 ft ABOVE the glide path.
+- **A handoff must not erase it.** The first cut reset the record inside
+  `remember_controller_label()`, i.e. on every transfer, which is precisely the
+  case the rule exists for. Only a new flight clears it.
+
+The safe failure mode follows from the first point: if the record is not set, the
+comparison simply does not match and the instruction is transmitted as before.
+Nothing can be suppressed that was never said.
+
+## Releasing the speed (2026-08-18, build 96)
+
+An assigned speed does **not** lapse on its own. ICAO Doc 4444 **4.6.1.2**:
+*"Speed control instructions shall remain in effect unless explicitly cancelled
+or amended by the controller."* And **4.6.1.7** makes the release mandatory:
+*"Aircraft shall be advised when a speed control restriction is no longer
+required."* Ours never was -- an aircraft told "reduce speed to 160 knots" for
+sequencing was still holding it on short final with nobody releasing it.
+
+**Where.** **4.6.3.7** is the outer bound, not the release point: *"speed control
+should not be applied to aircraft after passing a point 7 km (4 NM) from the
+threshold on final approach"*. We release at the **FAF**, which is farther out
+(6.6 NM at EDLW), so the rule is met with margin, the sequencing the restriction
+existed for is over, and the trigger is a fix whose coordinates the approach data
+actually gives us -- the threshold's it does not.
+
+Phraseology 12.4.1 (h): `RESUME NORMAL SPEED`.
+
+Two mechanics worth recording, because both cost a debugging pass:
+
+- The FAF must be resolved the way the vectoring resolves it. `s_approach_faf` is
+  only populated inside `poll_approach`, which a vectored arrival never goes
+  through, so reading it there left the release permanently disarmed.
+- "Past the FAF" is an **along-track** test. Plain range grows again once the fix
+  is behind.
+
+### "160 knots" and "160 knots or less" are different instructions
+
+12.4.1 (f) is *INCREASE (or REDUCE) SPEED TO (number) KNOTS [OR GREATER (or OR
+LESS)]* -- the bracket changes the instruction. Without it the speed is
+**assigned**, and sequencing or spacing requires the aircraft to fly it; with it,
+it is a maximum. The readback challenge restated every assigned speed as a
+maximum (`negative, I say again, 160 knots or less` after
+`reduce speed to 160 knots`), quietly relaxing it. It now mirrors the form the
+clearance used.
+
 ## Terminating the manoeuvre (2026-08-18)
 
 **"Resume own navigation direct <FAF>" was wrong twice over**, and it is what the
@@ -666,8 +764,7 @@ a heads-up, not a clearance -- and the whole package goes out with the platform:
 
 ```
 <callsign>, 12 miles from KOLOT, descend 2500 feet, QNH 1024
-until established on the localiser, cleared ILS approach runway 06,
-report established on the localiser.
+until established, cleared ILS approach runway 06.
 ```
 
 Two related rules fall out of the same paragraph set:
@@ -725,6 +822,8 @@ Flown twice on LFLP → EDLW. **Neither flight completed the arrival.**
 
 | version | date | build | change |
 |---|---|---|---|
+| 2.5 | 2026-08-19 | v4.4.0-beta | **never re-issue an instruction already in force** (level, speed, heading), across controllers too -- `s_last_transmitted_alt_ft` written where the words are emitted, cleared only by a new flight. Intercept clearance shortened: `report established` dropped (12.4.2.2 brackets it, the Tower handoff asks for it a few miles later, and it repeated "on the localiser" twice) |
+| 2.4 | 2026-08-18 | v4.4.0-beta (pkg 96) | **speed release** past the FAF (4.6.1.2 / 4.6.1.7 / 4.6.3.7, phraseology RESUME NORMAL SPEED) and the readback challenge no longer restates an assigned speed as a maximum. **R1 tolerance**: the closure projection is judged against `kVecAlignNm - 1.5`, not the target itself -- R1 fired seven times on the flown arrival while the aircraft closed steadily, and its last correction steepened an aircraft already committed to the capture. Records the REVERTED attempt to suppress a redundant leg level |
 | 2.3 | 2026-08-18 | v4.4.0-beta (pkg 89) | **the clearance package (6.7.3.2.7)**: the intercept vector becomes a plain `vectoring for <approach>`, and position + intercept altitude + approach clearance go out together with the **platform**; `until established on <ref>` restricted to the intercept altitude; `report established` carries its reference (12.4.2.2 e). **The last descent is the platform**, not another glide-path rung — the simulated arrival intercepted 624 ft high, from above, because the last rung fell at the moment of capture. **Alignment judged at capture** instead of after the roll-out. No-op corrections suppressed. Capture line now states altitude vs glide path. Tower-handoff root cause found (state overwritten to `IFR_ARRIVAL`) |
 | 1.x | 2026-08-16 | — | specification, written before implementation |
 | 2.2 | 2026-08-18 | v4.4.0-beta (`7d7dfe6`) | ICAO Doc 4444 quoted verbatim from the document instead of from a search summary, **and a correction**: the 2.0 NM and the 30° that 2.0/2.1 attributed to ICAO come from 6.7.3.2.4, which governs INDEPENDENT PARALLEL approaches only. The general rule is 8.9.3.6 -- 45° or less, established before the glide path intercept from below, no distance figure. Our 3 NM and 2 NM are ours, not the standard's. Terminating the manoeuvre now REJOINS the procedure at the IAF (12.3.3.2 d/e/f) instead of "resume own navigation direct <FAF>", which the approach-instruction set does not contain |

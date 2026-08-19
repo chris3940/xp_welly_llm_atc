@@ -42,6 +42,18 @@
 #include <string>
 #include <unordered_map>
 
+namespace xplane_context {
+// Defined in tools/atc_repl/xplane_context_stub.cpp -- lets a scenario inject
+// the real aerodrome elevation, which the headless build otherwise has no
+// source for (apt.dat is parsed plugin-side only).
+void set_airport_elevation_ft(const std::string &icao, float ft);
+// Defined in tools/atc_ifr_repl/main.cpp -- without it the homonym
+// disambiguation in lookup_fix_positions() is disabled and a STAR fix can
+// resolve to the other side of the world.
+void set_airport_pos(const std::string &icao, double lat, double lon);
+void set_tower_mhz(const std::string &icao, float mhz);
+} // namespace xplane_context
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -784,6 +796,46 @@ int run(xplane_context::XPlaneContext ctx, std::string callsign) {
         engine::training_set_arrival(dest, star, appr);
         std::printf("arrival set: dest=%s STAR=%s approach=%s\n",
                     dest.c_str(), star.c_str(), appr.c_str());
+      }
+    }
+    else if (cmd == "tower_freq") {
+      std::istringstream ai(rest);
+      std::string icao;
+      float mhz = 0.0f;
+      if (!(ai >> icao >> mhz))
+        std::fprintf(stderr, "Usage: tower_freq <ICAO> <MHz>\n");
+      else {
+        xplane_context::set_tower_mhz(icao, mhz);
+        std::printf("tower_freq %s = %.3f\n", icao.c_str(),
+                    static_cast<double>(mhz));
+      }
+    }
+    else if (cmd == "airport_pos") {
+      std::istringstream ai(rest);
+      std::string icao;
+      double la = 0.0, lo = 0.0;
+      if (!(ai >> icao >> la >> lo))
+        std::fprintf(stderr, "Usage: airport_pos <ICAO> <lat> <lon>\n");
+      else {
+        xplane_context::set_airport_pos(icao, la, lo);
+        std::printf("airport_pos %s = %.4f,%.4f\n", icao.c_str(), la, lo);
+      }
+    }
+    else if (cmd == "airport_elev") {
+      // airport_elev <ICAO> <ft> -- so the vectoring terrain test (lowest
+      // approach-sector MSA MINUS FIELD ELEVATION) is evaluated on the bench
+      // against the same numbers the plugin sees. Without it every field sat at
+      // 0 ft and the test judged airports by their raw MSA: LSGG came out 7000 ft
+      // above its own field instead of 5589, and was refused vectors.
+      std::istringstream ai(rest);
+      std::string icao;
+      float ft = 0.0f;
+      if (!(ai >> icao >> ft))
+        std::fprintf(stderr, "Usage: airport_elev <ICAO> <ft>\n");
+      else {
+        xplane_context::set_airport_elevation_ft(icao, ft);
+        std::printf("airport_elev %s = %.0f ft\n", icao.c_str(),
+                    static_cast<double>(ft));
       }
     }
     else if (cmd == "fmsroute") {

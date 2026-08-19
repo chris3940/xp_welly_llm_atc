@@ -47,7 +47,7 @@ LINT_EXCLUDE := $(LINT_EXCLUDE_WIN) src/audio/audio_input_coreaudio.cpp
 endif
 LINT_SOURCES := $(filter-out $(LINT_EXCLUDE),$(wildcard src/main.cpp src/*/*.cpp))
 
-.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay replay-star test test-unit test-scenarios test-afis test-stars ci-remote win-artifact skunkcrafts
+.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay replay-star replay-lsgg test test-unit test-scenarios test-afis test-stars ci-remote win-artifact skunkcrafts
 
 .DEFAULT_GOAL := help
 
@@ -479,6 +479,21 @@ replay-star: ifr-repl
 	@echo
 	@echo "--- route the pilot flew (build/replay-star-raw.log) ---"
 	@grep -h "\[fms\]" build/replay-star-raw.log || true
+
+# LSGG BELU3R (spoken "BELUS THREE ROMEO"), runway 22, arriving from the
+# south-west so the axis is reached from the LEFT. Kept as a test case because
+# the STAR ENDS IN A VECTORING TERMINATION -- its last leg at GG512 is a CIFP
+# 'FM', course from fix to manual termination -- and because LSGG sits just
+# inside the terrain gate: MSA 7000 over a field at 1411 gives 5589 ft, 411 ft
+# under the 6000 ft threshold. [C. P. Potter]
+replay-lsgg: ifr-repl
+	@echo "=== Replay: BELU3R -> LSGG 22, forced vectoring, ILS ==="
+	@ATC_FMS=1 XP_ATC_FORCE_ILS=1 XP_ATC_FORCE_VECTORING=1 XP_ATC_HOLD_PCT=0 \
+	    ATC_RAW=build/replay-lsgg-raw.log \
+	    python3 testscripts/ifr_real/fly.py testscripts/ifr_real/route_belus_lsgg.json
+	@echo
+	@echo "--- vectoring decision (build/replay-lsgg-raw.log) ---"
+	@grep -h "\[vector\]" build/replay-lsgg-raw.log | grep -v "turn word" || true
 
 replay: ifr-repl
 	@echo "=== Replay: DIK -> EDLW, forced vectoring, ILS ==="

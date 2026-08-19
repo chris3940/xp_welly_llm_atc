@@ -7,6 +7,7 @@
  * REPL main primes before each process_transcript call.
  */
 
+#include <map>
 #include "core/xplane_context.hpp"
 
 #include <cstdint>
@@ -29,8 +30,26 @@ const std::string &locked_airport() noexcept {
 
 std::vector<NearbyAirport> find_nearby_airports(double, size_t) { return {}; }
 
-float airport_elevation_ft(const std::string &) { return 0.0f; }
-bool airport_elevation_known(const std::string &) { return false; }
+// Aerodrome elevations, injectable from the REPL. The real values come from
+// apt.dat, parsed in xplane_context_runtime.cpp, which is plugin-only -- so
+// headless every field sat at 0 ft. That is not a cosmetic gap: the vectoring
+// mode decision is "lowest approach-sector MSA MINUS FIELD ELEVATION", so with
+// the elevation at zero the terrain test judged every airport by its raw MSA.
+// LSGG (MSA 7000, field 1411) came out 7000 ft above the field and was refused
+// vectors; the true figure is 5589, which passes. [C. P. Potter]
+static std::map<std::string, float> g_airport_elev_ft;
+
+void set_airport_elevation_ft(const std::string &icao, float ft) {
+  g_airport_elev_ft[icao] = ft;
+}
+
+float airport_elevation_ft(const std::string &icao) {
+  auto it = g_airport_elev_ft.find(icao);
+  return it == g_airport_elev_ft.end() ? 0.0f : it->second;
+}
+bool airport_elevation_known(const std::string &icao) {
+  return g_airport_elev_ft.count(icao) != 0;
+}
 
 void init() {}
 void stop() {}

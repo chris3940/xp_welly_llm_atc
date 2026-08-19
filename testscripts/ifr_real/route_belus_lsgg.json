@@ -1,0 +1,68 @@
+{
+  "_comment": "BELU3R arrival into LSGG runway 22 -- spoken BELUS THREE ROMEO. Chosen because the STAR ENDS IN A VECTORING TERMINATION: its last leg at GG512 is a CIFP 'FM' (course from fix, manual termination), i.e. the procedure hands the aircraft to radar vectors instead of joining an IAF. Arrival from the south-west (ARDEG), so the aircraft reaches the runway-22 axis from the left -- the left-hand vectoring pattern. Flown with ATC_FMS=1: the pilot follows the route the engine is tracking, so the STAR and the approach transition come from the real CIFP, not from a recorded track. [C. P. Potter]",
+  "dest": "LSGG",
+  "runway": "22",
+  "_comment_field": "LSGG aerodrome reference point",
+  "field": [
+    46.2381,
+    6.1089
+  ],
+  "cruise_ft": 24000,
+  "start_ft": 24000,
+  "com": "133.330",
+  "gs_kt": 280,
+  "navlog": [
+    [
+      "ARDEG",
+      44.6692,
+      4.5375,
+      24000,
+      "CRZ",
+      0
+    ],
+    [
+      "BEPER",
+      44.6381,
+      5.215,
+      24000,
+      "CRZ",
+      0
+    ],
+    [
+      "ABRET",
+      45.475,
+      5.5009,
+      24000,
+      "DSC",
+      0
+    ],
+    [
+      "BELUS",
+      45.6753,
+      5.5939,
+      12000,
+      "DSC",
+      1
+    ]
+  ],
+  "path": [
+    [
+      44.6692,
+      4.5375
+    ],
+    [
+      44.6381,
+      5.215
+    ],
+    [
+      45.475,
+      5.5009
+    ],
+    [
+      45.6753,
+      5.5939
+    ]
+  ],
+  "field_elev_ft": 1411,
+  "tower_freq": "118.700"
+}

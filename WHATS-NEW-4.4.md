@@ -125,8 +125,7 @@ sending it round the published procedure:
        descend flight level 60, vectoring for ILS approach runway 06
 18 NM  descend 5000 feet, QNH 1024
 12 NM  12 miles from KOLOT, descend 2500 feet, QNH 1024
-       until established on the localiser, cleared ILS approach
-       runway 06, report established on the localiser
+       until established, cleared ILS approach runway 06
  9 NM  reduce speed to 160 knots
  6 NM  (silent — the aircraft is on the localiser and has the track)
 ```
@@ -149,7 +148,11 @@ from the FAF at 2685 ft with the path at 4360: 1675 ft below it.
 - Geometry follows the runway axis and the side the aircraft arrives from —
   intercept straight away when there is room, displace first when sitting on the
   centreline, downwind only to gain axis distance. No circuit is flown: IFR radar
-  vectoring has no pattern, only headings.
+  vectoring has no pattern, only headings. **The downwind shape is not reachable
+  in this release**: the manoeuvre arms on the distance measured back from the
+  FAF along the final approach track, which is negative for an aircraft arriving
+  from the far side of the field, so those arrivals keep the published procedure
+  instead of being vectored. Measured on LSGG runway 22 (`make replay-lsgg`).
 - **Every leg level is floored by the sector MSA, then by grid MORA.** Where
   neither source answers, ATC refuses to vector and the panel says
   `DISABLED: NO MSA` rather than inventing a safe altitude.
@@ -164,6 +167,11 @@ from the FAF at 2685 ft with the path at 4360: 1675 ft below it.
 - Non-compliance is met with a re-issued vector or a confirmation, never a silent
   abandon. A re-cut that lands on the heading already assigned is not
   transmitted — below 3° there is nothing to fly.
+- **The speed is released** once the FAF is behind -- "resume normal speed". An
+  assigned speed stays in force until cancelled (ICAO 4.6.1.2) and the aircraft
+  must be told when it no longer applies (4.6.1.7); ours never was. And an
+  assigned speed is no longer restated as a maximum when a readback is
+  challenged -- "160 knots" and "160 knots or less" are different instructions.
 - **Speed is controlled**: 210 kt with the intercept heading for sequencing,
   160 kt separately about 9 NM from the FAF (EUROCONTROL's 160 kt from 8 NM),
   so the pilot is not handed a turn, a descent and a speed in one breath, and
