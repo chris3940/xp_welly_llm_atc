@@ -10620,7 +10620,15 @@ static constexpr double kVecDisplaceDeg   = 40.0; // opening angle to build the 
 // abandon was cured by not judging the geometry until the turn is established,
 // which is where that guard belongs. [C. P. Potter]
 static constexpr double kVecTurnAllowNm   = 3.0;
+// Base grace before ATC queries a turn that has not started, PLUS the time the
+// turn itself needs. A fixed 30 s cannot work: a 200 degree reversal -- which is
+// exactly what a downwind-then-intercept asks for -- takes 67 s at the standard
+// 3 deg/s, so the query fired twice while the aircraft was still correctly
+// turning (LSGG 2026-08-19). The allowance is now 30 s of reaction plus the arc
+// at standard rate, so the query only ever means "you have had time and have not
+// turned". [C. P. Potter]
 static constexpr float  kVecNudgeSecs     = 30.0f;
+static constexpr double kVecTurnRateDegS  = 3.0;
 static constexpr double kVecNudgeDeg      = 20.0;
 
 // Along-axis / cross-axis position of the aircraft relative to the FAF.
@@ -11816,9 +11824,12 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   // aircraft pointing nowhere, which is what happened on the flown arrival.
   // So this queries, repeatedly, and never abandons. [C. P. Potter]
   const double herr = heading_error_deg(ctx.heading_mag, s_vtf_hdg);
+  // The allowance scales with the turn STILL TO FLY, at standard rate.
+  const float nudge_after =
+      kVecNudgeSecs + static_cast<float>(herr / kVecTurnRateDegS);
   if (herr > kVecNudgeDeg) {
     s_vtf_nudge_secs += dt;
-    if (s_vtf_nudge_secs > kVecNudgeSecs) {
+    if (s_vtf_nudge_secs > nudge_after) {
       s_vtf_nudge_secs = 0.0f;
       s_vtf_nudged = true;
       // Same rule as the instruction itself: the direction is the shortest way
@@ -11827,9 +11838,12 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                   vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) + ".";
       if (out_requires_readback)
         *out_requires_readback = true;
-      logging::info("[vector] hdg err %.0f deg after %.0f s -- confirming the "
-                    "turn to %03d (not abandoning)",
-                    herr, kVecNudgeSecs, static_cast<int>(s_vtf_hdg));
+      logging::info("[vector] hdg err %.0f deg after %.0f s (allowed %.0f: 30 s "
+                    "+ the turn at 3 deg/s) -- confirming the turn to %03d "
+                    "(not abandoning)",
+                    herr, static_cast<double>(s_vtf_nudge_secs),
+                    static_cast<double>(nudge_after),
+                    static_cast<int>(s_vtf_hdg));
       return true;
     }
   } else {
