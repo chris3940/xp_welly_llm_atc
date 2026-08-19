@@ -1885,6 +1885,78 @@ static int report_alt_tolerance_ft(bool is_reaching) {
 // is NOT the assigned departure runway -- a parallel runway between the aircraft and the
 // departure runway (LFMN: depart 04R, the taxi crosses 04L at A1). Returns the crossing
 // runway ("04L") or "" when none. (user 2026-07-29) [C. P. Potter]
+// Is a runway BETWEEN the aircraft and the runway it is taxiing to? Answered by
+// segment intersection: the leg the aircraft still has to taxi (its position to
+// the departure threshold) against each other runway's centreline.
+//
+// This replaces judging the aircraft's HEADING. A stopped aircraft on a curved
+// taxiway points wherever the curve left it: at LFML the hold-short F7 was faced
+// at 086 against a ~133 axis, 46 degrees off the perpendicular and therefore
+// rejected as "alongside" by a 45 degree window -- while the runway was squarely
+// in the way. Geometry answers what a heading only hints at, and it keeps the
+// case the heading test was written for: at LFLU, lining up beside a parallel
+// grass runway, that runway is NOT between the aircraft and its threshold, so
+// nothing fires. [C. P. Potter]
+static bool segments_cross(double a1la, double a1lo, double a2la, double a2lo,
+                           double b1la, double b1lo, double b2la, double b2lo) {
+  const double k = std::cos(a1la * M_PI / 180.0);
+  auto X = [&](double lo) { return lo * 60.0 * k; };
+  auto Y = [](double la) { return la * 60.0; };
+  const double ax = X(a1lo), ay = Y(a1la), bx = X(a2lo), by = Y(a2la);
+  const double cx = X(b1lo), cy = Y(b1la), dx = X(b2lo), dy = Y(b2la);
+  auto side = [](double px, double py, double qx, double qy, double rx,
+                 double ry) {
+    const double v = (qx - px) * (ry - py) - (qy - py) * (rx - px);
+    return v > 1e-9 ? 1 : (v < -1e-9 ? -1 : 0);
+  };
+  const int d1 = side(ax, ay, bx, by, cx, cy);
+  const int d2 = side(ax, ay, bx, by, dx, dy);
+  const int d3 = side(cx, cy, dx, dy, ax, ay);
+  const int d4 = side(cx, cy, dx, dy, bx, by);
+  return d1 != d2 && d3 != d4;
+}
+
+static const xplane_context::RunwayEnd *
+runway_end_named(const xplane_context::XPlaneContext &ctx,
+                 const std::string &number) {
+  for (const auto &rwy : ctx.runways)
+    for (const auto *e : {&rwy.end1, &rwy.end2})
+      if (e->number == number)
+        return e;
+  return nullptr;
+}
+
+// The runway the taxi to `dep_rwy` has to cross, or "" when there is none.
+static std::string runway_between(const xplane_context::XPlaneContext &ctx,
+                                  const std::string &dep_rwy) {
+  const auto *dep = runway_end_named(ctx, dep_rwy);
+  if (!dep)
+    return {};
+  for (const auto &rwy : ctx.runways) {
+    if (rwy.end1.number == dep_rwy || rwy.end2.number == dep_rwy)
+      continue;
+    if (!segments_cross(ctx.latitude, ctx.longitude, dep->lat, dep->lon,
+                        rwy.end1.lat, rwy.end1.lon, rwy.end2.lat, rwy.end2.lon))
+      continue;
+    // Name the end that reads like the departure runway.
+    const std::string dnum =
+        dep_rwy.substr(0, dep_rwy.find_first_not_of("0123456789"));
+    for (const auto *e : {&rwy.end1, &rwy.end2}) {
+      const std::string en =
+          e->number.substr(0, e->number.find_first_not_of("0123456789"));
+      if (!en.empty() && en == dnum)
+        return e->number;
+    }
+    return rwy.end1.number;
+  }
+  return {};
+}
+
+std::string runway_to_cross(const xplane_context::XPlaneContext &ctx,
+                            const std::string &dep_rwy) {
+  return runway_between(ctx, dep_rwy);
+}
+
 static std::string
 crossing_runway_at_position(const xplane_context::XPlaneContext &ctx,
                             const std::string &dep_rwy) {
@@ -1932,41 +2004,33 @@ crossing_runway_at_position(const xplane_context::XPlaneContext &ctx,
     for (const auto *end : {&rwy.end1, &rwy.end2}) {
       if (end->number.empty())
         continue;
-      // A crossing is offered ONLY when the aircraft is holding short FACING ACROSS
-      // that runway -- i.e. its heading is roughly TRANSVERSE to the runway axis
-      // (within 45 deg of perpendicular). When the heading is PARALLEL to the
-      // runway (aligned or reciprocal) the aircraft is ALONGSIDE / backtracking it,
-      // not crossing: LFLU rwy 19 lining up next to the parallel grass 19L (~250 m
-      // abeam) was wrongly told "cross runway 19L, report vacated" (real vol
-      // 2026-08-02) -- a false positive that also bites TOWERED fields with
-      // parallel runways. The legitimate LFMN case (holding on taxiway A1,
-      // transverse to the parallel 04L, about to cross it toward 04R) still fires.
-      // [C. P. Potter]
-      const auto *other = (end == &rwy.end1) ? &rwy.end2 : &rwy.end1;
-      const double axis = traffic_geometry::bearing_deg(end->lat, end->lon,
-                                                        other->lat, other->lon);
-      double off = std::fabs(static_cast<double>(ctx.heading_true) - axis);
-      if (off > 180.0)
-        off = 360.0 - off;
-      if (std::fabs(off - 90.0) > 45.0)
-        continue; // heading too parallel to this runway -> alongside, not crossing
-      // Name the end that reads like the departure runway: crossing 31L on the
-      // way to 31R is "cross runway 31 Left", never "13 Right".
+      // THE RUNWAY MUST BE IN THE WAY. Judged by geometry -- does this runway
+      // separate the aircraft from the runway it is taxiing to -- not by the
+      // aircraft's heading, which on a curved hold-short says little: at LFML,
+      // F7 faced 086 against a ~133 axis, 46 degrees off the perpendicular, and a
+      // heading window would have rejected a crossing that was squarely in the
+      // way. The LFLU false positive stays rejected: a parallel runway alongside
+      // is not BETWEEN the aircraft and its threshold. [C. P. Potter]
+      if (runway_between(ctx, dep_rwy) != end->number &&
+          runway_between(ctx, dep_rwy) !=
+              (end == &rwy.end1 ? rwy.end2.number : rwy.end1.number))
+        continue;
       const auto *named = end;
-      if (!dep_rwy.empty()) {
-        const std::string dnum = dep_rwy.substr(0, dep_rwy.find_first_not_of("0123456789"));
+      {
+        const std::string dnum =
+            dep_rwy.substr(0, dep_rwy.find_first_not_of("0123456789"));
         for (const auto *e : {&rwy.end1, &rwy.end2}) {
-          const std::string enum_ = e->number.substr(
-              0, e->number.find_first_not_of("0123456789"));
-          if (!enum_.empty() && enum_ == dnum) {
+          const std::string en =
+              e->number.substr(0, e->number.find_first_not_of("0123456789"));
+          if (!en.empty() && en == dnum) {
             named = e;
             break;
           }
         }
       }
-      logging::info("[ground] crossing detected: %s at %.0f m from its axis "
-                    "(departing %s)", named->number.c_str(), dseg * 1852.0,
-                    dep_rwy.c_str());
+      logging::info("[ground] crossing detected: %s at %.0f m from its axis, "
+                    "between the aircraft and %s", named->number.c_str(),
+                    dseg * 1852.0, dep_rwy.c_str());
       return named->number;
     }
   }

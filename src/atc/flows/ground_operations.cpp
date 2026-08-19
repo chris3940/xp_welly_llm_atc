@@ -366,6 +366,17 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
       {"atis_tail", atis_tail},
       {"frequency", format_freq(ground_freq)},
       {"tower_frequency", format_freq(tower_freq)},
+      // {hold_short_reminder}: ", hold short of runway 31 Left" while a runway
+      // still separates the aircraft from its departure runway, empty otherwise.
+      // A bare "roger, contact Tower" answering a hold-short report reads as
+      // permission to carry on: at LFML the aircraft heard exactly that at F7 and
+      // crossed 13R/31L on the line-up clearance that followed (real flight
+      // 2026-08-19). The runway is named until the crossing is cleared.
+      {"hold_short_reminder", [&]() -> std::string {
+        const std::string cross = engine::runway_to_cross(ctx, get_runway(msg, ctx));
+        return cross.empty() ? std::string()
+                             : (", hold short of runway " + cross);
+      }()},
       {"ground_frequency", format_freq(ground_freq)},
       {"taxi_controller", taxi_controller},
       {"aircraft_type", ctx.aircraft_icao},
@@ -857,11 +868,25 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
         auto it = ctx.runway_holding_points.find(rwy);
         if (it != ctx.runway_holding_points.end())
           hp = it->second;
+        // The hold-short applies on BOTH paths -- with or without taxiway data.
+        // Computed first so the fallback below cannot skip it.
+        // STOP THE TAXI AT THE RUNWAY. A holding point on the far side of an
+        // active runway cannot be cleared to in one instruction: the taxi is
+        // limited to the hold-short and the crossing is a clearance of its own.
+        // At LFML the aircraft was cleared "taxi to holding point Echo Nine,
+        // runway 31R" from the west-side parking -- E9 is beyond 13R/31L -- with
+        // no hold-short and no route. It stopped at F7 on its own, reported it,
+        // was answered "roger, contact Tower", and crossed the runway on a
+        // line-up clearance (real flight 2026-08-19). [C. P. Potter]
+        const std::string cross = engine::runway_to_cross(ctx, rwy);
+        const std::string tail =
+            cross.empty() ? std::string()
+                          : (", hold short of runway " + cross);
         if (hp.empty())
-          return "holding point runway " + rwy;
+          return "holding point runway " + rwy + tail;
         // Spoken ICAO form: "D" -> "Delta", "C1" -> "Charlie One" (big airports).
         return "holding point " + atc_phonetic::spell_holding_point(hp) +
-               ", runway " + rwy;
+               ", runway " + rwy + tail;
       }()},
   };
 }

@@ -78,7 +78,7 @@
     "TAXI_CLEARED": {
       "_comment": "IFR override: pilot reports at holding point. Routes to Tower, same as READY_FOR_DEPARTURE but without requiring the word 'ready'.",
       "REPORT_HOLDING_SHORT": {
-        "response": "{callsign}, roger, contact Tower on {tower_frequency}.",
+        "response": "{callsign}, roger{hold_short_reminder}, contact Tower on {tower_frequency}.",
         "next_state": "TOWER_CONTACT",
         "requires_readback": false
       }

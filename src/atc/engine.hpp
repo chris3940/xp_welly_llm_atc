@@ -231,6 +231,14 @@ bool poll_star_clearance_safety_net(const xplane_context::XPlaneContext &ctx,
 // Cancels an ATC-assigned speed once the aircraft is past the FAF. ICAO 4444
 // 4.6.1.2 (a speed instruction stays in force until cancelled) + 4.6.1.7 (the
 // aircraft SHALL be advised when it is no longer required).
+// The runway a taxi to `dep_rwy` has to cross, or "" when there is none. Answered
+// by geometry: does that runway separate the aircraft from the one it is taxiing
+// to? Used to STOP the taxi clearance at the runway -- a clearance to a holding
+// point on the far side of an active runway, with no "hold short", is how an
+// aircraft crossed 31L at Marseille on a line-up clearance (2026-08-19).
+std::string runway_to_cross(const xplane_context::XPlaneContext &ctx,
+                            const std::string &dep_rwy);
+
 bool poll_speed_release(const xplane_context::XPlaneContext &ctx,
                         std::string *out_text);
 
