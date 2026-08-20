@@ -9970,7 +9970,14 @@ bool poll_speed_compliance(const xplane_context::XPlaneContext &ctx, float dt,
   // 60 s, not 45: at the real 1.2 kt/s a jet needs 58 s to shed 70 kt, so a
   // shorter grace challenges an aircraft that is simply still slowing down.
   constexpr float kGraceSecs = 60.0f;
-  constexpr float kToleranceKt = 15.0f;
+  // 20 kt, not 15. An aircraft settling on its assigned speed passes through
+  // 15 kt over, and a controller does not query that -- he queries a deviation.
+  // Fired at exactly 195 for 180 on the flown arrival of 2026-08-20, twenty-five
+  // seconds after the pilot had read the clearance back, so from the cockpit it
+  // read as "he did not understand my readback" (user, same day). The case this
+  // net exists for -- 250+ kt with 210 assigned -- is 40 kt over and still
+  // caught. [C. P. Potter]
+  constexpr float kToleranceKt = 20.0f;
   const int target = s_atc_assigned_speed_kt;
   if (target <= 0) {
     s_spd_comp_target_kt = 0;

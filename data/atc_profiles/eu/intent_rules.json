@@ -200,6 +200,11 @@
       "_note": "Same, spelled out.",
       "from": "r nav",
       "to": "rnav"
+    },
+    {
+      "_note": "Voxtral turns 'decimal' into 'this is my' inside a frequency readback: 'Ground on 121, this is my 850' for 121.850 (LSGG 2026-08-20). No ICAO phraseology contains 'this is my', so the substitution is safe here.",
+      "from": "this is my",
+      "to": "decimal"
     }
   ],
   "rules": [
