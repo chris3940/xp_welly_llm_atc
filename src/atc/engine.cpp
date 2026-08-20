@@ -2395,7 +2395,34 @@ void process_transcript(Input in, Done done) {
       // 2026-07-09 LIMF -> LFLP retest where the plugin instead
       // *impersonated* Milan on 121.100 due to the too-permissive
       // APPROACH classification check).
+      bool readback_carries_freq = false;
       if (s_sector_checkin_pending && s_pending_handoff_freq_mhz > 100.0f) {
+        // NOT WHEN HE IS READING IT BACK. The reminder used to fire on ANY
+        // transmission made on the old frequency, so a correct readback of the
+        // handoff was answered "you are still with me" in the same second -- the
+        // pilot had said exactly the right thing and was told he had not
+        // (LFML -> LSGG, 2026-08-20: "one-two-zero decimal two-zero-five" for
+        // 120.205). Reading back is not staying: it is the acknowledgement, and
+        // the switch takes a few seconds of hands. Nag on the NEXT transmission
+        // if he really has not moved. [C. P. Potter]
+        {
+          const std::string norm =
+              intent_parser::normalize_spoken_frequency(in.transcript);
+          char want[16];
+          std::snprintf(want, sizeof(want), "%.3f",
+                        static_cast<double>(s_pending_handoff_freq_mhz));
+          std::string w(want);
+          while (!w.empty() && w.back() == '0')
+            w.pop_back(); // 120.205 -> "120.205", 118.700 -> "118.7"
+          if (!w.empty() && norm.find(w) != std::string::npos) {
+            logging::info("[handoff] reminder suppressed: the readback carries "
+                          "%.3f -- acknowledged, not ignored",
+                          static_cast<double>(s_pending_handoff_freq_mhz));
+            readback_carries_freq = true;
+          }
+        }
+        if (readback_carries_freq)
+          return; // acknowledged -- give him the seconds to switch
         const std::string cs = spoken_callsign(ctx);
         // Target of the reminder = pending controller (Milan).  The
         // speaker of this transmission is still the current controller
@@ -10046,6 +10073,15 @@ bool poll_speed_release(const xplane_context::XPlaneContext &ctx,
                         std::string *out_text) {
   using AS = atc_state_machine::ATCState;
   if (s_atc_assigned_speed_kt <= 0 || s_speed_released)
+    return false;
+  // THE OUTGOING SECTOR GOES SILENT. Once "contact Tower on ..." has been
+  // transmitted the aircraft belongs to the next controller. Placing this poll
+  // ahead of the state gate -- so a landing clearance could not starve it -- also
+  // put it ahead of that rule, and Geneva Approach released the speed 38 s AFTER
+  // handing the aircraft to Tower, then reproached it for still being there
+  // (real flight 2026-08-20). Cleared by the pilot's check-in on the new
+  // frequency, like every other poll. [C. P. Potter]
+  if (s_sector_checkin_pending)
     return false;
   const AS st = atc_state_machine::get_state();
   if (st != AS::IFR_APPROACH_DESCENT && st != AS::IFR_APPROACH_TOWER &&
