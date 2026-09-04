@@ -282,6 +282,17 @@ frequency", which had been mislabelling Innsbruck.
   version.
 - **Radio check** answers "reading you five".
 - QNH is stated only when a level is assigned in feet, never with a flight level.
+- **CONTINUE HEADING** when a vector asks for no turn -- a heading within 5
+  degrees of the one being flown is not "turn right".
+- **Position information on the first vector**: "position 32 miles from GG808",
+  the moment the aircraft leaves the published procedure. The distance is the
+  track the vectors will actually fly, not the straight line.
+- **The reason for vectoring is given.** A vector that overrides a STAR turn is
+  `vectoring for sequencing`, not "vectoring for the ILS" -- the approach is
+  already known, the reason is not.
+- **A level is never issued on the way out of a sector**: the descent into the
+  destination terminal area waits for the transfer that the same TMA entry
+  triggers, and nobody clears across an unanswered handoff.
 
 ### New — ground
 

@@ -254,11 +254,26 @@ bool star_ends_in_vectors(const std::string &cifp_dir, const std::string &icao,
 //
 // Missed-approach legs are excluded: they carry VM terminations too and have
 // nothing to do with sequencing an arrival.
+// Lowest PUBLISHED inbound level of an approach: the altitude on the entry (IF)
+// record of its transitions. THIS IS THE PLATFORM -- the level an arriving
+// aircraft holds so the glide path can come down to meet it -- and it is NOT the
+// FAF altitude, which is where the aircraft ends up after following that path.
+// LSGG ILS 22: SAPRE +7000 against a 4000 ft FAF, and the chart's D17.7 gate is
+// exactly where a 3 degree path from 7000 is intercepted. Returns 0 when the
+// approach publishes no such entry (EDLW ILS 06 enters on a DF leg), in which
+// case the caller keeps its previous behaviour. The MINIMUM is taken when
+// several transitions publish different levels (LFMN: MUS FL080, NERAS 4000):
+// never hold an aircraft higher than the lowest published entry. [C. P. Potter]
+int approach_inbound_level_ft(const std::string &cifp_dir,
+                              const std::string &icao,
+                              const std::string &approach);
+
 bool approach_transition_prescribes_vectors(const std::string &cifp_dir,
                                             const std::string &icao,
                                             const std::string &approach,
                                             const std::string &transition,
-                                            std::string *out_fix = nullptr);
+                                            std::string *out_fix = nullptr,
+                                            int *out_course_deg = nullptr);
 
 std::vector<StarWaypoint> star_waypoints(const std::string &cifp_dir,
                                           const std::string &icao,

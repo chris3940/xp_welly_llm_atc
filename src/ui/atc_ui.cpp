@@ -2897,7 +2897,19 @@ static void draw_ifr_tab() {
   static float       s_jump_popup_freq  = 0.0f;
   static const char *s_jump_popup_phase = "";
 
-  ImGui::TextDisabled("JUMP:");
+  // Say WHY the row is what it is, in the row itself. A tooltip is only found
+  // by someone who already suspects the buttons are disabled. [C. P. Potter]
+  {
+    const auto &jc0 = xplane_context::get();
+    const auto &q0  = simbrief_ofp::get();
+    const bool plan0 = q0.valid && !q0.destination_icao.empty();
+    if (jc0.on_ground)
+      ImGui::TextDisabled("JUMP (on the ground: PRE-DEP only):");
+    else if (!plan0)
+      ImGui::TextDisabled("JUMP (no flight plan: ENR/ARR/APP unavailable):");
+    else
+      ImGui::TextDisabled("JUMP (airborne):");
+  }
   ImGui::SameLine(0, 4);
   {
     using AS = atc_state_machine::ATCState;
@@ -2911,6 +2923,46 @@ static void draw_ifr_tab() {
       ImGui::OpenPopup("JumpSwitchFreq");
     };
 
+    // A JUMP THAT CANNOT WORK MUST LOOK LIKE IT CANNOT WORK.
+    //
+    // ENR / ARR / APP all rebuild the route from the flight plan and bind the
+    // destination from it -- training_jump_arrival and training_jump_approach
+    // log "no valid OFP loaded" and do half a job without one, leaving an ATC
+    // state with no route behind it. PRE-DEP is a clearance taken on the ground.
+    // Pressing them outside those conditions produced a silent half-transition
+    // the pilot then had to diagnose from Log.txt. Greyed instead, each with the
+    // reason under the cursor (user 2026-09-02). [C. P. Potter]
+    const auto &jctx = xplane_context::get();
+    const bool have_plan = q.valid && !q.destination_icao.empty();
+    const bool airborne  = !jctx.on_ground;
+    const char *why_air  = "Airborne only -- this is a phase of flight, and the "
+                           "jump moves the ATC state, not the aircraft.";
+    const char *why_plan = "No flight plan loaded. ENR / ARR / APP rebuild the "
+                           "route and bind the destination from it.";
+    // A disabled item is still hoverable with AllowWhenDisabled, which is the
+    // whole point: the tooltip is where the reason lives.
+    auto reason_tip = [](const char *why) {
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", why);
+    };
+    // BeginDisabled alone only fades the item to 60 % alpha, which on a small
+    // button in this theme is easy to miss entirely -- the user looked at the
+    // row and reported no button greyed at all. Dim the label and the button
+    // face explicitly so a dead jump reads as dead at a glance, not on close
+    // inspection. [C. P. Potter]
+    auto begin_dead = [](bool dead) {
+      ImGui::BeginDisabled(dead);
+      if (dead) {
+        ImGui::PushStyleColor(ImGuiCol_Text,   ImVec4(0.42f, 0.42f, 0.45f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.16f, 0.18f, 1.00f));
+      }
+    };
+    auto end_dead = [](bool dead) {
+      if (dead)
+        ImGui::PopStyleColor(2);
+      ImGui::EndDisabled();
+    };
+
     // Chronological flight order: PRE-DEP -> ENR -> ARR -> APP.
     const bool predep_active = (cur == AS::IFR_PREDEP_CLEARANCE ||
                                  cur == AS::IFR_CLEARED);
@@ -2919,10 +2971,15 @@ static void draw_ifr_tab() {
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.70f, 0.20f, 1.00f));
       ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.10f, 0.40f, 0.10f, 1.00f));
     }
+    begin_dead(!jctx.on_ground);
     if (ImGui::SmallButton("PRE-DEP")) {
       engine::training_jump_predep();
       after_jump("PRE-DEP");
     }
+    end_dead(!jctx.on_ground);
+    if (!jctx.on_ground)
+      reason_tip("On the ground only -- the pre-departure clearance is taken "
+                 "before start-up.");
     if (predep_active)
       ImGui::PopStyleColor(3);
 
@@ -2936,10 +2993,17 @@ static void draw_ifr_tab() {
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.70f, 0.20f, 1.00f));
       ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.10f, 0.40f, 0.10f, 1.00f));
     }
+    const bool dead_enr = (!have_plan || !airborne);
+    begin_dead(dead_enr);
     if (ImGui::SmallButton("ENR")) {
       engine::training_jump_enroute(enr_ft);
       after_jump("EN-ROUTE");
     }
+    end_dead(dead_enr);
+    if (!have_plan)
+      reason_tip(why_plan);
+    else if (!airborne)
+      reason_tip(why_air);
     if (enr_active)
       ImGui::PopStyleColor(3);
 
@@ -2952,10 +3016,17 @@ static void draw_ifr_tab() {
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.70f, 0.20f, 1.00f));
       ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.10f, 0.40f, 0.10f, 1.00f));
     }
+    const bool dead_arr = (!have_plan || !airborne);
+    begin_dead(dead_arr);
     if (ImGui::SmallButton("ARR")) {
       engine::training_jump_arrival();
       after_jump("ARRIVAL");
     }
+    end_dead(dead_arr);
+    if (!have_plan)
+      reason_tip(why_plan);
+    else if (!airborne)
+      reason_tip(why_air);
     if (arr_active)
       ImGui::PopStyleColor(3);
 
@@ -2969,10 +3040,17 @@ static void draw_ifr_tab() {
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.70f, 0.20f, 1.00f));
       ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.10f, 0.40f, 0.10f, 1.00f));
     }
+    const bool dead_app = (!have_plan || !airborne);
+    begin_dead(dead_app);
     if (ImGui::SmallButton("APP")) {
       engine::training_jump_approach();
       after_jump("APPROACH");
     }
+    end_dead(dead_app);
+    if (!have_plan)
+      reason_tip(why_plan);
+    else if (!airborne)
+      reason_tip(why_air);
     if (app_active)
       ImGui::PopStyleColor(3);
   }

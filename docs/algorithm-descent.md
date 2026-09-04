@@ -3,7 +3,7 @@
 Specification of the IFR arrival descent: which altitude ATC gives, and the moment
 it decides to give it.
 
-**Spec version:** 1.2 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta (`d7c3f64`, pkg 87)
+**Spec version:** 1.4 · **Dated:** 2026-08-29 · **Build:** v4.4.0-beta (pkg 133+)
 **Reference slope:** `kDescentSlopeFtPerNm = 265 ft/NM` = 2.5°
 
 All figures below are measured on the DIK → EDLW replay of the flown route, taken
@@ -39,12 +39,16 @@ mechanisms** that do not know about each other.
 
 ---
 
-## 2. Two mechanisms, two owners
+## 2. Three mechanisms, three owners
 
 | | question it answers | owner | how the level is chosen |
 |---|---|---|---|
 | **Descent negotiation** | when do we leave cruise? | en route (ACC) | `cruise × 0.66`, rounded |
 | **The ladder** | when must we be down for the approach? | terminal | walk the published constraints |
+| **Descend to enter** | how low must we be to be ALLOWED into the terminal area? | the sector handing over | highest whole thousand BELOW the TMA ceiling |
+
+Three, not two. The third was documented only as a footnote until pkg 107, and
+it is the one that failed on the flight of 2026-08-20 — see §2.3 and §8.
 
 ### 2.1 The descent negotiation
 
@@ -71,6 +75,47 @@ fires  = when the distance still to run drops inside the TOD
 ```
 
 Measured: `(28 000 − 3 000) ÷ 265 = 94.3 NM` + reaction = **102.3 NM**.
+
+### 2.3 Descend to enter the terminal area
+
+Neither of the two above asks the question that actually gates a terminal arrival:
+*is the aircraft low enough to be let into the TMA at all?* An openair terminal
+volume has a ceiling, and an aircraft above it is not in that controller's
+airspace. So the sector working the aircraft descends it to the highest whole
+thousand **below** that ceiling — `((ceiling − 100) ÷ 1000) × 1000`, so 9500
+gives 9000 and 7500 gives 7000 — **before** handing it over.
+
+Note the rounding runs the OTHER WAY from the ladder's TMA rung in §4, and
+deliberately: the rung rounds **up** to sit the aircraft just above the terminal
+area it is not yet cleared into, this one rounds **down** to put it inside. Same
+ceiling, opposite questions.
+
+```
+[dbg dte] tma_ceil=9500 target=9000 alt=15011 cleared=15000 floor=7000 last=0 -> FIRE
+IFR descent: descend-to-enter terminal area, TMA ceil 9500 -> flight level 90
+```
+
+The trigger is geometric, not a route point: either the enclosing volume already
+IS the destination's terminal controller, or the destination's terminal TMA has
+appeared **directly below** while the aircraft is still under an overlying ACC.
+Bounded at 100 NM from the field, because a terminal area is never a hundred
+miles from its own aerodrome.
+
+Three rules govern who may speak it (pkg 105–107):
+
+1. **One target per flight.** `s_descent_tma_target_ft` latches what was issued;
+   the same target is never repeated. This latch is the subject of §8.
+2. **It yields to a transfer owed in the same frame.** A level belongs to the
+   controller about to work the aircraft, not to the one leaving: entering the
+   TMA is simultaneously what justifies the descent and what makes the next
+   controller responsible. When the terminal handoff is due, the step-down is
+   held and re-run *after* the handoff block — in the same frame, so nothing is
+   lost if no handoff materialises (AFIS destinations with no approach
+   controller).
+3. **It never speaks across an unanswered handoff.** Between "contact X on
+   \<freq\>" and the pilot's check-in there is no controller in a position to
+   clear: the outgoing one has released the aircraft, the incoming one has not
+   heard it.
 
 ---
 
@@ -139,6 +184,16 @@ Three rules bound it:
    never introduce a terrain or airspace bust the target did not already carry.
 3. A level is never re-issued **above** one already given; a stale target is consumed
    silently instead.
+4. A level already **transmitted** is never transmitted again, across controller
+   changes included — an instruction stays in force through a transfer and the
+   receiving controller does not repeat it. The record is
+   `s_last_transmitted_alt_ft`, written where the words are emitted and cleared
+   only by a new flight. It deliberately holds what was **spoken**, not what the
+   profile has merely planned: two earlier attempts compared against the planned
+   level instead, which matched on every arrival and suppressed the descent
+   entirely — the replay then intercepted 3325 ft above the glide path.
+5. QNH is stated once per frequency (`s_qnh_stated_freq`), and only when the
+   level is given in feet — never with a flight level.
 
 ---
 
@@ -222,8 +277,114 @@ and approach fixes. Whether to model the two explicitly is undecided.
 
 ---
 
+## 8. How long the descent state lives
+
+Every mechanism above carries a latch — the target already issued, the level
+already transmitted, the rung already flown. All of them are **per flight**, and
+until pkg 107 "per flight" meant *per plugin load*: `engine::reset()` ran when
+X-Plane enabled the plugin, and never again.
+
+Restarting a flight, reloading a situation or jumping from the map does none of
+that. On 2026-08-20 the same LFML → LSGG arrival was flown three times inside one
+X-Plane session, and the state of the first attempt survived all three:
+
+```
+attempt 1   [dbg dte] tma_ceil=9500 target=9000 alt=15011 cleared=15000 last=0 -> FIRE
+            IFR descent: descend-to-enter terminal area, TMA ceil 9500 -> flight level 90
+attempt 3   [dbg dte] tma_ceil=19500 target=19000 alt=13116 cleared=10000 last=9000 -> hold
+```
+
+`last=9000` is the latch from attempt 1. `descend flight level 90` fired **once
+in the whole session**. The aircraft therefore held FL150 until the expedite net
+caught it, reached the vectoring point 6000 ft above its FAF, and the sequencing
+leg then ran 24.7 NM against a lateral requirement of 16.7 — the leg was long
+because the aircraft was high, not because the geometry asked for it. The same
+stale state had Geneva Approach speaking while the aircraft was back near
+Marseille, two hundred miles away and on another frequency.
+
+**Since pkg 107** a position discontinuity larger than
+`max(15 NM, groundspeed × dt × 3)` is read as a restart: `engine::reset()` clears
+all 145 engine variables and the state machine returns to `IDLE`.
+
+```
+IFR: position discontinuity 132 NM in 60.0 s at 280 kt (46.3125,6.4234 -> 44.4502,4.7794)
+     -- flight restart, resetting the ATC state
+```
+
+What survives on purpose is the **SimBrief OFP** — `reset()` does not touch it —
+which is what makes the wipe safe. Destination and STAR are rebuilt either by the
+descent clearance at the TOD, or by the defensive seed at the Approach check-in
+(`[approach] seeded dest ICAO from OFP`, STAR re-derived from the CIFP by entry
+fix then by runway).
+
+**Blind spot:** a restart that leaves the aircraft in place — same parking, or a
+jump under 15 NM — is invisible, and the old state persists exactly as before.
+
+Regression: `make test-restart`.
+
+---
+
+## 9. The descent sizes the vectored pattern
+
+Not a descent rule, but the coupling is where a defect hid twice. On a vectored
+arrival the outbound sequencing leg runs until there is room for **both** the
+intercept and the descent:
+
+```
+downwind length = max( lateral requirement , (altitude − FAF alt) ÷ 265 + 2 )
+```
+
+So an aircraft delivered high does not get a shorter pattern, it gets a longer
+one — the leg is flown to lose the altitude. Judging the vectoring geometry
+without reading the altitude at the vector point therefore measures the wrong
+thing. Details in `force-app-vectoring.md`.
+
+---
+
 *Specification in progress. This document covers the descent only; the vectoring
 manoeuvre is specified in `force-app-vectoring.md`.*
+
+---
+
+## 10. The climb is the same ladder, upside down
+
+Everything above sizes a descent. A climb was, until 2026-08-29, unrestricted:
+`poll_sid_climb` issued step1 and step2 out of the TMA and then cleared **cruise
+in one clearance**, however far away it was. On the LFMN -> LOWI flight of
+2026-08-28 that produced, at the pilot's first call to Milan at FL140:
+
+```
+Milan: November Romeo Charlie, radar contact, climb flight level 450.
+```
+
+31 000 ft in one transmission. The rule is now symmetric with the descent:
+
+| | descent | climb |
+|---|---|---|
+| cap on one clearance | `kMaxSingleDescentFt` = 10 000 ft | `kMaxSingleClimbFt` = 10 000 ft |
+| remainder held in | `s_descent_final_target_ft` | `s_climb_final_target_ft` |
+| who owes the rest | `poll_descent_second_step` (one extra step) | `poll_climb_next_step` (loops to cruise) |
+
+`climb_step_ft(now, final)` returns the level to clear now — a whole flight
+level, never an odd altitude — and the caller stashes the remainder. Three
+emitters share it: the FIR handoff that queues a climb for the pilot's check-in,
+the combined cruise+TMA-exit clearance, and the in-block cruise fallback. So a
+FL450 departure now reads FL110, FL140, FL260, FL360, FL450.
+
+**Who speaks the next rung.** Whoever has the aircraft when it levels off. While
+a handoff is in flight (`s_sector_checkin_pending`) the ladder stays silent: the
+rung is the first thing the new sector clears once the pilot checks in, which is
+how it sounds on frequency. The rung is deliberately *not* queued into
+`s_sid_pending_climb_ft` — `poll_sid_climb` wipes that field on every frame the
+state is not `IFR_RADAR_CONTACT`, so a queued rung outside the SID phase would be
+erased and the aircraft would sit at an intermediate level for ever. A 180 s
+grace guards the same failure from the other side: if no check-in ever comes, the
+sector that still has the aircraft clears the rung itself.
+
+The ladder is abandoned the moment the state leaves `IFR_RADAR_CONTACT` /
+`IFR_ENROUTE_CRUISE` — from there the descent owns the profile.
+
+`make test-climb`.
 
 ---
 
@@ -233,4 +394,6 @@ manoeuvre is specified in `force-app-vectoring.md`.*
 |---|---|---|---|
 | 1.0 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | first issue: profile view, the two mechanisms, target and rung selection, steep wording, log format |
 | 1.1 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | corrected the TMA rung at EDLW — it is absent because `terminal_tma` returns 0, not because the ceiling is low |
+| 1.3 | 2026-08-21 | v4.4.0-beta (pkg 107) | **descend-to-enter-TMA promoted to a third mechanism** with its own section: the ceiling-below trigger, the one-target latch, and the two rules added in pkg 105–107 (it yields to a transfer owed in the same frame, and never speaks across an unanswered handoff). New §8 **how long the descent state lives** -- the latch used to survive a flight restart inside one X-Plane session, which is what held an LSGG arrival at FL150 and made its sequencing leg run 24.7 NM; restart detection since pkg 107, with its blind spot recorded. New §9 on the descent sizing the vectored pattern. Level rules 4 and 5 written down: never re-transmit a level in force (transmitted, not planned), QNH once per frequency |
+| 1.4 | 2026-08-29 | v4.4.0-beta (pkg 133+) | new §10 **the climb is the same ladder, upside down**: `kMaxSingleClimbFt`, `climb_step_ft`, `poll_climb_next_step`, and the two rules that keep a rung from being lost across a handoff (silence during the transfer, 180 s grace if the check-in never comes) |
 | 1.2 | 2026-08-17 | v4.4.0-beta (`d7c3f64`, pkg 87) | D2 measured on a real flight — routed overstates by 17.1 NM before the vectors and collapses to the straight line once on downwind, so the error has two signs; all three distances now logged at every clearance. New D4: the vectored descent held one level to the FAF (1460 ft high at 1.6 NM), now derived from the glide path and stepped |

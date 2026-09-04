@@ -37,6 +37,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <sstream>
@@ -188,6 +189,15 @@ void run_polls(float dt) {
   // PARKED forever, and every poll that opens with a PARKED/TAXI guard -- most
   // importantly poll_sid_climb -- returned false before doing anything, so the whole
   // SID climb ladder was structurally untestable headless. [C. P. Potter]
+  // Same restart/teleport detection the plugin runs -- but OPT-IN here, because
+  // a stepped replay is by construction a sequence of teleports: the tracker
+  // suites walk the aircraft from fix to fix with `goto`, and detection resets
+  // the engine under them (the STAR tracker went backward 2 -> 0 and the AFIS
+  // scenario lost its approach). In the simulator the position moves
+  // continuously and no such step exists. ATC_DETECT_RESTART=1 turns it on for
+  // the regression that tests the mechanism itself. [C. P. Potter]
+  if (std::getenv("ATC_DETECT_RESTART"))
+    engine::note_frame(ctx, dt);
   flight_phase::update(ctx, dt);
   if (engine::poll_departure_handoff(ctx, dt, &out)) { emit("dep", out); out.clear(); }
   if (engine::poll_sid_climb(ctx, dt, &out))         { emit("sid", out); out.clear(); }
@@ -199,6 +209,7 @@ void run_polls(float dt) {
   if (engine::poll_vector_to_final(ctx, dt, &out, &rb)) { emit("vector", out); out.clear(); }
   if (engine::poll_approach(ctx, dt, &out))          { emit("approach", out); out.clear(); }
   if (engine::poll_approach_alignment(ctx, dt, &out)){ emit("align", out); out.clear(); }
+  if (engine::poll_lineup_ready_prompt(ctx, dt, &out)) { emit("lineup", out); out.clear(); }
   if (engine::poll_readback_reminder(ctx, g_now_secs, &out)) { emit("readback", out); out.clear(); }
   if (engine::poll_go_around(ctx, g_now_secs, &out)) { emit("go_around", out); out.clear(); }
   log_state();
@@ -376,6 +387,11 @@ void cmd_set(std::string &callsign, const std::string &rest) {
                      ctx.ifr_sid_floor_waypoint.c_str(),
                      ctx.ifr_sid_last_fix.c_str());
       }
+    } else if (field == "ifr_departure") {
+      // The departure field LATCHED on the ground. In the plugin the runtime
+      // sets it; here it is set by hand so a test can drift "airport" to a
+      // field being overflown and prove the SID climb ignores the drift.
+      ctx.ifr_departure_icao = value;
     } else if (field == "ifr_sid_last_fix") {
       ctx.ifr_sid_last_fix = value;
     } else {
@@ -560,6 +576,20 @@ void cmd_enc() {
 // descent three times over one arrival. The engine was right; the harness was
 // flying a teleporting aircraft. [C. P. Potter]
 static float s_prev_track_alt_ft = -1e9f;
+
+// Advance the sim clock WITHOUT running the polls: the aircraft keeps flying
+// while the plugin is not sampling. Reproduces the gap that a stuck session
+// leaves in note_frame's own sampling, which once made a normal cruise leg read
+// as a teleport and wiped the whole IFR state. [C. P. Potter]
+void cmd_warp(const std::string &rest) {
+  double secs = 0.0;
+  try { secs = std::stod(rest); } catch (...) {
+    std::fprintf(stderr, "Usage: warp <seconds>\n"); return;
+  }
+  g_now_secs += secs;
+  xplane_context::g_cli_ctx.now_secs = g_now_secs;
+  std::printf("[t=%.0fs] warped %.0f s with the polls asleep\n", g_now_secs, secs);
+}
 
 void cmd_track(const std::string &rest) {
   std::istringstream iss(rest);
@@ -785,6 +815,8 @@ int run(xplane_context::XPlaneContext ctx, std::string callsign) {
       cmd_jump(rest);
     else if (cmd == "enc")
       cmd_enc();
+    else if (cmd == "warp")
+      cmd_warp(rest);
     else if (cmd == "track")
       cmd_track(rest);
     else if (cmd == "arrival") {
@@ -892,6 +924,18 @@ int run(xplane_context::XPlaneContext ctx, std::string callsign) {
     }
     else if (cmd == "state")
       cmd_state(callsign);
+    else if (cmd == "tod") {
+      // Distance and time to top of descent, exactly as the IFR tab shows them.
+      // Unreadable from outside the plugin until now, which is why a JUMP could
+      // leave both meaningless without anything noticing (user, 2026-08-21).
+      float nm = 0.0f, min = 0.0f;
+      const auto &c = xplane_context::get();
+      if (engine::tod_to_go(c.groundspeed_kts, &nm, &min))
+        std::printf("TOD: %.1f NM, %.1f min (gs %.0f kt)\n", nm, min,
+                    static_cast<double>(c.groundspeed_kts));
+      else
+        std::printf("TOD: n/a\n");
+    }
     else if (cmd == "reset")
       cmd_reset();
     else if (cmd == "help")

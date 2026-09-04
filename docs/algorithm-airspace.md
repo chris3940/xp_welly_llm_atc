@@ -4,7 +4,7 @@ Specification of the airspace layer: how the plugin decides what a volume **is**
 which one it considers the aircraft to be **in**, and how it distinguishes a
 terminal area it is merely **transiting** from the destination's **own**.
 
-**Spec version:** 1.10 · **Dated:** 2026-08-17 · **Build:** v4.4.0-beta-85 (`a6bb13b`)
+**Spec version:** 1.12 · **Dated:** 2026-08-21 · **Build:** v4.4.0-beta (pkg 107)
 **Sources:** `Custom Data/airspaces/airspace.txt` (OpenAir) — authoritative;
 `Custom Data/Earth nav data/atc.dat` — fallback and controller names.
 Measured against AIRAC 2606 r1.
@@ -39,7 +39,7 @@ on this export it is overwhelmingly the letter.
 | `CTR` `TMA` `CTA` `FIR` `UIR` | itself | yes |
 | `A` `B` `C` `D` | **CTA** (the en-route default) | yes |
 | `E` `F` `G` | — | **no** |
-| `P` `Q` `R` and the rest | OTHER | no |
+| `P` `Q` `R` `W` and the rest | OTHER | no |
 
 Classes A–D are controlled and carry a clearance obligation. E, F and G are not
 indexed. **On this export the point is moot: it contains no E, F or G at all** —
@@ -56,6 +56,26 @@ AN BRAVO TMA            → TMA (name wins)
 ```
 
 When the class came from a **type token**, the name cannot override it.
+
+**There is a fourth branch, and it is not a type word.** Cross-border delegation
+overlays are named by their delegation marker, not by a type, and are usually
+exported as a bare ICAO class letter:
+
+```
+AC C
+AN DELEGATED BY LIMM TO LJLA FIR/UIR    → CTA
+```
+
+`DELEGATED`, `SKYGUIDE` and `MUAC` all classify as **CTA**, so `find_enclosing`
+returns the overlay and the sector resolver routes it to the delegated ACC. This
+is the mechanism behind the hand-written `airspace+.txt` overlays — it is how the
+Slovenia upper-airspace gap and the LFFF → LSAS delegation were closed.
+
+The branch order matters and is pinned in the source with a `NOLINT`: the **FIR**
+test runs before the delegation test, because the example above carries *both* a
+delegation marker and the word `FIR`, and must be classified by the type word.
+Merging the two branches — which a lint rule would happily suggest, since both
+assign CTA — would silently reclassify every such overlay.
 
 This ordering matters and was got wrong once: an earlier revision let the name
 refine the class *only* when the first pass produced OTHER, so every
@@ -76,10 +96,20 @@ letter alone never produces one.
 2. among the survivors, keep the **smallest bounding box** — the innermost.
 
 Innermost, not lowest and not highest: a terminal sector nested inside an ACC
-block must win over the block. When OpenAir answers nothing, the same query is
-retried against `atc.dat`, mapping its roles (`TWR`→CTR, `TRACON`→TMA,
-`CTR`→CTA) and taking the shelf that actually contains the point. OpenAir stays
-authoritative wherever it answers.
+block must win over the block. When OpenAir answers nothing — **or has not
+finished loading** — the same query is retried against `atc.dat`, mapping its
+roles (`TWR`→CTR, `TRACON`→TMA, `CTR`→CTA) and taking the shelf that actually
+contains the point. OpenAir stays authoritative wherever it answers.
+
+Two details that the callers depend on:
+
+* **a ceiling of 0 means unbounded.** The altitude test is
+  `ceiling > 0 && alt > ceiling`, so a volume exported without a top contains
+  everything above its floor. A caller that reads a returned ceiling as a real
+  altitude must check for zero first.
+* **`find_all_enclosing()` is the sibling that returns them all**, in no
+  particular order, for the callers that need the whole vertical stack over a
+  point rather than the innermost slice of it.
 
 ---
 
@@ -107,6 +137,36 @@ deliberately, so a field with no nested terminal areas is never blocked. That
 permissive default is safe for its original caller (may the approach clearance be
 issued?) and dangerous for any caller that reads it as "suppress" — a distinction
 that has bitten once already.
+
+### 4.1 Entering the TMA is ONE event with TWO consequences
+
+Crossing into the destination's terminal volume is simultaneously:
+
+* what justifies the **descent** that gets the aircraft in (`algorithm-descent.md`
+  §2.3), and
+* what makes the **terminal controller** responsible for it.
+
+Both are read from the same geometry, by two polls that did not know about each
+other, and the descent poll ran first. On the flight of 2026-08-19 that produced,
+seven seconds apart:
+
+```
+Marseille: November Romeo Charlie, descend flight level 90.
+Marseille: November Romeo Charlie, contact Geneva Approach on 119.530.
+```
+
+The aircraft had just descended into `GENEVA TMA SECTOR 10` (11500–15500). The
+level plainly belonged to Geneva.
+
+**Rule (pkg 105): the transfer wins.** When the destination's terminal handoff is
+owed in the same frame — the aircraft is inside the terminal volume and the
+handoff has not been spoken — the step-down is held and re-run after the handoff
+block, in the same frame. Nothing can be lost: a destination with no approach
+controller never produces a handoff, and the deferred step-down still fires.
+
+The predicate deliberately requires being **inside** the volume, so the opposite
+ordering survives untouched: above the ceiling (FL120 over a FL115 TMA) the
+step-down still goes first, and it is what puts the aircraft inside.
 
 ---
 
@@ -375,8 +435,10 @@ terminal shelf from the SHAPE of the vertical stack instead of from names:
 3. the shelf is the lowest-floor non-CTR volume sitting on the CTR
    (`floor <= ctr_ceiling + 500`) and reaching above it.
 
-One guard, `ceiling <= 30 000 ft` — above FL300 it is an ACC sector, not a
-terminal area. It was **measured, not assumed**, over the 1355 points where a
+Named in the source: the base tolerance is `kStackGapToleranceFt = 500`, the
+guard is `kMaxTerminalCeilingFt = 30000` (both in `openair_db.hpp`), and ties on
+the floor break to the **higher ceiling**. One guard, `ceiling <= 30 000 ft` —
+above FL300 it is an ACC sector, not a terminal area. It was **measured, not assumed**, over the 1355 points where a
 named TMA exists so the right answer is known (Europe):
 
 | guards | exact | other | none |
@@ -444,6 +506,27 @@ percentage does not certify a field.
 which is empty during climb, so an ED** departure keeps the name-based
 behaviour.
 
+### A name collision worth knowing about
+
+`engine.cpp` declares its **own** `kMaxTerminalCeilingFt`, locally, at **25 000
+ft**, alongside a `kMaxTerminalThicknessFt = 15 000`. It belongs to a different
+mechanism — the transfer-floor plausibility clamp, which decides whether a volume
+below the aircraft is a terminal area owing a transfer or enroute structure owing
+none (it exists because EDLW's generic 10 000–66 000 ft slab produced "below
+inner-TMA transfer floor 66000 ft" and suppressed every descent, seen in a real
+flight, Log 19).
+
+Two constants, one name, two values, two files. Nothing is wrong today — they are
+in different translation units and answer different questions — but a reader who
+greps the name gets one of the two at random, and a "harmonisation" that made
+them agree would break one of the two mechanisms.
+
+Note also the tension with the table above: the measurement rejected a
+**thickness** cap for the stack walk (it throws out `LONDON TMA`, 4500–19500),
+while the transfer-floor clamp uses one at 15 000 ft. Both can be right — they
+are asked over different volumes — but if the clamp ever misfires, that number is
+the first place to look. See `docs/candidates/transfer-floor-plausibility.md`.
+
 ---
 
 ## 11. Known defects
@@ -472,6 +555,30 @@ in `algorithm-descent.md`; open questions are tracked in `open-questions.md`.*
 
 ---
 
+## How long the sector state lives
+
+The boundary logic is stateful: `s_acc_sector_freq_khz` is the sector currently
+working the aircraft, `s_acc_visited_sector_freqs` the ones already left (which is
+what stops a handoff flickering back at a boundary), and
+`s_enroute_approach_handoff_issued` latches the commitment to the approach
+controller.
+
+All are per flight — and until pkg 107 "per flight" meant *per plugin load*. A
+flight restarted inside the same X-Plane session kept the whole set, so on
+2026-08-20 the pilot heard:
+
+```
+[31:43 119.755] Geneva Approach: November Romeo Charlie, confirm descending flight level 90.
+                @(44.4502,4.7794 alt=17947ft)
+```
+
+— Geneva Approach, on Marseille's frequency, two hundred miles from Geneva, for a
+level cleared in a previous attempt. Since pkg 107 a position discontinuity
+resets the lot; see `algorithm-descent.md` §8 for the mechanism and its blind
+spot.
+
+---
+
 ## Revision history
 
 Every specification document carries a **version**, a **date** and the **build** it
@@ -487,6 +594,8 @@ the code looked like at the time.
 | 1.4 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | exact STAR designators recovered from the flight logs: `ROMA3P`, `SALE3P`, `ABDI8R`, and `ADEM3A` for the failing case, each with its entry fix and spoken form |
 | 1.5 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | measured the naming across Germany — 0 of 170 volumes carry `TMA` or `CTA`, 149 carry no type word at all. The defect is national, not per-airport; other countries remain unmeasured |
 | 1.6 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | section 8.1 — the other eight countries measured. Germany is the sole outlier at 17 % typed against 92–100 % elsewhere; corrects 1.5's "0 of 170" (`FRIEDRICHSHAFEN TMA` exists); new defect A4 (`UTMA` unrecognised, Poland); records the three measurement traps — border contamination, unfiltered classes, and English city spellings in the export |
+| 1.12 | 2026-08-21 | v4.4.0-beta (pkg 107) | **specification confronted with the code, §1-3 and §11bis.** Pass 2 was missing an entire branch: the `DELEGATED` / `SKYGUIDE` / `MUAC` names classify as CTA, which is the mechanism behind the hand-written `airspace+.txt` overlays (Slovenia, LFFF -> LSAS), and the FIR test must run before it -- documented with the reason the branches cannot be merged. §3 gains the two details callers depend on: a ceiling of 0 means unbounded, and `find_all_enclosing()` returns the whole stack. §11bis now names its constants (`kStackGapToleranceFt` 500, `kMaxTerminalCeilingFt` 30000) and records the collision with `engine.cpp`'s own local `kMaxTerminalCeilingFt` at 25000, which belongs to the transfer-floor clamp. Pass 1 table completed with class `W`. Everything else in these sections verified conforming |
+| 1.11 | 2026-08-21 | v4.4.0-beta (pkg 107) | new **§4.1 entering the TMA is one event with two consequences**: the same boundary crossing justifies the descent AND transfers control, and the transfer wins -- the step-down is held and re-run after the handoff block in the same frame (pkg 105), keyed on being INSIDE the volume so the above-the-ceiling ordering is unchanged. New **how long the sector state lives**: the sector baseline, the visited-sector list and the approach-handoff latch survived a flight restart inside one X-Plane session until pkg 107, which is how Geneva Approach came to speak on Marseille's frequency two hundred miles away |
 | 1.10 | 2026-08-17 | v4.4.0-beta (`d7c3f64`, pkg 87) | **the FAF anchor is withdrawn from the two COMPARISON sites.** `on_destination_terminal()` and `dest_terminal_tma_below()` compare a destination probe against one under the aircraft; moving only one breaks the comparison by construction. It read `DUESSELDORF/COLOGNE-BONN` at the FAF against `DORTMUND` under an aircraft on final, returned false, and no approach clearance was issued on the whole EDLW arrival of 2026-08-17. The anchor stays where a terminal CEILING is read — the descend-via level and the descent ladder's rung |
 | 1.9 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | the destination terminal query anchors on the FAF where the walk is enabled (`9d75c6a`). Corrects 1.8, which reported `DORTMUND 2000-4500` as the EDLW result: that volume overlaps the control zone and tops 5500 ft below the real terminal area. Over the FAF the answer is `DUESSELDORF/COLOGNE-BONN` 1500-10000, class C to FL100. Resolves cause 1 of Q3 |
 | 1.8 | 2026-08-17 | v4.4.0-beta-85 (`a6bb13b`) | section 11bis — the terminal stack walk, shipped (`eee4c8b`). Guard thresholds measured rather than assumed; the intuitive thickness and extent caps degrade the result and were dropped. Off by default and gated per destination on an ICAO-prefix allowlist. Records LIMF Turin as a second failing field inside a 99 %-typed country — found only because arrivals were probed, never flown |

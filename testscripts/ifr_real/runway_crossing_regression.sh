@@ -89,7 +89,7 @@ set airport LFMN
 set runway 04R
 set on_ground 1
 set gs 0
-set heading 135
+set heading 156
 set lat $1
 set lon $2
 set com 121.700
@@ -114,7 +114,7 @@ set airport LFMN
 set runway 04R
 set on_ground 1
 set gs 0
-set heading 135
+set heading 156
 set lat $1
 set lon $2
 set com 121.700
@@ -130,9 +130,109 @@ SCRIPT
 # The taxi clearance must STOP at the runway. This needs the full pre-departure
 # sequence: a taxi request before the IFR clearance is refused outright, which is
 # what made this look like a code gap the first time round.
+# The clearance now stops at the runway by NAMING ITS HOLDING POINT rather than
+# by naming the departure runway's and adding a reminder. Cleared to the holding
+# point of 04L, the aircraft holds there by definition -- and, crucially, no
+# point on the far side is named. Naming one read as permission to cross (user,
+# real flight LFMN 2026-08-26).
 echo "--- Ground: the taxi clearance stops at the runway ---"
 run "$(ground_full 43.661325 7.213975)"
-want "the taxi clearance names the runway to hold short of" "hold short of runway 04L"
+# Scoped to the taxi line: "runway 04R" appears legitimately elsewhere in the
+# session (the IFR clearance names the departure runway).
+TAXI="$(grep -i 'taxi to' <<<"$OUT" | head -1)"
+if grep -qi "runway 04L" <<<"$TAXI"; then
+  echo "  PASS  the taxi clearance is limited to the runway in the way"
+else
+  echo "  FAIL  the taxi clearance is limited to the runway in the way"
+  echo "        got: $TAXI"; FAILED=1
+fi
+# And no holding-point NAME either: the table keeps one point per runway, chosen
+# by proximity to the threshold, which is not the one the aircraft taxis to --
+# "holding point Alpha Two" for an aircraft arriving at Alpha One (2026-08-27).
+if grep -qiE "holding point (alpha|bravo|charlie|delta|echo|whiskey|golf|kilo|november|papa|sierra|tango|victor|zulu)" <<<"$TAXI"; then
+  echo "  FAIL  and names no holding point it cannot determine"
+  echo "        got: $TAXI"; FAILED=1
+else
+  echo "  PASS  and names no holding point it cannot determine"
+fi
+if grep -qi "04R" <<<"$TAXI"; then
+  echo "  FAIL  and never names a holding point beyond it"
+  echo "        got: $TAXI"; FAILED=1
+else
+  echo "  PASS  and never names a holding point beyond it"
+fi
+
+# The Tower must clear the crossing before it can order a line-up on the far
+# runway. At Nice the aircraft reported "holding point Alpha One, runway 04L" and
+# was answered "runway 04R, line up and wait" -- impossible to comply with
+# without crossing 04L (real flight 2026-08-26).
+echo "--- Tower: the hold-short report earns a crossing clearance ---"
+run "$(cat <<SCRIPT
+clear_runways
+add_runway 04R 43.64673731 7.20249753 22L 43.66561481 7.22846925
+add_runway 04L 43.65180616 7.20403478 22R 43.66855734 7.22708757
+set airport LFMN
+set on_ground 1
+set gs 0
+set runway 04R
+set lat 43.6676
+set lon 7.2214
+set heading 315
+set com 121.700
+set freq_type GROUND
+set state IFR_CLEARED
+say November Romeo Charlie ready to taxi
+set lat 43.6527
+set lon 7.2032
+set heading 156
+set com 118.700
+set freq_type TOWER
+set state TOWER_CONTACT
+say November Romeo Charlie holding point alpha one
+SCRIPT
+)"
+want   "the crossing is cleared"                 "cross runway 04L"
+reject "and no line-up is given across a runway" "line up and wait"
+
+# The clearance asks for a report, so the flow must be able to receive it -- even
+# once the aircraft has rolled and the geometry no longer finds the runway. It
+# could not: readback and vacated report both drew "say again your request",
+# three times, with the aircraft stopped on a runway it had been cleared across
+# (real flight LFMN 2026-08-27).
+echo "--- Tower: the crossing readback and the vacated report are received ---"
+run "$(cat <<SCRIPT
+clear_runways
+add_runway 04R 43.64673731 7.20249753 22L 43.66561481 7.22846925
+add_runway 04L 43.65180616 7.20403478 22R 43.66855734 7.22708757
+set airport LFMN
+set on_ground 1
+set gs 0
+set runway 04R
+set lat 43.6676
+set lon 7.2214
+set heading 315
+set com 121.700
+set freq_type GROUND
+set state IFR_CLEARED
+say November Romeo Charlie ready to taxi
+set lat 43.6527
+set lon 7.2032
+set heading 156
+set com 118.700
+set freq_type TOWER
+set state TOWER_CONTACT
+say November Romeo Charlie holding point alpha one
+set lat 43.6516
+set lon 7.2047
+set heading 136
+set gs 8
+say November Romeo Charlie cross runway zero four left report vacated
+say November Romeo Charlie runway zero four left vacated
+SCRIPT
+)"
+reject "no say-again on the crossing exchange" "say again your request"
+want   "the vacated report sends him to the departure holding point" \
+       "continue to holding point.*runway 04R"
 
 echo "--- Ground: the hold-short report is answered with the runway named ---"
 run "$(ground 43.661325 7.213975 TAXI_CLEARED "November Romeo Charlie holding point alpha one")"

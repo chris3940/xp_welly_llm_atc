@@ -1,0 +1,19 @@
+{
+  "_comment": "RTT1B arrival into LOWI runway 08 (RNAV Z 08). Chosen because it drives the OTHER vectoring mechanism: the STAR ends at ELMEM, west of the field, and the approach transition turns straight back east to the IAF WI749 -- a ~180 degree reversal, which is what poll_vector_to_intercept exists for. The pattern mechanism (poll_vector_to_final) must stay OUT of it. Arrival from the east via NANIT and RTT, so the aircraft flies past Innsbruck westbound and comes back on the approach. [C. P. Potter]",
+  "dest": "LOWI",
+  "runway": "08",
+  "_comment_field": "LOWI aerodrome reference point",
+  "field": [47.2602, 11.3439],
+  "field_elev_ft": 1907,
+  "tower_freq": "120.100",
+  "cruise_ft": 24000,
+  "start_ft": 24000,
+  "com": "128.975",
+  "gs_kt": 280,
+  "navlog": [
+    ["OSPEN", 47.6000, 13.6000, 24000, "CRZ", 0],
+    ["NANIT", 47.393019, 12.346436, 24000, "DSC", 0],
+    ["RTT",   47.430922, 11.940053, 13000, "DSC", 1]
+  ],
+  "path": [[47.6000, 13.6000], [47.393019, 12.346436], [47.430922, 11.940053]]
+}

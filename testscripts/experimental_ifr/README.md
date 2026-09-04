@@ -15,15 +15,28 @@ make test-scenarios-ifr
 
 ## Known root causes (open — to be fixed by the IFR feature author)
 
-- `ifr_lflp_departure_sim.json` — at an airport with **no active ATIS**
-  (`no_atis: true`), the Tower should issue the IFR clearance directly. The
-  redirect guard in `ground_operations.cpp::check_freq_precondition()`
-  (the `REQUEST_IFR_CLEARANCE` block) instead always redirects Tower →
-  Ground/Delivery, so the flow never reaches `IFR/PREDEP_CLEARANCE`. The guard
-  needs an ATIS-inactive / Tower-direct exception.
+- ~~`ifr_lflp_departure_sim.json` — the Tower should issue the IFR clearance
+  directly when there is no active ATIS; the redirect guard sends it to Ground
+  instead.~~ **WRONG PREMISE, and fixed 2026-08-10. This scenario PASSES (20/20).**
+  Annecy HAS a Ground frequency -- `1053 121730 ANNECY GND` in the local
+  apt.dat, a recent real-world addition (user). With no Delivery and no ATIS the
+  IFR clearance belongs to GROUND, so the redirect guard in
+  `ground_operations.cpp::check_freq_precondition()` was right all along and the
+  scenario, which opened on Tower, was wrong. It now opens on Ground.
 - `ifr_lszh_departure_eu.json`, `ifr_lszh_departure_sim.json` — ATIS-active
   path; separate root cause(s) in the Delivery-based clearance flow, not yet
-  isolated.
+  isolated. **Still failing (10/22 and 10/24), unchanged since `1cba128`.**
+- `ifr_lfmn_arrival_nostar.json` — one assertion of six. Not in the original
+  quarantine list; verify whether it ever passed.
+
+## Status, measured 2026-08-22
+
+`make test-scenarios-ifr` -> 7 scenarios, **4 pass, 3 fail**. The three failures
+are identical in count to the same run on commit `1cba128`, so nothing in the
+vectoring / restart / CIFP-floor work of 2026-08-20..22 touched them.
+
+Read this list against the code before trusting it: two of its four original
+claims were already stale when checked.
 
 ## Scope note
 

@@ -1,6 +1,6 @@
 # FORCE APP VECTORING — specification
 
-**Spec version:** 2.2 · **Dated:** 2026-08-18 · **Build:** v4.4.0-beta (`7d7dfe6`)
+**Spec version:** 2.8 · **Dated:** 2026-08-21 · **Build:** v4.4.0-beta (pkg 108)
 
 Status: **implemented and flown twice, neither flight completing the arrival.**
 The manoeuvre itself works — build 85 flew it to the localiser — but the
@@ -360,16 +360,35 @@ procedure — an explicit refusal, never a degraded vector.
 
 ```
 A  downwind   "turn left heading 210, descend 5000 feet QNH 1013,
-               vectoring for ILS approach runway 06"
-B  base       "turn left heading 120, reduce speed 180 knots"
-C  intercept  "turn left heading 090"                      <- 30 deg max
-D  axis       "turn left heading 060, descend 2500 feet,
-               cleared ILS approach runway 06, report established"
-                                                           <- THE AXIS COURSE
+               vectoring for sequencing"
+B  base       "turn left heading 120, reduce speed 180 knots"   <- 90 deg to the axis
+C  intercept  "turn left heading 090"                           <- 30 deg max
+D  axis       (SILENT -- the aircraft has the track and joins it itself)
 ```
 
-Then `contact Tower on <freq>` on "established". If abandoned:
-`resume own navigation direct <fix>`.
+Leg C carries the whole ICAO 6.7.3.2.7 package, because it IS the last vector:
+position relative to a fix on the final approach track, the level to be
+maintained until established, and the approach clearance —
+
+```
+"turn left heading 253, 18 miles from GG808, descend 4000 feet,
+ QNH 1024 until established, cleared ILS approach runway 22"
+```
+
+**Leg D transmits nothing.** Vectoring terminates when the aircraft leaves the
+last assigned heading to intercept (8.9.4.1), so there is no routine vector onto
+the course — assigning it was ATC doing the pilot's job. A further heading exists
+only as a *correction*, when the aircraft is off the axis and diverging ("you
+have passed through the localiser"). `report established` is gone for the same
+kind of reason: 12.4.2.2 brackets it onto another instruction, and the Tower
+handoff a few miles later asks for it anyway.
+
+Then `contact Tower on <freq>` on "established". If abandoned, the published
+procedure is handed back at its ENTRY — `cleared direct <IAF>, cleared <approach>`
+— never `resume own navigation direct <FAF>`: the approach-instruction set
+(12.3.3.2) contains no such phrase, and sending an unaligned aircraft straight at
+the FAF is the one thing this manoeuvre exists to avoid.
+
 
 Turn side: whichever avoids crossing the final course — the aircraft always
 joins from the outside.
@@ -822,6 +841,9 @@ Flown twice on LFLP → EDLW. **Neither flight completed the arrival.**
 
 | version | date | build | change |
 |---|---|---|---|
+| 2.8 | 2026-08-21 | v4.4.0-beta (pkg 108) | **the release gate had a dead zone and it cost a flight.** 2.7 tightened the release to "within 4 NM, astern, or tracker STRICTLY past" but left the wait on "tracker index below the fix"; the route tracker declares a fix reached about ten miles early, so with the tracker exactly ON the index and the aircraft 9.6 NM out the code neither waited nor armed -- it fell through to the geometric arming, which refused for lack of room, and that refusal LATCHES. No vectoring at all on the LSGG arrival of 2026-08-21. Waiting and releasing are now the same test negated, and **with a position for the fix the tracker is not consulted at all** (the two geometric tests -- within the lead, or astern -- are complete). Release now measured at 2.0 NM in replay against 10.0 before. The harness printed that 10.0 NM for days: the acceptance now surfaces the release distance and any refusal, **and exits non-zero**, so a replay fails instead of reporting |
+| 2.7 | 2026-08-21 | v4.4.0-beta (pkg 107) | **the base leg exists again.** VecLeg::Base was specified from version 1.x and written in the engine, and nothing ever assigned it -- every vectored arrival flew ONE ~200 degree reversal from the outbound leg straight onto the intercept. The pattern is now downwind, base at 90 degrees to the axis, intercept at 30. Leg C carries the 6.7.3.2.7 package (without it the aircraft was turned and descended but never cleared). **Specification confronted with the code**: leg D was still described as a spoken vector with "report established" weeks after the capture went silent, and the abandon line still said "resume own navigation direct <fix>" after 2.2 had replaced it with a rejoin at the IAF -- both corrected here. Also: the sequencing vector releases within 4 NM of the prescribed fix instead of on the route tracker's index (it fired 9.9 NM early), and "expect vectors" is no longer promised to an aircraft already being vectored |
+| 2.6 | 2026-08-20 | v4.4.0-beta (pkg 105) | **CONTINUE HEADING** (Doc 4444 12.4.2.2) when the vector is within 5 deg of the heading flown -- "turn right heading 043" to an aircraft already on 043 is not a turn. **Position information on the FIRST vector** ("position 32 miles from GG808"), the moment the aircraft leaves the published procedure; the figure is the TRACK distance the plan will fly, not the straight line. **The reason, not the approach**: a procedure vector that overrides a STAR turn is `vectoring for sequencing`. **Sequencing leg shortened** -- sized at 40 deg (kVecDownwindInterceptDeg) instead of the nominal 30, inside the 45 deg maximum of 8.9.3.6: the LSGG outbound turned 3 NM earlier and the clearance came 2 NM closer to the FAF. **A level is no longer squeezed in ahead of a transfer**: the step-down into the destination TMA yields to the terminal handoff owed in the same frame, and never speaks across an unanswered one. **ATC_SEED** makes a replay reproducible -- the wall-clock reseed in `poll_hold` was flipping the STAR-shortcut draw and made two runs of one binary land differently |
 | 2.5 | 2026-08-19 | v4.4.0-beta | **never re-issue an instruction already in force** (level, speed, heading), across controllers too -- `s_last_transmitted_alt_ft` written where the words are emitted, cleared only by a new flight. Intercept clearance shortened: `report established` dropped (12.4.2.2 brackets it, the Tower handoff asks for it a few miles later, and it repeated "on the localiser" twice) |
 | 2.4 | 2026-08-18 | v4.4.0-beta (pkg 96) | **speed release** past the FAF (4.6.1.2 / 4.6.1.7 / 4.6.3.7, phraseology RESUME NORMAL SPEED) and the readback challenge no longer restates an assigned speed as a maximum. **R1 tolerance**: the closure projection is judged against `kVecAlignNm - 1.5`, not the target itself -- R1 fired seven times on the flown arrival while the aircraft closed steadily, and its last correction steepened an aircraft already committed to the capture. Records the REVERTED attempt to suppress a redundant leg level |
 | 2.3 | 2026-08-18 | v4.4.0-beta (pkg 89) | **the clearance package (6.7.3.2.7)**: the intercept vector becomes a plain `vectoring for <approach>`, and position + intercept altitude + approach clearance go out together with the **platform**; `until established on <ref>` restricted to the intercept altitude; `report established` carries its reference (12.4.2.2 e). **The last descent is the platform**, not another glide-path rung — the simulated arrival intercepted 624 ft high, from above, because the last rung fell at the moment of capture. **Alignment judged at capture** instead of after the roll-out. No-op corrections suppressed. Capture line now states altitude vs glide path. Tower-handoff root cause found (state overwritten to `IFR_ARRIVAL`) |

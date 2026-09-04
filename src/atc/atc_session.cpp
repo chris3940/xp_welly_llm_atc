@@ -155,7 +155,10 @@ static std::string current_tower_label() {
       std::string apt = !cx0.nearest_airport_name.empty()
                             ? cx0.nearest_airport_name
                             : cx0.nearest_airport_id;
-      auto sep = apt.find_first_of(" -");
+      // The slash counts as a separator: apt.dat writes "Nice/Cote D'Azur" with
+  // no space before it, so cutting on space-or-hyphen alone kept "Nice/Cote"
+  // as the speaker label of every transmission (user, repeatedly, 2026-08).
+  auto sep = apt.find_first_of(" -/");
       if (sep != std::string::npos)
         apt = apt.substr(0, sep);
       return apt.empty() ? "Ground" : apt + " Ground";
@@ -215,7 +218,10 @@ static std::string current_tower_label() {
   const std::string &id = cx.nearest_airport_id;
   std::string apt = !name.empty() ? name : id;
   // City name only — strip local suffix ("Annecy Meythet" → "Annecy")
-  auto sep = apt.find_first_of(" -");
+  // The slash counts as a separator: apt.dat writes "Nice/Cote D'Azur" with
+  // no space before it, so cutting on space-or-hyphen alone kept "Nice/Cote"
+  // as the speaker label of every transmission (user, repeatedly, 2026-08).
+  auto sep = apt.find_first_of(" -/");
   if (sep != std::string::npos)
     apt = apt.substr(0, sep);
   return apt.empty() ? "ATC" : apt + " ATC";
@@ -1490,6 +1496,44 @@ static void submit_recording_to_stt() {
       if (bias.size() < 100)
         bias.push_back(p);
     };
+    // 0) THE PHRASES OF THE LAST ATC TRANSMISSION. Standing rule: every keyword
+    // the pilot has to read back must be in the bias, in the form ATC spoke it.
+    // Values were already anchored below (level, speed, QNH, squawk, runway,
+    // holding point) but the PHRASES were not, and that is where the
+    // mis-hearings landed: "cleared to land" came back as "Pleatoland" and drew
+    // a say-again on short final, "vectoring for sequencing" as "vectoring for
+    // second 6 and", "contact ground" as "Grand" (real flight LSGG 2026-08-21).
+    // Scanned against what was actually just transmitted, so the entries cost
+    // nothing on a call that does not contain them. [C. P. Potter]
+    {
+      const std::string last_orig = last_atc_response();
+      std::string last = last_orig;
+      for (char &c : last)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+      // 0a) THE VARIABLE CONTENT of that same transmission -- the fix in
+      // "direct ELMEM", the procedure in "expect RNAV Zulu approach". The stock
+      // phrase list below cannot anchor those, and they are exactly what the
+      // pilot reads back. atc_phonetic::readback_anchors carries the reasoning
+      // and the flight that measured it. [C. P. Potter]
+      for (const auto &a : atc_phonetic::readback_anchors(last_orig))
+        add(a);
+
+      static const char *kPhrases[] = {
+          "cleared to land", "cleared for takeoff", "line up and wait",
+          "cleared ils approach", "cleared rnav approach", "cleared approach",
+          "vectoring for sequencing", "no atc speed restrictions",
+          "report established", "until established", "report vacated",
+          "contact ground", "contact tower", "contact approach",
+          "expedite descent", "descend via", "hold short", "cross runway",
+          "report on stand", "taxi to holding point", "continue heading",
+          "turn left heading", "turn right heading", "radar contact",
+          "wind calm", "when ready", "resume own navigation", nullptr};
+      for (const char **k = kPhrases; *k; ++k)
+        if (last.find(*k) != std::string::npos)
+          add(*k);
+    }
+
     // 1) Readback anchors from the last ATC transmission.
     if (cleared_alt_ft > 0) {
       const int ta = ctx_for_whisper.transition_alt_ft > 0
@@ -1955,7 +1999,94 @@ void submit_text(const std::string &text) {
   dispatch_pilot_transcript(expand_callsign_placeholder(text), 1.0f);
 }
 
+// ── PTT watchdog ─────────────────────────────────────────────────────────
+// A stuck session takes the radio away for the rest of the flight. On the
+// LFMN -> LOWI flight of 2026-08-28 the state sat at PLAYING from the Innsbruck
+// Radar handoff to touchdown: every press logged "PTT blocked, state=3", the
+// pilot never checked in, never got an approach clearance, never got the Tower,
+// and landed with no ATC at all. Nothing in Log.txt named the culprit -- there
+// was no TTS request, no synthesis result and no playback completion, and
+// nothing had ever logged the entry INTO the state.
+//
+// Two things follow from that, and both are here:
+//   1. every state change is logged, with how long the previous one lasted, so
+//      the next occurrence names itself;
+//   2. a state that outlives any legitimate duration is FORCED back to IDLE.
+//      An ATC message lost is a nuisance; a radio lost for an hour is the
+//      flight. The bounds are far above the worst honest case -- the network
+//      backends already time out at 45 s (TTS) and 30 s (STT/LM), plus playback.
+// [C. P. Potter]
+static constexpr float kPlayingWatchdogSec = 90.0f;
+static constexpr float kProcessingWatchdogSec = 150.0f;
+static PTTState watchdog_last_state_ = PTTState::IDLE;
+static float watchdog_state_age_sec_ = 0.0f;
+
+static const char *ptt_state_name(PTTState s) {
+  switch (s) {
+  case PTTState::IDLE:           return "IDLE";
+  case PTTState::RECORDING:      return "RECORDING";
+  case PTTState::TAIL_RECORDING: return "TAIL_RECORDING";
+  case PTTState::PROCESSING:     return "PROCESSING";
+  case PTTState::PLAYING:        return "PLAYING";
+  }
+  return "?";
+}
+
+static void run_ptt_watchdog(float dt) {
+  if (state_ != watchdog_last_state_) {
+    if (settings::debug_logging()) {
+      char dbg[160];
+      std::snprintf(dbg, sizeof(dbg),
+                    "[xp_wellys_atc][DEBUG] PTT state %s -> %s (after %.1fs)\n",
+                    ptt_state_name(watchdog_last_state_),
+                    ptt_state_name(state_),
+                    static_cast<double>(watchdog_state_age_sec_));
+      XPLMDebugString(dbg);
+    }
+    watchdog_last_state_ = state_;
+    watchdog_state_age_sec_ = 0.0f;
+    return;
+  }
+  watchdog_state_age_sec_ += dt;
+
+  float limit = 0.0f;
+  if (state_ == PTTState::PLAYING)
+    limit = kPlayingWatchdogSec;
+  else if (state_ == PTTState::PROCESSING)
+    limit = kProcessingWatchdogSec;
+  if (limit <= 0.0f || watchdog_state_age_sec_ < limit)
+    return;
+
+  char msg[224];
+  std::snprintf(msg, sizeof(msg),
+                "[xp_wellys_atc][ERROR] PTT watchdog: stuck in %s for %.0fs "
+                "(tts_pending=%d audio_playing=%d) -- forcing IDLE so the "
+                "pilot gets the radio back\n",
+                ptt_state_name(state_),
+                static_cast<double>(watchdog_state_age_sec_),
+                tts_pending_ ? 1 : 0, audio_player::is_playing() ? 1 : 0);
+  XPLMDebugString(msg);
+  // Whatever the in-flight job does when it finally returns, it must not find
+  // a session it can put back into PLAYING: tts_pending_ is cleared here and
+  // the callback's own "tts_pending_ = false" is then a no-op.
+  tts_pending_ = false;
+  audio_player::stop();   // clears is_playing_, which may itself be stuck
+  atis_playing_ = false;
+  state_ = PTTState::IDLE;
+  watchdog_last_state_ = PTTState::IDLE;
+  watchdog_state_age_sec_ = 0.0f;
+  push_transcript(TranscriptEntry{
+      static_cast<double>(XPLMGetElapsedTime()),
+      TranscriptKind::System,
+      "Radio recovered after a stuck transmission -- push to talk is available "
+      "again.",
+      "",
+      "",
+  });
+}
+
 void update() {
+  run_ptt_watchdog(1.0f / 60.0f);
   if (state_ == PTTState::PLAYING && !tts_pending_ &&
       !audio_player::is_playing()) {
     if (atis_playing_) {
@@ -2024,6 +2155,22 @@ void update() {
     }
   }
 
+  // A flight restart or a map jump inside the same X-Plane session must wipe the
+  // IFR state: without this the previous attempt's clearances, latches and
+  // controller stay in force (see engine::note_frame).
+  //
+  // UNCONDITIONAL, and that matters. This used to sit inside the "PTT is idle"
+  // block with the ATC polls, so it stopped sampling the moment the session was
+  // busy. On 2026-08-29 a stuck transmission held the session for 150 s; the
+  // first call after the watchdog released it compared two positions 23 NM
+  // apart, read a normal cruise leg as a teleport, and wiped the approach, the
+  // STAR, the destination and the runway lock. The pilot got his radio back to
+  // an ATC that no longer knew he existed -- which is why nothing was heard
+  // again for the rest of the flight. A continuity detector has to see every
+  // frame, and it now also measures the real interval rather than trusting dt.
+  // [C. P. Potter]
+  engine::note_frame(xplane_context::get(), dt);
+
   // Flight-phase auto-correction of ATC state
   double now_secs_for_state = static_cast<double>(XPLMGetElapsedTime());
   atc_state_machine::check_auto_correction(flight_phase::get(), dt,
@@ -2090,6 +2237,29 @@ void update() {
       });
       auto role = role_for_frequency(ctx_now);
       speak_response(runway_change_text, role, 1.0f);
+      return; // one tower utterance per frame
+    }
+
+    // Lined up and waiting with nothing being said: Tower asks for the ready
+    // report rather than letting the aircraft sit on the runway in silence.
+    // Placed before the readback reminder in code order but it cannot compete
+    // with it: the poll returns false whenever a readback is still outstanding,
+    // so the line-up readback always gets the frequency first.
+    std::string lineup_prompt_text;
+    if (engine::poll_lineup_ready_prompt(ctx_now, dt, &lineup_prompt_text) &&
+        !lineup_prompt_text.empty()) {
+      float active_freq = (ctx_now.active_com == 1) ? ctx_now.com1_freq_mhz
+                                                    : ctx_now.com2_freq_mhz;
+      char freq_str[16];
+      std::snprintf(freq_str, sizeof(freq_str), "%.3f", active_freq);
+      push_transcript(TranscriptEntry{
+          static_cast<double>(XPLMGetElapsedTime()),
+          TranscriptKind::Tower,
+          lineup_prompt_text,
+          freq_str,
+          current_tower_label(),
+      });
+      speak_response(lineup_prompt_text, role_for_frequency(ctx_now), 1.0f);
       return; // one tower utterance per frame
     }
 
@@ -2192,6 +2362,7 @@ void update() {
         atc_state_machine::arm_readback(profile_text);
       return;
     }
+
 
     // IFR en-route management: Centre direct-to shortcut, TMA entry descent
     // clearance (proactive — ATC does not wait for pilot request), and

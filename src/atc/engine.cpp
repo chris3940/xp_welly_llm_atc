@@ -234,6 +234,27 @@ static bool s_callsign_full_used = false;
 // does not hand out 13 000 ft in one transmission.
 static constexpr int kMaxSingleDescentFt = 10000;
 
+// A CLIMB is stepped exactly like a descent. "Climb flight level 450" to an
+// aircraft at FL140 asks for 31 000 ft in one clearance; no ACC hands that out,
+// and the flight of 2026-08-28 heard it from Milan the moment it checked in.
+// Symmetric with kMaxSingleDescentFt, so the ladder reads the same going up and
+// coming down. [C. P. Potter]
+static constexpr int kMaxSingleClimbFt = 10000;
+// Cruise still owed when a climb clearance was capped. 0 = nothing deferred.
+static int s_climb_final_target_ft = 0;
+// How long the next rung has been owed while a handoff is in flight.
+static float s_climb_ladder_wait_sec = 0.0f;
+// Beyond this the sector that still has the aircraft clears the rung itself.
+static constexpr float kClimbLadderHandoffGraceSec = 180.0f;
+
+// The level to clear NOW on the way to final_ft, and what is left over.
+// Whole flight levels only -- an intermediate step is never an odd altitude.
+static int climb_step_ft(int now_ft, int final_ft) {
+  if (final_ft - now_ft <= kMaxSingleClimbFt)
+    return final_ft;
+  return ((now_ft + kMaxSingleClimbFt) / 1000) * 1000;
+}
+
 // Axis distance a closure-rate sample is taken over. Shorter and the rate is
 // noise; longer and a real divergence is caught too late.
 static constexpr double kVecClosureBaseNm = 2.0;
@@ -248,6 +269,8 @@ static bool   s_vector_mode_final_known = false; // the verdict is in
 // just headings (user, 2026-08-16). It exists only so the vectors never take the
 // aircraft across the axis.
 static bool   s_vtf_turn_left    = true;
+// Compliance allowance for the CURRENT vector, frozen when the turn is issued.
+static float  s_vtf_nudge_allow  = 0.0f;
 static double s_vtf_hdg          = 0.0;   // heading currently assigned
 static int    s_vtf_cleared_ft   = 0;     // level currently assigned on the pattern
 static float  s_vtf_nudge_secs   = 0.0f;  // compliance timer for the current leg
@@ -778,6 +801,8 @@ static bool s_sid_radar_handoff_issued = false;
 // Runway the pilot has already been cleared to CROSS at the current departure (avoids
 // repeating the crossing clearance while still holding short of it). Reset per flight.
 static std::string s_crossing_cleared_runway;
+// Runway the taxi clearance told the pilot to hold short of (see engine.hpp).
+static std::string s_taxi_hold_short_runway;
 static bool s_sid_initialized = false; // guards one-time init block
 // Intermediate TRACON handoffs already fired during the SID climb — one
 // entry per (kHz) frequency. Prevents retriggering when the aircraft
@@ -846,6 +871,8 @@ static double s_sid_direct_origin_lon = 0.0;
 // post-direct heading-vs-bearing check (gives the FMS ~3 min to intercept
 // before we start comparing course to bearing_to_fix).
 static float s_sid_direct_elapsed_sec = 0.0f;
+// One-shot: an off-route SID exit fix has already been reported this departure.
+static bool s_sid_offroute_logged = false;
 // Departure airport captured at radar-contact entry.
 // Kept here so nearest_airport_id cannot drift as the aircraft flies away.
 static std::string s_departure_apt_id;
@@ -903,9 +930,13 @@ static bool star_prescribes_vectors(const xplane_context::XPlaneContext &ctx) {
   if (s_star_vectors) {
     s_star_vectors_fix = last_fix;
   } else if (!last_fix.empty() && !s_assigned_approach_designator.empty()) {
+    // Take the published COURSE with the fix. Without it the procedure vector
+    // cannot arm (it requires a heading), so an approach transition prescribing
+    // vectors fell through to the geometric pattern -- which at LFMN would fly a
+    // noise-abatement arrival wherever the geometry pleased.
     s_star_vectors = cifp_reader::approach_transition_prescribes_vectors(
         ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator,
-        last_fix, &s_star_vectors_fix);
+        last_fix, &s_star_vectors_fix, &s_star_vectors_course);
     where = "the approach transition";
   }
   s_star_vectors_known = true;
@@ -1003,6 +1034,84 @@ dest_terminal_anchor(const xplane_context::XPlaneContext &ctx,
 // while on the ground.
 static std::string s_ground_last_announced_runway; // last runway ATC announced on ground
 
+// ── flight restart / teleport ────────────────────────────────────────────────
+// A FLIGHT RESTART LOOKS LIKE A TELEPORT, and nothing in the engine noticed one.
+// X-Plane can move the aircraft anywhere without the plugin being reloaded --
+// "jump to" from the map, reloading a situation, restarting the flight -- and
+// engine::reset() only ever ran at plugin start. On the session of 2026-08-20
+// the pilot restarted the same LFML -> LSGG arrival three times inside one
+// X-Plane run and the IFR state from the FIRST attempt survived all of them:
+//
+//   * the step-down into the Geneva TMA had already fired, so its latch read
+//     "done" and `descend flight level 90` was never issued again. The aircraft
+//     held FL150 until the expedite net caught it, reached the vectoring point
+//     8000 ft above its FAF, and the sequencing leg then ran 25 NM purely to
+//     lose that altitude -- which is why the leg "was not shortened";
+//   * Geneva Approach spoke -- "confirm descending flight level 90" -- while the
+//     aircraft was back near Marseille on 119.755, two hundred miles away.
+//
+// The test is a position discontinuity measured against what the aircraft could
+// actually have covered: groundspeed x dt, with generous slack, and never less
+// than kTeleportMinNm. That last floor is what keeps the headless harness alive,
+// where a `track` step legitimately advances the aircraft a whole leg at a time
+// with a dt to match. [C. P. Potter]
+static constexpr double kTeleportMinNm = 15.0;
+static double s_frame_lat = 0.0;
+static double s_frame_lon = 0.0;
+static bool   s_frame_valid = false;
+// Sim-clock time of the last sample, so the discontinuity test measures the
+// interval it actually spans rather than a single frame.
+static double s_frame_secs = 0.0;
+
+bool note_frame(const xplane_context::XPlaneContext &ctx, float dt) {
+  if (ctx.latitude == 0.0 && ctx.longitude == 0.0)
+    return false;
+  bool jumped = false;
+  if (s_frame_valid) {
+    const double moved = traffic_geometry::distance_nm(
+        s_frame_lat, s_frame_lon, ctx.latitude, ctx.longitude);
+    // TIME SINCE THE LAST SAMPLE, not the caller's frame dt.
+    //
+    // This is a continuity test, so the interval it divides by must be the one
+    // actually elapsed between the two positions being compared. Trusting `dt`
+    // assumes the function is called every frame -- and it was not: it sat
+    // behind the "PTT is idle" gate, so 150 s of a stuck session went unsampled
+    // and the first call after the recovery compared two points 23 NM apart
+    // with dt = one frame. A normal cruise leg read as a teleport, the whole
+    // IFR state was wiped, and the pilot got his radio back to an ATC that no
+    // longer knew he existed (LOWI, 2026-08-29). The gate is gone, but the
+    // detector must survive a gap in its own sampling for any reason -- a
+    // pause, a stall, a slow frame. ctx.now_secs is the sim clock, which stops
+    // when the sim is paused: exactly the right ruler. [C. P. Potter]
+    double elapsed = static_cast<double>(dt);
+    if (s_frame_secs > 0.0 && ctx.now_secs > s_frame_secs)
+      elapsed = std::max(elapsed, ctx.now_secs - s_frame_secs);
+    const double could = static_cast<double>(ctx.groundspeed_kts) *
+                         elapsed / 3600.0 * 3.0;
+    if (moved > std::max(kTeleportMinNm, could)) {
+      jumped = true;
+      logging::info("IFR: position discontinuity %.0f NM in %.1f s at %.0f kt "
+                    "(%.4f,%.4f -> %.4f,%.4f) -- flight restart, resetting the "
+                    "ATC state",
+                    moved, elapsed,
+                    static_cast<double>(ctx.groundspeed_kts), s_frame_lat,
+                    s_frame_lon, ctx.latitude, ctx.longitude);
+      reset();
+      // reset() wipes the ENGINE (route tracker, destination, sector baselines,
+      // every latch) but not the state machine, which would otherwise be left in
+      // IFR_APPROACH_DESCENT with no destination and no route -- an approach
+      // state for a flight that no longer exists. A restart is a new flight, so
+      // the flow starts where a fresh plugin load starts. [C. P. Potter]
+      atc_state_machine::set_state(atc_state_machine::ATCState::IDLE);
+    }
+  }
+  s_frame_lat = ctx.latitude;
+  s_frame_lon = ctx.longitude;
+  s_frame_secs = ctx.now_secs;
+  s_frame_valid = true;
+  return jumped;
+}
+
 void reset() {
   // A NEW FLIGHT is the only thing that erases what the pilot has been told.
   // NOT a controller handoff: an instruction stays in force across a transfer,
@@ -1062,6 +1171,8 @@ void reset() {
   s_vtf_clearance_pending = false;
   s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
+  s_climb_final_target_ft = 0;
+  s_climb_ladder_wait_sec = 0.0f;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
   s_tod_dist_nm = -1.0f;
@@ -1078,6 +1189,7 @@ void reset() {
   s_route_step_idx = 0;
   s_sid_direct_issued = false;
   s_sid_direct_rolled = false;
+  s_sid_offroute_logged = false;
   s_sid_step1_issued = false;
   s_sid_cruise_issued = false;
   s_sid_step2_issued = false;
@@ -1113,6 +1225,7 @@ void reset() {
   s_descent_tma_target_ft = 0;
   s_descent_cifp_target_ft = 0;
   s_crossing_cleared_runway.clear();
+  s_taxi_hold_short_runway.clear();
   s_ground_last_announced_runway.clear();
   s_assigned_star_name.clear();
   s_star_vectors_known = false;
@@ -1220,6 +1333,8 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_vtf_clearance_pending = false;
   s_vtf_recut_secs = 0.0f;
   s_descent_first_step_ft = 0;
+  s_climb_final_target_ft = 0;
+  s_climb_ladder_wait_sec = 0.0f;
   s_descent_second_step_issued = false;
   s_connector_direct_issued = false;
   s_vec_plan = {};
@@ -1238,6 +1353,33 @@ void training_jump_enroute(int cleared_alt_ft) {
   s_tod_dist_nm = -1.0f;
   s_tod_alert_nm = -1.0f;
   s_speed_250_warned = false;
+  // THE ROUTE TRACKER MUST FOLLOW THE AIRCRAFT. It only ever moves FORWARD -- a
+  // fix is consumed when it comes within 1.5 NM or falls more than 90 degrees
+  // behind -- so it cannot recover from a jump that lands the aircraft BEHIND
+  // its current index: it stayed wherever the previous flight left it, often at
+  // the end of the route, and every routed distance computed from it collapsed.
+  // That is what made the distance and the time to top of descent meaningless on
+  // the IFR tab after a JUMP (user, 2026-08-21). training_jump_approach already
+  // did this; the en-route jump was the one that did not.
+  // Cleared rather than re-seated: the route is rebuilt from the OFP by the
+  // descent-clearance path, and the per-frame advance then discards whatever
+  // lies behind the aircraft. [C. P. Potter]
+  s_route_fixes.clear();
+  s_route_fix_idx = 0;
+  s_route_tracker_tick = 0.0f;
+  s_pending_route_direct.clear();
+  // REBUILD IT HERE, because init_route_fixes() is the only path that also
+  // RE-ALIGNS the tracker on the aircraft (its step 3 skips every fix already
+  // behind). Merely clearing the route left the rebuild to another path that
+  // does not re-align, so the chain restarted at the DEPARTURE fix: after the
+  // JUMP of 2026-08-21 the pre-TOD chain read `idx=0/5: MTL(route) ROMAM ...`
+  // and measured 184 NM to PITOM for a real 130 -- the wrong distance, and the
+  // wrong time with it, on the IFR tab (user). [C. P. Potter]
+  init_route_fixes(xplane_context::get());
+  logging::info("IFR jump enroute: route rebuilt and re-aligned on the aircraft "
+                "-- %zu fixes, tracker at %d (routed distances, and the TOD "
+                "estimate built on them, restart from here)",
+                s_route_fixes.size(), s_route_fix_idx);
   // No clearance was actually read back before a mid-flight jump: clear any pending
   // readback inherited from a previous flight so the fresh jump starts clean. The FL
   // "last clearance" IS set (s_enroute_cleared_alt_ft = cruise, above); speed has no
@@ -1641,6 +1783,17 @@ static bool has_recognisable_elements(const intent_parser::PilotMessage &msg) {
 //   - elements recognised        -> "garbled, say again"
 //   - nothing recognised         -> "say again"
 //   - 2nd unclear in a row       -> "say again, use standard phraseology"
+// The classifier itself is down (network, auth, tier) -- as opposed to the pilot
+// having said something unintelligible. On 2026-08-29 the Mistral LM answered
+// HTTP 403 "tier_not_allowed" on every call, and because a failed call was
+// folded into "_INVALID" the pilot was told FIVE times to use standard
+// phraseology while reading back a climb clearance in textbook form. Blaming the
+// pilot for our own outage is the worst answer available: it is wrong, it is
+// unactionable, and it loops. [C. P. Potter]
+static bool s_lm_unavailable = false;
+void note_lm_unavailable() { s_lm_unavailable = true; }
+void note_lm_available() { s_lm_unavailable = false; }
+
 static std::string
 build_unclear_response(const intent_parser::PilotMessage &msg,
                        const std::string &fallback_cs) {
@@ -1655,7 +1808,13 @@ build_unclear_response(const intent_parser::PilotMessage &msg,
     std::string t = msg.raw_transcript;
     for (char &c : t)
       c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    for (const char *k : {"direct", "wilco", "affirm", "roger"})
+    // "established" belongs here too. It is a REPORT the controller asked for,
+    // and once the landing clearance has been given there is nothing left to
+    // answer -- yet an unrecognised "November Romeo Charlie established ILS
+    // runway 22" drew "your transmission was garbled, say again" one mile after
+    // being cleared to land (LSGG replay, 2026-08-21). Silence is the correct
+    // answer to a report that needs no action. [C. P. Potter]
+    for (const char *k : {"direct", "wilco", "affirm", "roger", "established"})
       if (t.find(k) != std::string::npos)
         return std::string(); // silent: correct readback / benign ack
   }
@@ -1672,7 +1831,10 @@ build_unclear_response(const intent_parser::PilotMessage &msg,
     cs = fallback_cs;
   std::string prefix = cs.empty() ? std::string{} : cs + ", ";
 
-  if (unclear_streak_ >= 2)
+  // Never escalate to "use standard phraseology" when it is OUR classifier that
+  // is unavailable: the phrase accuses the pilot of a mistake he did not make,
+  // and the outage lasts the whole flight, so the accusation repeats for ever.
+  if (unclear_streak_ >= 2 && !s_lm_unavailable)
     return prefix +
            atc_templates::lookup_fallback("say_again_use_standard_phraseology",
                                           "say again, use standard "
@@ -1952,6 +2114,16 @@ static std::string runway_between(const xplane_context::XPlaneContext &ctx,
   return {};
 }
 
+void remember_taxi_hold_short(const std::string &runway) {
+  if (runway.empty() || runway == s_taxi_hold_short_runway)
+    return;
+  s_taxi_hold_short_runway = runway;
+  logging::info("[ground] taxi clearance holds short of runway %s -- remembered "
+                "for the Tower crossing", runway.c_str());
+}
+
+const std::string &taxi_hold_short_runway() { return s_taxi_hold_short_runway; }
+
 std::string runway_to_cross(const xplane_context::XPlaneContext &ctx,
                             const std::string &dep_rwy) {
   return runway_between(ctx, dep_rwy);
@@ -2167,7 +2339,12 @@ void process_transcript(Input in, Done done) {
       s_pending_handoff_freq_mhz > 100.0f) {
     const float active_lbl =
         ctx.active_com == 2 ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
-    if (std::fabs(active_lbl - s_pending_handoff_freq_mhz) < 0.005f) {
+    // 6 kHz: an 8.33 kHz radio names the 25 kHz channel 118.700 as "118.705",
+    // so every "is the pilot on the frequency I gave him" test needs the same
+    // window as AirportFrequencies::lookup(). A 5 kHz threshold left the pilot
+    // correctly tuned and repeatedly told he was not (real flight 2026-08-22).
+    // [C. P. Potter]
+    if (std::fabs(active_lbl - s_pending_handoff_freq_mhz) < 0.006f) {
       s_current_controller_label = s_pending_controller_label;
       s_pending_controller_label.clear();
       logging::info("Controller label -> %s (pilot reached handoff freq %.3f)",
@@ -2236,7 +2413,7 @@ void process_transcript(Input in, Done done) {
         ctx.active_com == 2 ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
     const bool matches_pending_handoff =
         s_pending_handoff_freq_mhz > 100.0f &&
-        std::fabs(active_com_ck - s_pending_handoff_freq_mhz) < 0.005f;
+        std::fabs(active_com_ck - s_pending_handoff_freq_mhz) < 0.006f;
 
     // IFR airborne states that require APPROACH or DEPARTURE: pilot has been
     // handed off and must check in on the departure/approach frequency.
@@ -2421,8 +2598,22 @@ void process_transcript(Input in, Done done) {
             readback_carries_freq = true;
           }
         }
-        if (readback_carries_freq)
+        if (readback_carries_freq) {
+          // SILENT, BUT COMPLETED. This was a bare `return` -- the only exit in
+          // the whole of process_transcript that did not call done(). The
+          // completion callback is what tells atc_session the transmission has
+          // been handled; without it the session stays in PROCESSING for ever
+          // and every later push-to-talk is refused. It cost two arrivals into
+          // Innsbruck (2026-08-28 and 2026-08-29): both froze on this exact
+          // line, on the frequency readback a pilot makes at EVERY handoff while
+          // still on the old frequency, and both flew the whole approach with a
+          // dead radio. Silence is the right answer here; dropping the callback
+          // is not how you say nothing. [C. P. Potter]
+          logging::info("[handoff] readback acknowledged -- transmission "
+                        "completed silently (PTT released)");
+          done(Output{});
           return; // acknowledged -- give him the seconds to switch
+        }
         const std::string cs = spoken_callsign(ctx);
         // Target of the reminder = pending controller (Milan).  The
         // speaker of this transmission is still the current controller
@@ -2489,7 +2680,7 @@ void process_transcript(Input in, Done done) {
   const bool readback_like = transcript_is_readback_like(in.transcript);
   if (s_sector_checkin_pending && s_pending_handoff_freq_mhz > 0.0f) {
     const float active = ctx.active_com == 2 ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
-    if (std::fabs(active - s_pending_handoff_freq_mhz) < 0.005f) {
+    if (std::fabs(active - s_pending_handoff_freq_mhz) < 0.006f) {
       s_sector_checkin_pending = false;
       sector_checkin_just_fired = true;
       // Pilot actually switched to the new frequency — swap the pending
@@ -2762,7 +2953,42 @@ void process_transcript(Input in, Done done) {
         ctx.frequency_type == xplane_context::FrequencyType::TOWER;
     if (pre_departure_on_tower) {
       const std::string dep_rwy = atc_state_machine::effective_runway(ctx);
-      const std::string cross = crossing_runway_at_position(ctx, dep_rwy);
+      std::string cross = crossing_runway_at_position(ctx, dep_rwy);
+      // THE PILOT SAYING HE IS AT THE HOLDING POINT IS THE POSITION REPORT.
+      // The offer hung on a 250 m proximity test alone, and at Nice it never
+      // fired: the aircraft reported "holding point Alpha One, runway 04L" from
+      // 118 m off the 04L centreline and was answered "runway 04R, line up and
+      // wait" -- an instruction that cannot be complied with without crossing a
+      // runway nobody had cleared (real flight 2026-08-26). REPORT_HOLDING_SHORT
+      // is that report, so trust it and ask the same question the taxi clearance
+      // already answered: is a runway in the way? runway_to_cross() is the very
+      // function that produced the "hold short of runway 04L" the pilot was
+      // given minutes earlier -- the two now agree by construction.
+      // [C. P. Potter]
+      if (cross.empty() &&
+          parsed.intent == intent_parser::PilotIntent::REPORT_HOLDING_SHORT &&
+          ctx.on_ground && ctx.groundspeed_kts <= 10.0f) {
+        cross = runway_to_cross(ctx, dep_rwy);
+        if (cross.empty() && dep_rwy != s_taxi_hold_short_runway)
+          cross = s_taxi_hold_short_runway; // what Ground told him to hold short of
+        if (!cross.empty())
+          logging::info("IFR Tower: crossing offered on the pilot's hold-short "
+                        "report (runway %s in the way of %s)",
+                        cross.c_str(), dep_rwy.c_str());
+      }
+      // ONCE CLEARED, THE CROSSING OWNS THE EXCHANGE UNTIL IT IS REPORTED
+      // VACATED. The branches below are reached only while the geometry still
+      // finds the runway -- and it stops finding it the moment the aircraft
+      // rolls off the hold-short. So the pilot read back "cross runway zero
+      // four left, report vacated", then reported vacated, and was answered
+      // "say again your request" three times: the clearance had asked for a
+      // report the flow could no longer receive (real flight LFMN 2026-08-27).
+      // A cleared crossing is a state, not a position. [C. P. Potter]
+      if (cross.empty() && !s_crossing_cleared_runway.empty() &&
+          (parsed.intent == intent_parser::PilotIntent::READBACK ||
+           parsed.intent == intent_parser::PilotIntent::RUNWAY_VACATED ||
+           parsed.intent == intent_parser::PilotIntent::REPORT_HOLDING_SHORT))
+        cross = s_crossing_cleared_runway;
       if (!cross.empty()) {
         if (cross != s_crossing_cleared_runway) {
           // First call at this crossing hold-short: ISSUE the crossing clearance.
@@ -2780,13 +3006,46 @@ void process_transcript(Input in, Done done) {
           done(std::move(out));
           return;
         }
-        // Already cleared to cross this runway: the pilot's call here is the crossing
-        // READBACK or the "runway X vacated" report -- accept SILENTLY (ICAO: no ATC
-        // response to a crossing readback). Without this the readback fell through to
-        // the state machine and drew "say again" x3 (user 2026-07-29). The normal
-        // line-up flow resumes once the aircraft reaches the departure holding point,
-        // where crossing_runway_at_position() returns "".
-        logging::info("IFR Tower: crossing readback/vacated accepted silently "
+        // Already cleared to cross this runway. The READBACK is accepted in
+        // silence (ICAO: a correct readback draws no reply). The VACATED report
+        // is different -- the controller asked for it, so it is answered, and it
+        // ENDS the crossing: the aircraft is sent on to the departure holding
+        // point and the normal line-up flow resumes from there.
+        // THE READBACK AND THE REPORT ARE THE SAME WORDS, almost. Reading back
+        // "cross runway 04L, REPORT VACATED" carries the word the report is
+        // recognised by, so the echo was taken for the report: the crossing was
+        // closed on the readback, and the real report a minute later found
+        // nothing left and drew "say again" (measured 2026-08-28). The echo is
+        // the one that still carries the INSTRUCTION -- "cross" -- and an
+        // aircraft cannot be reporting a runway vacated while repeating the
+        // order to cross it. [C. P. Potter]
+        std::string low = parsed.raw_transcript;
+        for (char &c : low)
+          c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const bool echoes_the_order = low.find("cross") != std::string::npos;
+        if (parsed.intent == intent_parser::PilotIntent::RUNWAY_VACATED &&
+            !echoes_the_order) {
+          const std::string &cs_ref = atc_state_machine::session_callsign();
+          const std::string &cs = cs_ref.empty() ? in.pilot_callsign : cs_ref;
+          std::string hp;
+          auto ih = ctx.runway_holding_points.find(dep_rwy);
+          if (ih != ctx.runway_holding_points.end())
+            hp = ih->second;
+          Output out;
+          std::string txt = cs + ", roger, continue to holding point ";
+          if (!hp.empty())
+            txt += atc_phonetic::spell_holding_point(hp) + ", ";
+          txt += "runway " + dep_rwy + ".";
+          out.response_text = txt;
+          logging::info("IFR Tower: runway %s reported vacated -- crossing "
+                        "closed, continue to the %s holding point",
+                        cross.c_str(), dep_rwy.c_str());
+          s_crossing_cleared_runway.clear();
+          s_taxi_hold_short_runway.clear();
+          done(std::move(out));
+          return;
+        }
+        logging::info("IFR Tower: crossing readback accepted silently "
                       "(runway %s)",
                       cross.c_str());
         done(Output{});
@@ -3477,17 +3736,38 @@ void process_transcript(Input in, Done done) {
       // not "continue descent" (LFMN 2026-07-19: was told to "continue descent"
       // while level at the correct FL). Lower step-downs, if any, come later from
       // poll_approach as the aircraft reaches the constrained fixes.
+      // A MAINTAIN IS NEVER A CLIMB.
+      //
+      // initial_ft is the APPROACH's published initial level. When the aircraft
+      // is already below it the branch says "maintain" -- and used to say it with
+      // the published figure, which on the LOWI arrival of 2026-09-02 sent
+      // "maintain flight level 150" to an aircraft at FL130 that Vienna had just
+      // cleared to FL130. A higher level handed to a descending aircraft as a
+      // "maintain" is a climb instruction in disguise, it contradicts the
+      // controller who just released it, and the readback verifier then held the
+      // pilot to the wrong figure ("negative, I say again, flight level one five
+      // zero" against a correct readback of 130).
+      //
+      // The level in force wins. A new controller inherits what the previous one
+      // assigned and may only take an arrival LOWER.
+      // See [[feedback_handoff_clearance_continuity]]. [C. P. Potter]
+      int keep_ft = initial_ft;
+      if (s_enroute_cleared_alt_ft > 0 && s_enroute_cleared_alt_ft < keep_ft)
+        keep_ft = s_enroute_cleared_alt_ft;
       char alt_buf_lvl[64];
-      if (initial_ft > ta_check)
+      if (keep_ft > ta_check)
         std::snprintf(alt_buf_lvl, sizeof(alt_buf_lvl), "maintain flight level %d",
-                      initial_ft / 100);
+                      keep_ft / 100);
       else
         std::snprintf(alt_buf_lvl, sizeof(alt_buf_lvl), "maintain %d feet, QNH %d",
-                      initial_ft, ctx.qnh_hpa);
+                      keep_ft, ctx.qnh_hpa);
       std::snprintf(buf, sizeof(buf), "%s, radar contact, identified%s, %s.",
                     cs.c_str(), approach_confirm.c_str(), alt_buf_lvl);
-      logging::info("[approach] check-in: initial_ft=%d ~>= alt=%.0f (tol %d), maintain",
-                    initial_ft, no_desc_ref, kLevelTolFt);
+      s_enroute_cleared_alt_ft = keep_ft;
+      logging::info("[approach] check-in: initial_ft=%d ~>= alt=%.0f (tol %d) -> "
+                    "maintain %d (level in force %d)",
+                    initial_ft, no_desc_ref, kLevelTolFt, keep_ft,
+                    s_enroute_cleared_alt_ft);
     } else {
       const int ta_ic = ta_check;
       char alt_buf_ic[64];
@@ -3598,9 +3878,31 @@ void process_transcript(Input in, Done done) {
       int wind_dir = static_cast<int>(std::round(ctx.wind_direction_deg));
       int wind_kt  = static_cast<int>(std::round(ctx.wind_speed_kt));
       char buf_at[160];
-      std::snprintf(buf_at, sizeof(buf_at),
-                    "%s, runway %s, cleared to land, wind %03d degrees %02d knots.",
-                    cs_at.c_str(), rwy_at.c_str(), wind_dir, wind_kt);
+      // WIND CALM, not "wind 000 degrees 00 knots" -- which is what the pilot
+      // heard on the LSGG landing of 2026-08-21 and is not something a
+      // controller says. ICAO wording, same 3 kt threshold the ATIS and the
+      // runway selection already use. [C. P. Potter]
+      if (wind_kt < 3)
+        std::snprintf(buf_at, sizeof(buf_at),
+                      "%s, runway %s, cleared to land, wind calm.",
+                      cs_at.c_str(), rwy_at.c_str());
+      else
+        std::snprintf(buf_at, sizeof(buf_at),
+                      "%s, runway %s, cleared to land, wind %03d degrees %02d knots.",
+                      cs_at.c_str(), rwy_at.c_str(), wind_dir, wind_kt);
+      // A SPEED RESTRICTION STILL IN FORCE IS CANCELLED WITH THE CLEARANCE, not
+      // after it. "cleared to land" then, thirteen seconds later, "no speed
+      // restrictions" is two transmissions where a controller uses one, and the
+      // second arrives when the sequencing it belonged to is already over (real
+      // flight LSGG 2026-08-21). ICAO requires the pilot to be advised when the
+      // restriction no longer applies -- so advise him here. [C. P. Potter]
+      std::string txt_at = buf_at;
+      if (s_atc_assigned_speed_kt > 0 && !s_speed_released) {
+        txt_at.pop_back(); // the full stop
+        txt_at += ", no ATC speed restrictions.";
+        s_speed_released = true;
+        logging::info("IFR: speed restriction cancelled with the landing clearance");
+      }
       // Preserve the label set by the sector-exit handoff (e.g. "Reims
       // Prunay Information" for AFIS destinations). Only fall back to a
       // generic "Tower" label if nothing was set upstream.
@@ -3610,7 +3912,7 @@ void process_transcript(Input in, Done done) {
       atc_state_machine::set_state(ASt::IFR_LANDING_CLEARED);
       Output out_at;
       out_at.parsed = parsed;
-      out_at.response_text = buf_at;
+      out_at.response_text = txt_at;
       done(std::move(out_at));
       return;
     }
@@ -3818,7 +4120,7 @@ void process_transcript(Input in, Done done) {
           float cl_freq = std::stof(fm[1].str() + "." + fm[2].str());
           float active  = ctx.active_com == 2 ? ctx.com2_freq_mhz
                                                : ctx.com1_freq_mhz;
-          if (std::fabs(active - cl_freq) < 0.005f) {
+          if (std::fabs(active - cl_freq) < 0.006f) {
             logging::info(
                 "Readback auto-cleared: pilot on expected freq %.3f (handoff)",
                 cl_freq);
@@ -4009,6 +4311,19 @@ void process_transcript(Input in, Done done) {
           const backends::lm::ClassifyResult &result) mutable {
         std::string intent_key =
             result.success ? result.intent_name : std::string("_INVALID");
+        // A FAILED CALL IS NOT AN INVALID TRANSMISSION. Keep the two apart, in
+        // the log and in what the pilot hears.
+        if (!result.success) {
+          if (!s_lm_unavailable)
+            logging::error(
+                "LM unavailable -- classification is rule-only from here. Every "
+                "transmission the rules do not cover will draw 'say again'. "
+                "Check the API key, the subscription tier and the model name in "
+                "Settings.");
+          note_lm_unavailable();
+        } else {
+          note_lm_available();
+        }
 
         if (settings::debug_logging()) {
           logging::debug(
@@ -4275,6 +4590,62 @@ bool poll_go_around(const xplane_context::XPlaneContext &ctx, double now_secs,
   logging::info("Engine emitted go-around (user dist=%.2f NM, occupant id=%u)",
                 user_dist_nm,
                 seq.occupant.has_value() ? seq.occupant->modeS_id : 0u);
+  return true;
+}
+
+// Lined up, and nobody is saying anything.
+//
+// "Runway 04R, line up and wait" leaves the ball with the pilot: the takeoff
+// clearance only comes once he reports ready. A pilot who lines up and stays
+// silent -- busy with the checklist, or simply unaware the call is owed -- sits
+// on the runway for ever while the frequency stays quiet (user 2026-08-29).
+// A real controller does not wait indefinitely; he asks.
+//
+// PHRASEOLOGY. The prompt is "REPORT WHEN READY FOR DEPARTURE", never "ready for
+// take-off". ICAO Doc 4444 reserves the word TAKE-OFF for issuing or cancelling
+// a take-off clearance and requires DEPARTURE or AIRBORNE everywhere else -- the
+// rule written after Tenerife. Asking a lined-up aircraft if it is "ready for
+// take-off" puts that word on the frequency at the one moment it must not be
+// ambiguous. [C. P. Potter]
+static float s_lineup_silent_sec = 0.0f;
+static int   s_lineup_prompts    = 0;
+static constexpr float kLineupFirstPromptSec  = 45.0f;
+static constexpr float kLineupRepeatPromptSec = 60.0f;
+static constexpr int   kLineupMaxPrompts      = 2;
+
+bool poll_lineup_ready_prompt(const xplane_context::XPlaneContext &ctx, float dt,
+                              std::string *out_text) {
+  using AS = atc_state_machine::ATCState;
+  if (atc_state_machine::get_state() != AS::IFR_LINE_UP_AND_WAIT) {
+    s_lineup_silent_sec = 0.0f;
+    s_lineup_prompts = 0;
+    return false;
+  }
+  // The pilot owes the line-up readback first -- the readback reminder owns that
+  // conversation, and two nudges about two different things is noise.
+  if (atc_state_machine::is_readback_pending()) {
+    s_lineup_silent_sec = 0.0f;
+    return false;
+  }
+  // Rolling: an aircraft that has started its take-off run needs no prompt.
+  if (!ctx.on_ground || ctx.groundspeed_kts > 5.0f) {
+    s_lineup_silent_sec = 0.0f;
+    return false;
+  }
+  if (s_lineup_prompts >= kLineupMaxPrompts)
+    return false;
+  s_lineup_silent_sec += dt;
+  const float due = (s_lineup_prompts == 0) ? kLineupFirstPromptSec
+                                            : kLineupRepeatPromptSec;
+  if (s_lineup_silent_sec < due)
+    return false;
+  s_lineup_silent_sec = 0.0f;
+  ++s_lineup_prompts;
+  if (out_text)
+    *out_text = spoken_callsign(ctx) + ", report when ready for departure.";
+  logging::info("IFR lineup: pilot silent %.0f s after line up and wait -- "
+                "prompt %d of %d",
+                static_cast<double>(due), s_lineup_prompts, kLineupMaxPrompts);
   return true;
 }
 
@@ -4946,6 +5317,23 @@ static bool sid_step1_hold_active(const xplane_context::XPlaneContext &ctx) {
   return d < static_cast<double>(s_sid_hold_release_nm);
 }
 
+// A direct-to may only ever name a fix the aircraft is actually routed over:
+// one of the filed route fixes (SID legs + navlog + airways). ATC clearing an
+// aircraft direct to a point that is on no part of its flight plan is not a
+// shortcut, it is a re-route -- and in the 2026-08-28 Nice departure it was a
+// symptom, ATC having resolved a SID for an airport being overflown and offered
+// "direct ITCAP", the exit fix of Albenga's ITCA1B. Belt to the departure-field
+// latch's braces: even if a foreign SID ever resolves again, its exit fix is
+// not on our route and the direct is refused. [C. P. Potter]
+static bool route_has_fix(const std::string &ident) {
+  if (ident.empty())
+    return false;
+  for (const auto &f : s_route_fixes)
+    if (f.ident == ident)
+      return true;
+  return false;
+}
+
 bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
                     std::string *out_text) {
   using AS = atc_state_machine::ATCState;
@@ -5003,10 +5391,21 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     // re-init (e.g. after a wrong-freq state bounce) never overwrites it with the
     // drifted nearest airport (LFLY) -- which broke the lflp_west FL110 gate and
     // build_sid_route_table (user 2026-07-22).
+    // Prefer the field LATCHED ON THE GROUND by the runtime. Radar contact can
+    // fire minutes after takeoff, by which time nearest_airport_id has already
+    // drifted to the first field under the climb path (LFMN -> LNMC on a Nice
+    // easterly departure, 2026-08-28), which then keyed the whole SID climb --
+    // FL110 fallback instead of the published FL100 -- on the wrong airport.
     if (s_departure_apt_id.empty()) {
-      s_departure_apt_id  = ctx.nearest_airport_id; // still the departure field here
-      s_departure_apt_lat = ctx.airport_lat;
-      s_departure_apt_lon = ctx.airport_lon;
+      if (!ctx.ifr_departure_icao.empty()) {
+        s_departure_apt_id  = ctx.ifr_departure_icao;
+        s_departure_apt_lat = ctx.ifr_departure_lat;
+        s_departure_apt_lon = ctx.ifr_departure_lon;
+      } else {
+        s_departure_apt_id  = ctx.nearest_airport_id;
+        s_departure_apt_lat = ctx.airport_lat;
+        s_departure_apt_lon = ctx.airport_lon;
+      }
     }
     // Build the DEPARTURE half of the unified route table (SID + enroute
     // navlog) so the compliance monitor / speed enforcement work during the
@@ -5433,13 +5832,19 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
   remember_controller_label(lbl);
         s_pending_handoff_freq_mhz = mhz;
         s_sector_checkin_pending = true;
-        s_sid_pending_climb_ft = sid_cruise_ft_ph29; // FIR clears cruise on check-in
+        // Step the queued climb: the FIR clears the first rung on check-in,
+        // poll_climb_next_step owes the rest as the aircraft reaches it.
+        s_sid_pending_climb_ft =
+            climb_step_ft(static_cast<int>(ctx.altitude_ft_msl),
+                          sid_cruise_ft_ph29);
+        s_climb_final_target_ft =
+            (s_sid_pending_climb_ft < sid_cruise_ft_ph29) ? sid_cruise_ft_ph29 : 0;
         s_sid_cruise_issued = true;        // queued -> blocks the Phase 2b fallback
         s_sid_radar_handoff_issued = true; // this IS the final SID/enroute handoff
         logging::info("IFR SID climb: FIR handoff -> %s %.3f (openair '%s') at "
-                      "%.0f ft MSL; cruise FL%d queued for pilot check-in",
+                      "%.0f ft MSL; FL%d queued for pilot check-in (cruise FL%d)",
                       lbl.c_str(), mhz, fir.name.c_str(), ctx.altitude_ft_msl,
-                      sid_cruise_ft_ph29 / 100);
+                      s_sid_pending_climb_ft / 100, sid_cruise_ft_ph29 / 100);
         return true;
       }
     }
@@ -5658,10 +6063,16 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
         // rapid consecutive messages (previous two-frame split) caused pilots
         // to miss the altitude change while reacting to the freq change.
         s_sid_cruise_issued = true;
-        int cruise_fl =
+        const int cruise_ft_tma =
             round_to_fl(ctx.ifr_cruise_alt_ft > 0 ? ctx.ifr_cruise_alt_ft
-                                                  : s_sid_step1_alt_ft + 4000);
-        s_enroute_cleared_alt_ft = cruise_fl * 100;
+                                                  : s_sid_step1_alt_ft + 4000) *
+            100;
+        const int step_ft_tma =
+            climb_step_ft(static_cast<int>(ctx.altitude_ft_msl), cruise_ft_tma);
+        s_climb_final_target_ft =
+            (step_ft_tma < cruise_ft_tma) ? cruise_ft_tma : 0;
+        int cruise_fl = step_ft_tma / 100;
+        s_enroute_cleared_alt_ft = step_ft_tma;
         // Omit "climb FL..." when aircraft is already at or above cruise FL
         // to avoid issuing a step-down instruction.
         const bool already_at_cruise =
@@ -5774,15 +6185,19 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     if (!step2_pending && step2_dwell_ok && (near || timeout) &&
         !sid_step1_hold_active(ctx)) {
       s_sid_cruise_issued = true;
-      s_enroute_cleared_alt_ft =
-          sid_cruise_fl * 100; // record for en-route altitude monitoring
+      const int step_ft_2b = climb_step_ft(
+          static_cast<int>(ctx.altitude_ft_msl), sid_cruise_fl * 100);
+      s_climb_final_target_ft =
+          (step_ft_2b < sid_cruise_fl * 100) ? sid_cruise_fl * 100 : 0;
+      s_enroute_cleared_alt_ft = step_ft_2b; // for en-route altitude monitoring
       if (out_text) {
         char buf[64];
         std::snprintf(buf, sizeof(buf), "%s, climb flight level %d.",
-                      callsign.c_str(), sid_cruise_fl);
+                      callsign.c_str(), step_ft_2b / 100);
         *out_text = buf;
       }
-      logging::info("IFR SID climb: FL%d (cruise clearance)", sid_cruise_fl);
+      logging::info("IFR SID climb: FL%d (cruise clearance%s)", step_ft_2b / 100,
+                    s_climb_final_target_ft > 0 ? ", stepped" : "");
       return true;
     }
   }
@@ -5811,7 +6226,7 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
       // climb FL X" shortcut. 80 % of the time -- and always closer in -- issue a
       // plain "climb FL X" without the direct-to. Only gate if we actually have a
       // valid SID last fix to direct-to; otherwise always the plain climb.
-      const bool have_last_fix = !ctx.ifr_sid_last_fix.empty();
+      const bool have_last_fix = route_has_fix(ctx.ifr_sid_last_fix);
       // Honour SHORTCUTS ALWAYS (was a plain rand -- the UI switch silently did
       // nothing here, user 2026-08-07). Roll only when the direct is offerable
       // (>= kSidDirectMinNm); closer in, the roll stays ARMED for the deferred
@@ -5915,8 +6330,18 @@ bool poll_sid_climb(const xplane_context::XPlaneContext &ctx, float dt,
     // SHORTCUTS ALWAYS.
     // FUTURE (user 2026-08-07): make this gate configurable per departure in
     // airport+.json ("direct_allowed_after": a fix ident / NM / minutes).
+    // Say it out loud in Log.txt the first time a SID exit fix is rejected as
+    // off-route: silence is what let "direct ITCAP" reach the pilot unexplained
+    // on 2026-08-28. One line per departure, never per frame.
+    if (!s_sid_offroute_logged && !ctx.ifr_sid_last_fix.empty() &&
+        !route_has_fix(ctx.ifr_sid_last_fix) && !s_route_fixes.empty()) {
+      s_sid_offroute_logged = true;
+      logging::info("IFR SID: direct-to REFUSED -- %s is not on the filed "
+                    "route (%zu fixes); SID resolved for the wrong field?",
+                    ctx.ifr_sid_last_fix.c_str(), s_route_fixes.size());
+    }
     if (s_sid_step1_issued && !s_sid_direct_issued && !s_sid_direct_rolled &&
-        !ctx.ifr_sid_last_fix.empty() && far_enough) {
+        route_has_fix(ctx.ifr_sid_last_fix) && far_enough) {
       s_sid_direct_rolled = true; // one roll per departure, fire or not
       if (settings::shortcut_always() || (std::rand() % 5) == 0) {
         s_sid_direct_issued = true;
@@ -6075,7 +6500,7 @@ static std::string alt_clearance_qnh_once(const xplane_context::XPlaneContext &c
   if (q == std::string::npos)
     return out; // spoken as a flight level
   const float f = active_freq_mhz(ctx);
-  if (s_qnh_stated && std::fabs(f - s_qnh_stated_freq) < 0.005f) {
+  if (s_qnh_stated && std::fabs(f - s_qnh_stated_freq) < 0.006f) {
     logging::debug("[phraseo] QNH omitted: already stated on %.3f MHz", f);
     return out.substr(0, q);
   }
@@ -7197,6 +7622,37 @@ static std::string controller_fragment(std::string n) {
 // aircraft is in that SAME terminal TMA (i.e. on Chambery, after the handoff).
 // Returns true when openair / destination data is unavailable so it never blocks a
 // field that has no nested TMAs (single-TMA arrivals like LFMN, AFIS fields).
+// Inside the DESTINATION's own control zone?
+//
+// The transfer to Tower is anchored on the FAF, with a per-approach override for
+// curved finals. An approach that publishes NO final approach fix has neither,
+// and fell through to a blunt "below 3500 ft AGL and within 12 NM" guess. The
+// airspace itself is the better answer and it is already in openair: entering
+// the field's CTR IS the moment Approach lets go (user 2026-08-29).
+//
+// Identified by NAME, not by class or distance: the volume enclosing the field
+// at 1000 ft is its control zone (INNSBRUCK CTR 0-7000), and the aircraft is in
+// it when its own enclosing volume carries the same name. That keeps a CTR
+// merely overflown on the way in from counting. [C. P. Potter]
+static bool inside_destination_ctr(const xplane_context::XPlaneContext &ctx) {
+  if (!openair_db::ready())
+    return false;
+  const std::string dest =
+      s_assigned_dest_icao.empty() ? ctx.ifr_destination : s_assigned_dest_icao;
+  if (dest.empty())
+    return false;
+  const auto dpos = xplane_context::airport_pos_for(dest);
+  if (dpos.first == 0.0 && dpos.second == 0.0)
+    return false;
+  const openair_db::AirspaceEntry field_ctr =
+      openair_db::find_enclosing(dpos.first, dpos.second, 1000);
+  if (field_ctr.name.empty())
+    return false;
+  const openair_db::AirspaceEntry acft =
+      openair_db::find_enclosing(ctx.latitude, ctx.longitude, openair_alt(ctx));
+  return !acft.name.empty() && acft.name == field_ctr.name;
+}
+
 static bool on_destination_terminal(const xplane_context::XPlaneContext &ctx) {
   if (!openair_db::ready() || s_assigned_dest_icao.empty())
     return true;
@@ -7355,7 +7811,7 @@ static int sector_transfer_floor_ft(const xplane_context::XPlaneContext &ctx,
   float cf = 0.0f, lf = 0.0f;
   if (resolve_tma_controller(cur.name, nullptr, &cf) &&
       resolve_tma_controller(lower.name, nullptr, &lf) &&
-      std::fabs(cf - lf) < 0.005f)
+      std::fabs(cf - lf) < 0.006f)
     return 0;
   // The clamp protects an INNER TERMINAL controller's airspace, so the volume
   // below must plausibly BE one. Without this an enroute/upper block becomes an
@@ -7596,7 +8052,7 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
     const float active_com_arr =
         (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
     if (app_label == s_arrival_freq_handoff_label ||
-        std::fabs(active_com_arr - app_freq) < 0.005f)
+        std::fabs(active_com_arr - app_freq) < 0.006f)
       return false; // already tuned to this controller / frequency
     s_arrival_freq_handoff_label = app_label;
     s_enroute_approach_freq_mhz = app_freq; // gate check-in on correct frequency
@@ -7629,7 +8085,7 @@ static bool build_approach_handoff(const xplane_context::XPlaneContext &ctx,
   const float active_com_app =
       (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
   if (app_label == s_arrival_freq_handoff_label ||
-      std::fabs(active_com_app - app_freq) < 0.005f) {
+      std::fabs(active_com_app - app_freq) < 0.006f) {
     // Already on the terminal controller (the pilot checked in via the sector ack
     // BEFORE APPROACH entry) -> go straight to APPROACH_DESCENT. Staying in
     // APPROACH_CONTACT would wait for an "approach check-in" that already happened,
@@ -8202,8 +8658,38 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
                                                        dest_stack_walk_ok());
     }
   }
+  // ONE FLOOR FOR BOTH MECHANISMS. The vectoring platform is the published
+  // inbound level (SAPRE 7000 on the LSGG ILS 22, against a 4000 ft FAF), and
+  // the ladder must not walk the aircraft below it on the way in -- wiring only
+  // the vectoring left the ladder descending to 6000 first, so the platform
+  // could never apply and the approach clearance still handed out 4000 sixteen
+  // miles out. The floor lifts once the aircraft is close enough for the 3
+  // degree path from that level to be intercepted -- (level - FAF) / 318 NM,
+  // 9.4 NM at Geneva, which is the D17.7 gate the chart draws. [C. P. Potter]
+  int target_ft = fc.alt_target_ft;
+  {
+    static std::string s_inb_key;
+    static int s_inb_ft = 0;
+    const std::string key =
+        s_assigned_dest_icao + "/" + s_assigned_approach_designator;
+    if (key != s_inb_key) {
+      s_inb_key = key;
+      s_inb_ft = cifp_reader::approach_inbound_level_ft(
+          ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator);
+    }
+    if (s_inb_ft > target_ft && arrival_is_vectored(ctx)) {
+      const double keep_nm =
+          (s_inb_ft - target_ft) / 318.0; // 3 degree path, ft per NM
+      if (fc.dist_nm > keep_nm) {
+        logging::info("IFR descent: holding %d ft to %s -- published inbound "
+                      "level, released inside %.1f NM (%.1f NM to go)",
+                      s_inb_ft, fc.ident.c_str(), keep_nm, fc.dist_nm);
+        target_ft = s_inb_ft;
+      }
+    }
+  }
   const int issue_ft =
-      descent_rung_ft(alt_ref_now, fc.alt_target_ft, dest_tma_ceil);
+      descent_rung_ft(alt_ref_now, target_ft, dest_tma_ceil);
   if (issue_ft == s_descent_cifp_target_ft)
     return false; // already cleared to this level
   // Do not stack the next rung on top of one the pilot has not flown yet.
@@ -8244,7 +8730,17 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   if (alt_to_lose <= 200.0)
     return false; // essentially at the level already
   const double tod_dist = descent_distance_nm(alt_to_lose);
-  if (fc.dist_nm > tod_dist)
+  // THE DISTANCE THE AIRCRAFT WILL ACTUALLY FLY, not the one left in front of
+  // it. All three figures (routed, direct, vector track) have been logged here
+  // since 2026-08-17 with the note that nothing consumed them yet; the flight of
+  // 2026-08-21 settled which one dominates. On a vectored arrival the routed
+  // distance collapses onto the straight line as soon as the remaining fixes
+  // fall abeam and are skipped -- 6.0 NM to GG808 with a whole pattern still to
+  // fly -- so the profile demanded 500 ft/NM and worded "expedite" out of
+  // nowhere. Take the LONGER of the two: a track cannot be shorter than the
+  // pattern the same engine is about to assign. [C. P. Potter]
+  const double eff_dist_nm = std::max(fc.dist_nm, vectored_distance_nm(ctx));
+  if (eff_dist_nm > tod_dist)
     return false; // not yet at the top of descent for this crossing
   s_descent_cifp_target_ft = issue_ft;
   s_enroute_cleared_alt_ft = issue_ft; // coordinates with the walker
@@ -8268,6 +8764,14 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
                        : fc.alt_is_fl                 ? AltHint::FlightLevel
                                                       : AltHint::Auto;
   const std::string clr = format_alt_clearance(issue_ft, hint, ctx.qnh_hpa, ta);
+  // RECORD WHAT IS ABOUT TO BE SPOKEN. Only alt_clearance_qnh_once() kept this
+  // register, and the ladder does not go through it -- so the FL100 it issued at
+  // 15:42 was never written down, and the vector restated it at 18:51 to an
+  // aircraft still descending towards exactly that level (real flight EDLW
+  // 2026-08-25). The register is what every "do not re-issue an instruction in
+  // force" test reads; a transmitter that does not write to it makes all of them
+  // blind. [C. P. Potter]
+  s_last_transmitted_alt_ft = issue_ft;
   // If the profile is already steep, SAY SO when issuing the level rather than
   // leaving the pilot to discover it (user, 2026-08-16: "si la pente de descente
   // est trop forte n'oublie pas que le controle peut limiter la vitesse et/ou
@@ -8278,8 +8782,13 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   // kDescentSlopeFtPerNm is the 2.5 degree reference; beyond ~1.35x of it the
   // clearance is steep enough to be worth naming. ICAO form: EXPEDITE DESCENT TO
   // (level).
+  // Judged on the same effective distance the trigger used, or the wording
+  // contradicts the decision: a clearance issued because there is room cannot
+  // then be called steep for lack of it.
   const double need_ftnm =
-      fc.dist_nm > 1.0 ? (alt_now - issue_ft) / fc.dist_nm : 0.0;
+      eff_dist_nm > 1.0
+          ? (static_cast<double>(alt_now) - issue_ft) / eff_dist_nm
+          : 0.0;
   const bool steep = need_ftnm > kDescentSlopeFtPerNm * 1.35;
   *out_text = callsign + (steep ? ", expedite descent to " : ", descend ") + clr + ".";
   if (steep)
@@ -8328,20 +8837,24 @@ static bool poll_profile_crossing(const xplane_context::XPlaneContext &ctx,
   const double vec_nm = vectored_distance_nm(ctx);
   if (direct_nm > 0.0 || vec_nm > 0.0) {
     const double g_routed =
-        fc.dist_nm > 1.0 ? (alt_now - issue_ft) / fc.dist_nm : 0.0;
+        fc.dist_nm > 1.0
+            ? (static_cast<double>(alt_now) - issue_ft) / fc.dist_nm
+            : 0.0;
     if (vec_nm > 0.0)
       logging::info("IFR descent: distances to %s -- routed %.1f, direct %.1f, "
                     "vector track %.1f NM (min) | gradient routed %.0f, vector "
                     "%.0f ft/NM (VECTORING)",
                     fc.ident.c_str(), fc.dist_nm, direct_nm, vec_nm, g_routed,
-                    (alt_now - issue_ft) / vec_nm);
+                    (static_cast<double>(alt_now) - issue_ft) / vec_nm);
     else
       logging::info("IFR descent: distances to %s -- routed %.1f, direct %.1f "
                     "NM (routed is %+.1f) | gradient routed %.0f, direct %.0f "
                     "ft/NM",
                     fc.ident.c_str(), fc.dist_nm, direct_nm,
                     fc.dist_nm - direct_nm, g_routed,
-                    direct_nm > 1.0 ? (alt_now - issue_ft) / direct_nm : 0.0);
+                    direct_nm > 1.0
+                        ? (static_cast<double>(alt_now) - issue_ft) / direct_nm
+                        : 0.0);
   }
   return true;
 }
@@ -8384,6 +8897,18 @@ bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
        state == AS::IFR_DESCENT || state == AS::IFR_ARRIVAL) &&
       !s_assigned_dest_icao.empty() && openair_db::ready() &&
       on_destination_terminal(ctx))
+    return false;
+  // A VECTORED PATTERN OWNS ITS OWN SPEEDS. The sequence assigns 210 outbound,
+  // 180 on the base and 160 on final -- all tighter than the generic "250 knots
+  // or less" that fires on the way down through FL100. Left alone, the generic
+  // landed FOUR SECONDS before the first of them: "reduce speed, 250 knots or
+  // less" then "reduce speed to 210 knots" (LSGG replay, 2026-08-21). A
+  // controller does not issue a maximum he is about to tighten. Scoped to the
+  // approach states, where the pattern is the thing flying the aircraft; the
+  // en-route limit is untouched. [C. P. Potter]
+  if ((state == AS::IFR_APPROACH_CONTACT || state == AS::IFR_APPROACH_DESCENT ||
+       state == AS::IFR_APPROACH_TOWER) &&
+      arrival_is_vectored(ctx))
     return false;
 
   // Effective speed limit in force now: the tighter of the ICAO 250 kt < FL100
@@ -8475,6 +9000,69 @@ bool poll_speed_restriction(const xplane_context::XPlaneContext &ctx,
 // poll_profile_enforcement is the per-frame hook it runs from.
 static void log_vector_mode_decision(const xplane_context::XPlaneContext &ctx);
 
+// Next rung of a stepped CLIMB. The cruise clearance was capped at
+// kMaxSingleClimbFt and the remainder stashed in s_climb_final_target_ft; as the
+// aircraft reaches each rung the controller clears the next one, until cruise.
+// Mirrors poll_descent_second_step, but loops: FL140 -> FL240 -> FL340 -> FL450.
+// [C. P. Potter]
+static bool poll_climb_next_step(const xplane_context::XPlaneContext &ctx,
+                                 float dt, std::string *out_text,
+                                 bool *out_requires_readback) {
+  using AS = atc_state_machine::ATCState;
+  if (s_climb_final_target_ft <= 0)
+    return false;
+  const AS st = atc_state_machine::get_state();
+  if (st != AS::IFR_RADAR_CONTACT && st != AS::IFR_ENROUTE_CRUISE) {
+    s_climb_final_target_ft = 0; // the descent owns the profile from here
+    return false;
+  }
+  const int cleared = s_enroute_cleared_alt_ft;
+  if (cleared <= 0 || cleared >= s_climb_final_target_ft) {
+    s_climb_final_target_ft = 0; // nothing left to owe
+    return false;
+  }
+  // Only once the aircraft has actually reached the rung it is on.
+  if (static_cast<int>(ctx.altitude_ft_msl) < cleared - 500) {
+    s_climb_ladder_wait_sec = 0.0f;
+    return false;
+  }
+  const int next_ft = climb_step_ft(cleared, s_climb_final_target_ft);
+
+  // A handoff is in flight: say nothing over the transfer. The next rung is the
+  // first thing the NEW sector clears once the pilot checks in -- which is how
+  // it sounds on frequency: "climbing flight level 260" / "climb flight level
+  // 360". The rung is NOT queued into s_sid_pending_climb_ft: poll_sid_climb
+  // wipes that field every frame the state is not RADAR_CONTACT.
+  if (s_sector_checkin_pending || s_sid_pending_climb_ft > 0) {
+    // ... unless the check-in never comes. Levelling off forever at an
+    // intermediate rung because nobody claimed the aircraft is worse than one
+    // extra transmission from the sector that still has it.
+    s_climb_ladder_wait_sec += dt;
+    if (s_climb_ladder_wait_sec < kClimbLadderHandoffGraceSec)
+      return false;
+    logging::info("IFR climb ladder: no check-in after %.0f s -- FL%d cleared by "
+                  "the sector that still has the aircraft",
+                  static_cast<double>(kClimbLadderHandoffGraceSec),
+                  next_ft / 100);
+  }
+  s_climb_ladder_wait_sec = 0.0f;
+  s_enroute_cleared_alt_ft = next_ft;
+  if (next_ft >= s_climb_final_target_ft)
+    s_climb_final_target_ft = 0; // cruise reached, ladder consumed
+  if (out_text) {
+    char buf[80];
+    std::snprintf(buf, sizeof(buf), "%s, climb flight level %d.",
+                  spoken_callsign(ctx).c_str(), next_ft / 100);
+    *out_text = buf;
+  }
+  if (out_requires_readback)
+    *out_requires_readback = true;
+  logging::info("IFR climb ladder: FL%d (from FL%d%s)", next_ft / 100,
+                cleared / 100,
+                s_climb_final_target_ft > 0 ? ", more to come" : ", cruise");
+  return true;
+}
+
 bool poll_profile_enforcement(const xplane_context::XPlaneContext &ctx, float dt,
                               std::string *out_text,
                               bool *out_requires_readback) {
@@ -8507,6 +9095,10 @@ bool poll_profile_enforcement(const xplane_context::XPlaneContext &ctx, float dt
     *out_requires_readback = false;
   if (!airborne_ifr)
     return false;
+  // Owed rungs of a stepped climb, before any enforcement: the aircraft is doing
+  // exactly as told and is waiting for the rest of its clearance.
+  if (poll_climb_next_step(ctx, dt, out_text, out_requires_readback))
+    return true;
   // Deferred first-check-in ack fallback: if the step1 merge has not spoken within
   // 6 s, replay the suppressed "radar contact" ack VERBATIM. Lives here (every
   // airborne IFR phase) -- NOT in poll_sid_climb (RADAR_CONTACT-only, resets its
@@ -8536,9 +9128,21 @@ bool poll_profile_enforcement(const xplane_context::XPlaneContext &ctx, float dt
     const double faf_nm = traffic_geometry::distance_nm(
         ctx.latitude, ctx.longitude, s_approach_faf.lat, s_approach_faf.lon);
     if (faf_nm < 2.0) {
-      logging::info("[approach] profile enforcement yielded to Tower handoff "
-                    "(%.1f NM from FAF %s)",
-                    faf_nm, s_approach_faf.ident.c_str());
+      // ONCE, on entering the yield -- not every frame. This fires from a
+      // per-frame poll and the aircraft can sit inside 2 NM of the FAF for
+      // minutes: 1 659 identical lines on the LOWI arrival of 2026-08-30. The
+      // interesting fact is that the yield STARTED (and, when it happens, that
+      // it never ended -- the "stands aside for a transfer that never comes"
+      // deadlock in force-app-vectoring.md). Repeating it at 60 Hz does not add
+      // information, it buries it. [C. P. Potter]
+      // Keyed on the FAF so a new approach logs its own yield.
+      static std::string s_yield_logged_faf;
+      if (s_yield_logged_faf != s_approach_faf.ident) {
+        s_yield_logged_faf = s_approach_faf.ident;
+        logging::info("[approach] profile enforcement yielded to Tower handoff "
+                      "(%.1f NM from FAF %s) -- silent until the transfer comes",
+                      faf_nm, s_approach_faf.ident.c_str());
+      }
       return false;
     }
   }
@@ -8767,7 +9371,7 @@ bool poll_enroute(const xplane_context::XPlaneContext &ctx, float dt,
             s_pending_handoff_freq_mhz = new_freq_mhz;
             const float active_com_now =
                 (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
-            if (std::fabs(active_com_now - new_freq_mhz) < 0.005f) {
+            if (std::fabs(active_com_now - new_freq_mhz) < 0.006f) {
               s_sector_checkin_pending = false;
               logging::info("IFR en-route: sector change -> %s %.3f MHz (already on freq -- silent)",
                             new_label.c_str(), new_freq_mhz);
@@ -9943,7 +10547,7 @@ static bool poll_acc_sector_change(const xplane_context::XPlaneContext &ctx,
   s_pending_handoff_freq_mhz = new_mhz;
   const float active_com_now =
       (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
-  if (std::fabs(active_com_now - new_mhz) < 0.005f) {
+  if (std::fabs(active_com_now - new_mhz) < 0.006f) {
     s_sector_checkin_pending = false;
     logging::info("IFR ACC: sector change -> %s %.3f MHz (already on freq -- silent)",
                   new_label.c_str(), new_mhz);
@@ -9991,6 +10595,8 @@ static int   s_spd_comp_target_kt = 0;
 static float s_spd_comp_arm_sec = 0.0f;
 static bool  s_spd_comp_sent = false;
 static float s_spd_comp_prev_kt = 0.0f;
+static float s_spd_comp_win_sec = 0.0f;  // rolling window for the rate
+static float s_spd_comp_rate    = 0.0f;  // kt/s over the last window
 
 bool poll_speed_compliance(const xplane_context::XPlaneContext &ctx, float dt,
                            std::string *out_text) {
@@ -10005,6 +10611,17 @@ bool poll_speed_compliance(const xplane_context::XPlaneContext &ctx, float dt,
   // net exists for -- 250+ kt with 210 assigned -- is 40 kt over and still
   // caught. [C. P. Potter]
   constexpr float kToleranceKt = 20.0f;
+  // A CANCELLED RESTRICTION IS NOT MONITORED. "cleared to land ... no ATC speed
+  // restrictions" and, TWELVE SECONDS LATER, "confirm speed 210 knots" -- the
+  // release cleared the transmission but left this net armed on the speed it had
+  // just cancelled (real flight LSGG 2026-08-22). Nothing to check once the
+  // pilot has been told he is free. [C. P. Potter]
+  if (s_speed_released) {
+    s_spd_comp_target_kt = 0;
+    s_spd_comp_arm_sec = 0.0f;
+    s_spd_comp_sent = false;
+    return false;
+  }
   const int target = s_atc_assigned_speed_kt;
   if (target <= 0) {
     s_spd_comp_target_kt = 0;
@@ -10017,10 +10634,19 @@ bool poll_speed_compliance(const xplane_context::XPlaneContext &ctx, float dt,
     s_spd_comp_arm_sec = 0.0f;
     s_spd_comp_sent = false;
     s_spd_comp_prev_kt = 0.0f;
+    s_spd_comp_win_sec = 0.0f;
+    s_spd_comp_rate = 0.0f;
     return false;
   }
   s_spd_comp_arm_sec += dt;
-  if (s_spd_comp_sent || atc_state_machine::is_readback_pending())
+  // A PENDING READBACK MUTES THIS NET, BUT NOT FOR EVER. It exists so the query
+  // does not land while the pilot is still speaking; a readback that never gets
+  // matched -- a mis-transcription, a call the parser did not recognise -- would
+  // otherwise silence the monitor for the rest of the flight. Past the grace, the
+  // deviation matters more than the courtesy. [C. P. Potter]
+  if (s_spd_comp_sent ||
+      (atc_state_machine::is_readback_pending() &&
+       s_spd_comp_arm_sec < kGraceSecs * 2.0f))
     return false;
   if (s_spd_comp_arm_sec < kGraceSecs)
     return false;
@@ -10034,11 +10660,30 @@ bool poll_speed_compliance(const xplane_context::XPlaneContext &ctx, float dt,
   // decelerates at the real 1.2 kt/s and needs 58 s to go from 280 to 210, so a
   // 45 s grace alone called correct behaviour a fault. Only an aircraft that is
   // NOT converging gets the question.
-  const float rate = (s_spd_comp_prev_kt > 0.0f && dt > 0.0f)
-                         ? (ias - s_spd_comp_prev_kt) / std::max(dt, 0.001f)
-                         : 0.0f;
-  s_spd_comp_prev_kt = ias;
-  if (rate < -0.4f)
+  // MEASURED OVER TEN SECONDS, NOT OVER ONE FRAME. The rate used to be
+  // (ias - previous) / dt with dt around 20 ms, so a tenth of a knot of
+  // anemometer noise read as five knots per second of deceleration and the net
+  // fell silent. That is why an aircraft flying 202 kt with 180 assigned was
+  // never questioned, six minutes after the instruction (real flight
+  // 2026-08-23, user: "le pilote ne respecte pas et il ne recoit pas de message
+  // de l'ATC"). A trend needs a window; ten seconds is short enough to notice a
+  // genuine deceleration and long enough to ignore the needle. [C. P. Potter]
+  constexpr float kRateWindowSecs = 10.0f;
+  s_spd_comp_win_sec += dt;
+  float rate = 0.0f;
+  if (s_spd_comp_win_sec >= kRateWindowSecs) {
+    if (s_spd_comp_prev_kt > 0.0f)
+      rate = (ias - s_spd_comp_prev_kt) / s_spd_comp_win_sec;
+    s_spd_comp_prev_kt = ias;
+    s_spd_comp_win_sec = 0.0f;
+    s_spd_comp_rate = rate;
+  }
+  if (s_spd_comp_prev_kt <= 0.0f) {
+    s_spd_comp_prev_kt = ias; // first sample: nothing to compare against yet
+    return false;
+  }
+  // -0.4 kt/s sustained over ten seconds is four knots -- a real deceleration.
+  if (s_spd_comp_rate < -0.4f)
     return false; // converging on the assigned speed
   s_spd_comp_sent = true;
   logging::info("[phraseo] speed challenge: assigned %d kt, flying %.0f kt after "
@@ -10084,8 +10729,10 @@ bool poll_speed_release(const xplane_context::XPlaneContext &ctx,
   if (s_sector_checkin_pending)
     return false;
   const AS st = atc_state_machine::get_state();
-  if (st != AS::IFR_APPROACH_DESCENT && st != AS::IFR_APPROACH_TOWER &&
-      st != AS::IFR_LANDING_CLEARED)
+  // NOT after the landing clearance any more: that transmission now carries the
+  // cancellation itself (see the clearance builder), so speaking it again a few
+  // seconds later is the duplicate the pilot heard on 2026-08-21.
+  if (st != AS::IFR_APPROACH_DESCENT && st != AS::IFR_APPROACH_TOWER)
     return false;
   // Resolve the FAF the way the vectoring does, NOT from s_approach_faf: that
   // member is only populated inside poll_approach, so on a vectored arrival --
@@ -10247,6 +10894,13 @@ static bool poll_descend_to_enter_tma(const xplane_context::XPlaneContext &ctx,
                                       std::string *out_text,
                                       bool *out_requires_readback) {
   if (!out_text || !openair_db::ready())
+    return false;
+  // Never clear across an unanswered transfer. Between "contact X on <freq>" and
+  // the pilot's check-in there is no controller in a position to issue a level:
+  // the outgoing one has released the aircraft, the incoming one has not heard
+  // it yet. Same rule already applied to poll_speed_release (build 104).
+  // [C. P. Potter]
+  if (s_sector_checkin_pending)
     return false;
   // Only descend INTO the DESTINATION's terminal area. Over an ENROUTE TMA
   // (LOWI/DOLSKO tops FL245 while transiting at FL450) this must NOT fire a
@@ -10611,6 +11265,29 @@ static void log_vector_mode_decision(const xplane_context::XPlaneContext &ctx) {
           ? static_cast<int>(xplane_context::airport_elevation_ft(dest))
           : 0;
   const int above_field = msa_min - field_ft;
+  // INFORMATIVE, NOT GATING (2026-08-30, user: "le FAF est a 13000 pieds, ca ne
+  // passe pas ?").
+  //
+  // "MSA minus aerodrome elevation" measures how MOUNTAINOUS the field is. It
+  // does not measure whether there is room to vector, and at Innsbruck the two
+  // answers are opposite: the terrain is why the procedure is flown high, and
+  // ELMEM and the FAF WI749 are both published at 13 000 ft -- 2 700 ft ABOVE
+  // the lowest sector MSA of 10 300. The heuristic refused vectors on the very
+  // approach whose own platform clears the terrain it was worried about, and it
+  // refused R26-Z too, whose axis after the FAF is straight.
+  //
+  // Nor is "platform vs MSA" the answer: an MSA is a 25 NM emergency sector
+  // minimum, and a published procedure legitimately descends below it on a
+  // surveyed track (LOWI R26-Z holds 9 500 under a 10 300 sector). Neither
+  // number is a minimum vectoring altitude, and we have no MVA data at all.
+  //
+  // What actually protects the aircraft is one level down and uses real data at
+  // the real position: vec_leg_altitude_ft floors EVERY vector leg at the sector
+  // MSA under the aircraft, falling back to the grid MORA. Refusing the whole
+  // mode on a field-wide guess on top of that does not add safety -- it costs
+  // the arrival. The numbers stay in the log so the verdict can still be read.
+  // [C. P. Potter]
+  const int platform_ft = faf.alt_ft;
   const bool terrain_ok = above_field <= kVectorTerrainMarginFt;
 
   // Test 2 -- geometry: is there a STRAIGHT axis AFTER the FAF? An arc there
@@ -10626,13 +11303,18 @@ static void log_vector_mode_decision(const xplane_context::XPlaneContext &ctx) {
       break;
     }
 
-  s_vtf_to_final = terrain_ok && axis_ok;
+  // The AXIS is the gate. A curved final has nothing to be established on, so
+  // vectors-to-final cannot meet its own governing rule; terrain is handled per
+  // leg, above.
+  s_vtf_to_final = axis_ok;
   s_vector_mode_final_known = true;
   const char *mode = s_vtf_to_final ? "vectors to FINAL" : "vectors to IAF";
-  logging::info("[vector] %s %s: MSA min %d ft, field %d ft (+%d), terrain %s; "
-                "axis after FAF %s%s%s -> WOULD USE %s",
+  logging::info("[vector] %s %s: MSA min %d ft, field %d ft (+%d, %s), platform "
+                "%d ft (%+d vs MSA); axis after FAF %s%s%s -> USING %s",
                 dest.c_str(), s_assigned_approach_designator.c_str(), msa_min,
-                field_ft, above_field, terrain_ok ? "OK" : "TOO HIGH",
+                field_ft, above_field,
+                terrain_ok ? "gentle" : "mountainous -- informative only",
+                platform_ft, platform_ft > 0 ? platform_ft - msa_min : 0,
                 axis_ok ? "straight" : "CURVED",
                 curved_at.empty() ? "" : " at ", curved_at.c_str(), mode);
 }
@@ -10736,6 +11418,21 @@ static constexpr double kVecDisplaceDeg   = 40.0; // opening angle to build the 
 // abandon was cured by not judging the geometry until the turn is established,
 // which is where that guard belongs. [C. P. Potter]
 static constexpr double kVecTurnAllowNm   = 3.0;
+// The downwind of a PRESCRIBED (procedure) vector is a SEQUENCING leg, not a
+// pattern: the controller extends it exactly as far as the intercept and the
+// descent need, and no further. Sized on the nominal 30 deg it ran 19 NM
+// outbound from GG512 at Geneva -- 30 NM from the field before turning back
+// (user, 2026-08-20). Forty degrees sits inside the ICAO 45 deg maximum (Doc
+// 4444 8.9.3.6) and costs ~6 NM of outbound; the aim-point calculation still
+// derives the exact angle from the geometry and stays capped at 45, and the
+// abandon floor (vec_floor_s) is untouched. [C. P. Potter]
+static constexpr double kVecDownwindInterceptDeg = 40.0;
+// How far before the fix the procedure prescribes vectors from the sequencing
+// vector is transmitted. A controller says it shortly before the aircraft gets
+// there -- close enough that the pilot is about to reach the fix, far enough
+// that he does not start the published turn. Four miles is ~1 min at 240 kt.
+// [C. P. Potter]
+static constexpr double kVecPrescribedLeadNm = 4.0;
 // Base grace before ATC queries a turn that has not started, PLUS the time the
 // turn itself needs. A fixed 30 s cannot work: a 200 degree reversal -- which is
 // exactly what a downwind-then-intercept asks for -- takes 67 s at the standard
@@ -10743,7 +11440,14 @@ static constexpr double kVecTurnAllowNm   = 3.0;
 // turning (LSGG 2026-08-19). The allowance is now 30 s of reaction plus the arc
 // at standard rate, so the query only ever means "you have had time and have not
 // turned". [C. P. Potter]
-static constexpr float  kVecNudgeSecs     = 30.0f;
+// Reaction allowed before ATC queries a vector, on top of the turn itself at
+// standard rate. THIRTY WAS TOO TIGHT, AND THE MEASUREMENT SAYS SO: the flown
+// arrivals show ~35 s between an instruction and its readback, so a 90 degree
+// turn needs 35 + 30 = 65 s against a 60 s allowance -- the challenge fired
+// while the pilot was doing exactly what he had been told. That is the "confirm
+// turn" nagging reported after every flight. Forty-five leaves ten seconds of
+// margin over the measured reaction. [C. P. Potter]
+static constexpr float  kVecNudgeSecs     = 45.0f;
 static constexpr double kVecTurnRateDegS  = 3.0;
 static constexpr double kVecNudgeDeg      = 20.0;
 
@@ -10986,7 +11690,15 @@ static std::string vec_level_hold_phrase(const xplane_context::XPlaneContext &ct
     const int ta0 = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
     return "descend " + alt_clearance_qnh_once(ctx, lvl, AltHint::Auto, ta0);
   }
-  const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+  // THE PLATFORM IS AN ALTITUDE, always. It is flown on the approach, on QNH,
+  // and every chart publishes it that way -- 7000' at Geneva, 2500' at Dortmund,
+  // 4000' at Nice. Expressed through the usual transition test it came out as
+  // "maintain flight level 70" at Geneva, because that aerodrome has no apt.dat
+  // in this installation and the transition altitude fell back to 5000
+  // ([[reference_no_global_aptdat]]). A flight level in a platform clearance is
+  // wrong twice over: it is not what the chart says, and it hands the pilot a
+  // standard-pressure level for a segment he flies on QNH. [C. P. Potter]
+  const int ta = 60000; // force the feet + QNH form
   const char *verb = (ctx.altitude_ft_msl > static_cast<float>(lvl) + 200.0f)
                          ? "descend "
                          : "maintain ";
@@ -11032,6 +11744,76 @@ static constexpr int    kGlideClearanceFt  = 300;
 // which is not in the navigation data; the published approach altitude is the
 // defensible stand-in on this segment, and the MSA remains the floor on every
 // leg that is NOT on it. [C. P. Potter]
+// THE PLATFORM: the level the aircraft holds so the glide path can come down to
+// meet it. The published inbound level of the approach when it has one (SAPRE
+// 7000 on the LSGG ILS 22), the FAF crossing altitude otherwise (EDLW, whose
+// ILS 06 enters on a DF leg and publishes none). One definition, read once per
+// approach, used by every mechanism that needs it -- the leg level, the length
+// of the downwind, and the test that decides whether a vector may carry the
+// approach clearance. They disagreed before, and each disagreement showed up as
+// a different defect in the same flight. [C. P. Potter]
+static int approach_platform_ft(const xplane_context::XPlaneContext &ctx,
+                                const cifp_reader::FafFix &faf) {
+  static std::string s_key;
+  static int s_pub = 0;
+  const std::string key =
+      s_assigned_dest_icao + "/" + s_assigned_approach_designator;
+  if (key != s_key) {
+    s_key = key;
+    s_pub = cifp_reader::approach_inbound_level_ft(
+        ctx.cifp_dir, s_assigned_dest_icao, s_assigned_approach_designator);
+    logging::info("[vector] %s platform: published inbound level %d ft "
+                  "(FAF %s at %d ft)",
+                  key.c_str(), s_pub, faf.ident.c_str(), faf.alt_ft);
+  }
+  return s_pub > faf.alt_ft ? s_pub : faf.alt_ft;
+}
+
+// Highest PUBLISHED minimum of the approach points still between the aircraft and
+// the FAF, measured along the final approach track. Zero when none applies.
+//
+// THE PLATFORM IS NOT THE FAF CROSSING ALTITUDE. That was the reading behind
+// vec_leg_level_ft's final-segment branch, and it is wrong: the platform is the
+// level the aircraft HOLDS so the glide path can come down to meet it, and the
+// FAF altitude is where it ends up after following that path. On the ILS 22 at
+// Geneva the transition publishes SAPRE at or above 7000, 10.6 NM out on the
+// axis -- from 7000 the 3 degree path is intercepted at ~9.4 NM, which is what
+// that figure IS (user, 2026-08-22). Descending to 4000 twenty miles out put the
+// aircraft 3370 ft below the published profile abeam SAPRE, justified by nothing:
+// real ATC descends there on its MINIMUM VECTORING ALTITUDE, which we do not
+// have -- the only terrain figure we hold is the 7000 ft MSA, the same number.
+//
+// This also restores a rule already recorded for the non-vectored path: assign
+// the FIRST point of the cleared approach, not the FAF. [C. P. Potter]
+static int approach_floor_ahead_ft(const xplane_context::XPlaneContext &ctx,
+                                   const cifp_reader::FafFix &faf,
+                                   double s_now_nm) {
+  if (faf.lat == 0.0 && faf.lon == 0.0 || faf.final_track_deg == 0)
+    return 0;
+  int best = 0;
+  for (const auto &rf : s_route_fixes) {
+    if (!rf.is_approach_proc)
+      continue;
+    if (rf.lat == 0.0 && rf.lon == 0.0)
+      continue;
+    const int lvl = rf.floor_ft > 0 ? rf.floor_ft : rf.alt.feet;
+    if (lvl <= 0)
+      continue;
+    // Along-track distance of this fix BEFORE the FAF, in the same frame the
+    // vectoring uses. Keep only what still lies between us and the FAF.
+    const double brg = traffic_geometry::bearing_deg(faf.lat, faf.lon, rf.lat,
+                                                     rf.lon);
+    const double d = traffic_geometry::distance_nm(faf.lat, faf.lon, rf.lat,
+                                                   rf.lon);
+    const double along =
+        d * std::cos((brg - (faf.final_track_deg + 180.0)) * M_PI / 180.0);
+    if (along <= 0.2 || along >= s_now_nm)
+      continue; // behind the FAF, or not yet reached by the aircraft
+    best = std::max(best, lvl);
+  }
+  return best;
+}
+
 static int vec_leg_level_ft(const xplane_context::XPlaneContext &ctx,
                             const std::string &dest,
                             const cifp_reader::FafFix &faf, double s_nm,
@@ -11092,8 +11874,10 @@ static int vec_leg_level_ft(const xplane_context::XPlaneContext &ctx,
   // are floors -- rounding down would re-create the unreachable level the
   // achievability bound exists to prevent. [C. P. Potter]
   want = ((want + 50) / 100) * 100;
-  if (on_final_segment)
-    return std::max(want, faf.alt_ft > 0 ? faf.alt_ft : want);
+  if (on_final_segment) {
+    const int plat = approach_platform_ft(ctx, faf);
+    return std::max(want, plat > 0 ? plat : want);
+  }
   // THE ROUNDING IS THE LAST WORD. Applied before the MSA floor it was undone by
   // it: LSGG's floor pushed the leg back to 18200 ft and the vector said "descend
   // flight level 182". Above the transition level the value is spoken as a flight
@@ -11111,18 +11895,51 @@ static int vec_leg_level_ft(const xplane_context::XPlaneContext &ctx,
 // pattern side sent "turn left heading 057" to an aircraft on heading 030, which
 // is a 27 degree turn to the RIGHT (real flight 2026-08-16). A wrong turn word is
 // worse than none: the pilot flies the word, not the number.
+// A vector that asks for no turn is not a turn. When the new heading is within
+// kVecNoTurnDeg of the one being flown, "turn right heading 043" to an aircraft
+// already on 043 sounds wrong to the pilot and is wrong on the page: ICAO Doc
+// 4444 12.4.2.2 lists CONTINUE HEADING [three digits] (and CONTINUE PRESENT
+// HEADING) precisely for this case (user, real flight 2026-08-19). Five degrees,
+// not one -- below that the difference is inside the width of the heading bug.
+// [C. P. Potter]
+static constexpr double kVecNoTurnDeg = 5.0;
+
+// "position NN miles from BOSUA" -- the position information ICAO Doc 4444
+// 12.4.2.2 provides for ("POSITION (number) MILES FROM (fix)") and which a
+// vectored aircraft is owed at least once before final. The moment it matters is
+// the FIRST vector: the aircraft is being taken OFF the published procedure, and
+// the distance is the only thing left telling the pilot how much flying remains
+// (user, 2026-08-19). The figure is vec_track_nm() -- the TRACK distance the
+// vector plan will actually fly, outbound extension and intercept turn included,
+// not the straight line, which on a downwind understates it badly. Named against
+// the FAF rather than touchdown because that is the fix the plan measures to.
+// [C. P. Potter]
+static std::string vec_position_phrase(double track_nm, const std::string &fix) {
+  if (fix.empty() || track_nm < 3.0 || track_nm > 100.0)
+    return {};
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), ", position %d miles from %s",
+                static_cast<int>(std::lround(track_nm)), fix.c_str());
+  return buf;
+}
+
 static std::string vec_turn_phrase(double current_hdg, double target_hdg) {
   double delta = std::fmod(target_hdg - current_hdg + 540.0, 360.0) - 180.0;
   char buf[64];
-  std::snprintf(buf, sizeof(buf), "turn %s heading %03d",
-                delta < 0.0 ? "left" : "right",
-                static_cast<int>(std::fmod(target_hdg + 360.0, 360.0)));
+  if (std::fabs(delta) <= kVecNoTurnDeg)
+    std::snprintf(buf, sizeof(buf), "continue heading %03d",
+                  static_cast<int>(std::fmod(target_hdg + 360.0, 360.0)));
+  else
+    std::snprintf(buf, sizeof(buf), "turn %s heading %03d",
+                  delta < 0.0 ? "left" : "right",
+                  static_cast<int>(std::fmod(target_hdg + 360.0, 360.0)));
   // Logged so a "wrong turn" report can be settled on evidence: the direction is
   // only meaningful next to the heading it was computed from.
   logging::info("[vector] turn word: hdg %03d -> %03d, delta %+.0f -> %s",
                 static_cast<int>(std::fmod(current_hdg + 360.0, 360.0)),
                 static_cast<int>(std::fmod(target_hdg + 360.0, 360.0)), delta,
-                delta < 0.0 ? "LEFT" : "RIGHT");
+                std::fabs(delta) <= kVecNoTurnDeg ? "CONTINUE"
+                                                  : (delta < 0.0 ? "LEFT" : "RIGHT"));
   return buf;
 }
 
@@ -11146,8 +11963,16 @@ static bool vectoring_active() {
 static bool vectoring_used() { return s_vtf_leg != VecLeg::None; }
 
 static double vectored_distance_nm(const xplane_context::XPlaneContext &ctx) {
-  if (!vectoring_active() || s_assigned_dest_icao.empty() ||
-      s_assigned_approach_designator.empty())
+  // ALSO BEFORE THE FIRST VECTOR. The track a vectored arrival will fly is
+  // knowable the moment the arrival is latched VECTORED -- it is pure geometry
+  // against the FAF frame -- and that is exactly when it is needed: on
+  // 2026-08-21 the descent profile measured 6.0 NM to GG808 and worded
+  // "expedite descent to 4000 feet" ONE MINUTE BEFORE the vectoring told the
+  // same pilot "position 27 miles from GG808". Gating this on vectoring_active()
+  // meant the profile could only learn the truth after the damage was done.
+  // [C. P. Potter]
+  if (!(vectoring_active() || arrival_is_vectored(ctx)) ||
+      s_assigned_dest_icao.empty() || s_assigned_approach_designator.empty())
     return 0.0;
   const cifp_reader::FafFix &faf =
       vtf_faf(ctx, s_assigned_dest_icao, s_assigned_approach_designator);
@@ -11332,24 +12157,76 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       // The tracker advances on proximity and so lags by a fix: waiting for it to
       // pass GG512 formally left the aircraft 6 NM from the FAF, with no room for
       // anything. Being within a few miles of the fix is being at it.
-      bool at_fix = false;
+      //
+      // JUST BEFORE THE FIX, NOT TEN MILES OUT. The tracker branch used to be
+      // able to release this on its own -- and it did: on the flown arrival of
+      // 2026-08-20 the sequencing vector went out 9.9 NM before GG512, three
+      // minutes of flying during which the pilot was told to continue a heading
+      // for a fix he had not reached (user). The tracker index is not a
+      // position; it advances loosely and, on this arrival, declared GG512
+      // reached while the aircraft was still ten miles from it. So the tracker
+      // may only release the vector once it has moved STRICTLY PAST the fix,
+      // and the fix is genuinely astern. Everything else waits for proximity.
+      // [C. P. Potter]
+      bool have_pos = false, at_fix = false, fix_astern = false;
+      double fix_nm = 0.0;
       if (fix_idx >= 0 && fix_idx < static_cast<int>(s_route_fixes.size())) {
         const auto &pf = s_route_fixes[fix_idx];
-        if (pf.lat != 0.0 || pf.lon != 0.0)
-          at_fix = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
-                                                 pf.lat, pf.lon) <= 4.0;
+        if (pf.lat != 0.0 || pf.lon != 0.0) {
+          have_pos = true;
+          fix_nm = traffic_geometry::distance_nm(ctx.latitude, ctx.longitude,
+                                                 pf.lat, pf.lon);
+          at_fix = fix_nm <= kVecPrescribedLeadNm;
+          const double brg = traffic_geometry::bearing_deg(
+              ctx.latitude, ctx.longitude, pf.lat, pf.lon);
+          fix_astern = std::fabs(vec_norm180(
+                           brg - static_cast<double>(ctx.heading_true))) > 100.0;
+        }
       }
-      at_prescribed_fix = at_fix || (fix_idx >= 0 && s_route_fix_idx >= fix_idx);
-      if (fix_idx >= 0 && s_route_fix_idx < fix_idx && !at_fix) {
+      // ONE CONDITION FOR BOTH, or the aircraft falls into the gap between them.
+      // The release was tightened to "within kVecPrescribedLeadNm, or the fix
+      // astern, or the tracker STRICTLY past" while the wait was left on
+      // "tracker index below the fix" -- and the route tracker declares a fix
+      // reached about ten miles early. So on the flown arrival of 2026-08-21 the
+      // tracker sat exactly ON GG512's index with the aircraft still 9.6 NM from
+      // it: too late to wait, too early to release. Execution fell through to
+      // the geometric arming, which refused for lack of room -- and that refusal
+      // latches, so the arrival got no vectoring at all. Waiting and releasing
+      // are now the same test, negated. [C. P. Potter]
+      //
+      // Without a position for the fix there is nothing to measure, so fall back
+      // to the tracker index exactly as before: a loose release beats no release.
+      // WITH A POSITION, THE TRACKER IS NOT CONSULTED AT ALL. It runs ahead --
+      // measured on the LSGG replay it sits a whole fix past GG512 with the
+      // aircraft still 10 NM from it -- so any branch that reads it re-creates
+      // the very defect this gate exists to remove. The two geometric tests are
+      // complete on their own: either the aircraft comes within the lead, or it
+      // goes past and the fix falls astern. There is no third outcome.
+      at_prescribed_fix = have_pos
+                              ? (at_fix || fix_astern)
+                              : (fix_idx >= 0 && s_route_fix_idx >= fix_idx);
+      if (fix_idx >= 0 && !at_prescribed_fix) {
         static int s_await_logged = -1;
-        if (s_await_logged != s_route_fix_idx) {
+        static int s_await_nm_logged = -1;
+        const int nm_bucket = static_cast<int>(fix_nm);
+        if (s_await_logged != s_route_fix_idx ||
+            s_await_nm_logged != nm_bucket) {
           s_await_logged = s_route_fix_idx;
+          s_await_nm_logged = nm_bucket;
           logging::info("[vector] holding off: the procedure prescribes vectors "
-                        "from %s, still %d fixes upstream",
-                        s_star_vectors_fix.c_str(), fix_idx - s_route_fix_idx);
+                        "from %s, %d fixes upstream, %.1f NM away (release at "
+                        "%.0f NM or once astern)",
+                        s_star_vectors_fix.c_str(), fix_idx - s_route_fix_idx,
+                        fix_nm, kVecPrescribedLeadNm);
         }
         return false;
       }
+      if (fix_idx >= 0)
+        logging::info("[vector] released at %s: %.1f NM away%s%s (tracker %d vs "
+                      "fix %d)",
+                      s_star_vectors_fix.c_str(), fix_nm,
+                      at_fix ? " -- within the lead" : "",
+                      fix_astern ? " -- astern" : "", s_route_fix_idx, fix_idx);
     }
     // AT THE PRESCRIBED FIX, FLY THE PRESCRIBED HEADING. The leg carries its own
     // magnetic course -- 043 at GG512, the reciprocal of the 223 final -- so the
@@ -11373,9 +12250,20 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                     "(s=%.1f y=%.1f) -- sequencing outbound",
                     s_star_vectors_fix.c_str(), s_star_vectors_course,
                     s_vtf_cleared_ft, s, y);
-      *out_text = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) +
+      *out_text = callsign +
+                  vec_position_phrase(vec_track_nm(s, y), faf.ident) + ", " +
+                  vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) +
                   vec_speed_phrase(ctx, kVecSpeedIntermediateKt) +
-                  ", vectoring for " + approach_clearance_phrase(ctx) + ".";
+                  // THE REASON, NOT THE APPROACH. ICAO requires the reason for
+                  // vectoring to be given, and here it is not the approach: the
+                  // STAR turns left at this fix and the aircraft is being sent
+                  // straight on instead, which is a traffic-regulation exception
+                  // (user, 2026-08-20). The approach has already been named in
+                  // the arrival clearance ("expect ILS approach runway 22") and
+                  // is named again in the clearance itself, so repeating it here
+                  // says nothing while hiding why the aircraft is leaving the
+                  // procedure. [C. P. Potter]
+                  ", vectoring for sequencing.";
       if (out_requires_readback)
         *out_requires_readback = true;
       if (st == AS::IFR_DESCENT)
@@ -11510,14 +12398,11 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     s_vtf_capture_s = 0.0;
     s_atc_assigned_speed_kt = 0;
     s_vtf_clearance_pending = false;
-  s_vtf_abandoned = false;
-  s_vtf_slow_issued = false;
-  s_vtf_prev_y = 0.0;
-  s_vtf_prev_s = 0.0;
-  s_vtf_capture_s = 0.0;
-  s_atc_assigned_speed_kt = 0;
-  s_vtf_clearance_pending = false;
-  s_vtf_recut_secs = 0.0f;
+    // NOTHING ELSE. The bulk edit of 2026-08-18 grafted a full vectoring reset
+    // here, and its last line -- s_vtf_recut_secs = 0 -- cancelled the lead time
+    // set three lines above, the one guarantee that the aircraft is given time to
+    // start its turn before the next correction is judged. Two other copies of
+    // the same graft were removed then; these two were missed. [C. P. Potter]
     const int cap = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
     s_vtf_cleared_ft = vec_leg_level_ft(ctx, dest, faf, s, vec_track_nm(s, y),
                                         ctx.altitude_ft_msl, cap);
@@ -11548,9 +12433,25 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     const bool carries_clearance = (s_vtf_leg == VecLeg::Intercept);
     if (s_vtf_cleared_ft > 0) {
       if (!carries_clearance) {
-        const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
-        txt += ", descend " + format_alt_clearance(s_vtf_cleared_ft, AltHint::Auto,
-                                                   ctx.qnh_hpa, ta);
+        // A LEVEL ALREADY IN FORCE IS NOT RE-ISSUED. "descend flight level 100"
+        // went out at 15:42 and the vector said it again at 18:51, to an aircraft
+        // still passing 11 300 ft on its way down to exactly that level (real
+        // flight EDLW 2026-08-25). ICAO 4.6.1.2's principle holds for levels as
+        // it does for speeds: a clearance stays in effect until amended, so on
+        // the same frequency there is nothing to say. When it does need
+        // reaffirming -- after a handoff, or an interrupted descent -- the
+        // phrase is CONTINUE DESCENT TO (level), not a fresh clearance.
+        // The other text builder has carried this test since 2026-08-19
+        // (s_last_transmitted_alt_ft, which records only levels actually
+        // SPOKEN); this one never did. [C. P. Potter]
+        if (s_vtf_cleared_ft == s_last_transmitted_alt_ft) {
+          logging::info("[vector] leg level %d ft not restated: already in force",
+                        s_vtf_cleared_ft);
+        } else {
+          const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+          txt += ", descend " + format_alt_clearance(s_vtf_cleared_ft, AltHint::Auto,
+                                                     ctx.qnh_hpa, ta);
+        }
       }
       s_enroute_cleared_alt_ft = s_vtf_cleared_ft;
     }
@@ -11570,8 +12471,17 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     // Can this vector carry the clearance? Only if the level it assigns IS the
     // altitude to be maintained until established -- the platform. Otherwise the
     // package is deferred whole to the step that assigns it.
+    // Against the PLATFORM, not the FAF altitude. With the platform at its
+    // published 7000 and the FAF at 4000 this test could never be true, so the
+    // 6.7.3.2.7 package was deferred for ever and the intercept vector went out
+    // bare -- four separate transmissions over seven minutes, the clearance
+    // arriving after the pilot had already announced established. Worse than
+    // untidy: without the clearance on the last vector the pilot has nothing to
+    // arm the approach mode on (user, 2026-08-22). [C. P. Potter]
+    const int plat_for_clr = approach_platform_ft(ctx, faf);
     const bool level_is_platform =
-        faf.alt_ft > 0 && s_vtf_cleared_ft > 0 && s_vtf_cleared_ft <= faf.alt_ft;
+        plat_for_clr > 0 && s_vtf_cleared_ft > 0 &&
+        s_vtf_cleared_ft <= plat_for_clr;
     if (carries_clearance && !level_is_platform) {
       s_vtf_clearance_pending = true;
       logging::info("[vector] approach clearance deferred to the platform: leg "
@@ -11817,6 +12727,17 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   // Banning the whole step-down on them left the aircraft at FL100 when it turned
   // inbound, with 6000 ft to lose in 4 NM of axis: it captured 1842 ft above its
   // platform. An ordinary rung on the downwind is exactly what a controller gives.
+  // ONE CLEARANCE AT A TIME. A vector went out at 14:40 with "descend flight
+  // level 100", the platform followed SIXTEEN SECONDS LATER with "descend 2500
+  // feet ... cleared ILS approach runway 06", and the pilot's readback -- correct
+  // for what he had heard -- was judged against the second and answered
+  // "negative, I say again, 2500 feet" (real flight EDLW 2026-08-24). A
+  // controller does not stack a second level on a clearance the pilot has not
+  // acknowledged. Wait for the readback; the platform trigger is a distance
+  // window, not a deadline, and it fires on the next frame that is free.
+  // [C. P. Potter]
+  if (atc_state_machine::is_readback_pending())
+    return false;
   if (!aligning && s_vtf_cleared_ft > 0 && s > kVecAlignNm) {
     const int cap = faf.alt_ft > 0 ? faf.alt_ft + 2000 : 5000;
     // THE LAST DESCENT IS TO THE PLATFORM, NOT ANOTHER RUNG. Chasing the glide
@@ -11940,9 +12861,39 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
   // aircraft pointing nowhere, which is what happened on the flown arrival.
   // So this queries, repeatedly, and never abandons. [C. P. Potter]
   const double herr = heading_error_deg(ctx.heading_mag, s_vtf_hdg);
-  // The allowance scales with the turn STILL TO FLY, at standard rate.
-  const float nudge_after =
+  // AN AIRCRAFT JOINING THE COURSE IS NOT A NON-COMPLIANT ONE. The query is
+  // measured against the ASSIGNED heading, which on an intercept leg is 30
+  // degrees off the axis on purpose -- so a pilot who turns through it onto the
+  // localiser, which is exactly what the clearance asks of him, reads as 30
+  // degrees of error. On 2026-08-22 the aircraft was tracking 228 on the 223
+  // final, had announced "localizer intercepted", and was told "confirm turn
+  // right heading 253": turn back OFF the axis you just joined. Silent whenever
+  // the aircraft is aligned with the final approach course. [C. P. Potter]
+  if (faf.final_track_deg > 0 &&
+      heading_error_deg(ctx.heading_mag,
+                        static_cast<double>(faf.final_track_deg)) <= 15.0) {
+    s_vtf_nudge_secs = 0.0f;
+    s_vtf_nudged = false;
+    return false;
+  }
+  // THE ALLOWANCE IS FROZEN ON THE TURN AS ISSUED, not recomputed from what is
+  // left of it. Scaling it against the REMAINING error meant the deadline moved
+  // toward the aircraft as it complied: a 90 degree base leg starts with 60 s of
+  // allowance and, half way round, is judged against 45 -- so the timer overtook
+  // the deadline while the pilot was doing exactly what he was told, and
+  // "confirm turn left heading 313" went out forty seconds after the vector
+  // (LSGG replay, 2026-08-21; the same nagging the user reported in flight).
+  // Captured on the first frame the timer runs. [C. P. Potter]
+  // A RUNNING MAXIMUM, not a snapshot. Freezing it on the first frame was worse
+  // than recomputing: an aircraft DRIFTING away then gets judged against the
+  // small error it started with. The allowance must never shrink while the turn
+  // is being flown, and must grow if the error does.
+  const float allow_now =
       kVecNudgeSecs + static_cast<float>(herr / kVecTurnRateDegS);
+  if (herr > kVecNudgeDeg)
+    s_vtf_nudge_allow = std::max(s_vtf_nudge_allow, allow_now);
+  const float nudge_after =
+      s_vtf_nudge_allow > 0.0f ? s_vtf_nudge_allow : allow_now;
   if (herr > kVecNudgeDeg) {
     s_vtf_nudge_secs += dt;
     if (s_vtf_nudge_secs > nudge_after) {
@@ -11954,17 +12905,19 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                   vec_turn_phrase(ctx.heading_mag, s_vtf_hdg) + ".";
       if (out_requires_readback)
         *out_requires_readback = true;
-      logging::info("[vector] hdg err %.0f deg after %.0f s (allowed %.0f: 30 s "
-                    "+ the turn at 3 deg/s) -- confirming the turn to %03d "
-                    "(not abandoning)",
+      logging::info("[vector] hdg err %.0f deg after %.0f s (allowed %.0f = %.0f s "
+                    "reaction + the turn at 3 deg/s) -- confirming the turn to "
+                    "%03d (not abandoning)",
                     herr, static_cast<double>(s_vtf_nudge_secs),
                     static_cast<double>(nudge_after),
+                    static_cast<double>(kVecNudgeSecs),
                     static_cast<int>(s_vtf_hdg));
       return true;
     }
   } else {
     s_vtf_nudge_secs = 0.0f;
     s_vtf_nudged = false;
+    s_vtf_nudge_allow = 0.0f; // re-armed on the next turn, from ITS size
   }
 
   // ── leg transitions ───────────────────────────────────────────────────────
@@ -12015,20 +12968,41 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
     // direct-intercept arming, the abandon test and vec_track_nm(); changing IT
     // would move Dortmund, whose platform capture is currently exact. This line
     // is on a leg the direct path never executes. [C. P. Potter]
+    // TO THE PLATFORM, not to the FAF. The aircraft has to reach the level it
+    // will HOLD -- 7000 at Geneva -- and the glide path takes it from there to
+    // the FAF's 4000. Sizing the leg on the whole descent asked for 27 NM where
+    // 15 were needed and sent the aircraft sixteen miles outbound (real flight
+    // 2026-08-22, user: "l'eloignement est trop long, 5 ou 8 NM suffisent").
+    // An aircraft that arrives already at the platform now flies the lateral
+    // requirement and nothing more. [C. P. Potter]
+    const int plat_ft = approach_platform_ft(ctx, faf);
     double desc_need = 0.0;
-    if (faf.alt_ft > 0 && ctx.altitude_ft_msl > static_cast<float>(faf.alt_ft))
-      desc_need = (static_cast<double>(ctx.altitude_ft_msl) - faf.alt_ft) /
+    if (plat_ft > 0 && ctx.altitude_ft_msl > static_cast<float>(plat_ft))
+      desc_need = (static_cast<double>(ctx.altitude_ft_msl) - plat_ft) /
                       kDescentSlopeFtPerNm + 2.0;
     // A cap, so a descent that never keeps up cannot fly the aircraft away.
     const double dw_cap = 2.0 * vec_required_s(y) + kVecTurnAllowNm;
-    const double dw_need =
-        std::min(dw_cap, std::max(vec_required_s(y) + kVecTurnAllowNm, desc_need));
+    // Lateral requirement at the SEQUENCING angle, not the nominal one -- see
+    // kVecDownwindInterceptDeg. The descent term below is unchanged, so a leg
+    // that is short laterally but still high is extended exactly as before.
+    //
+    // And measured at the offset the aircraft will have when the INTERCEPT
+    // starts, not at today's: the BASE leg closes the gap down to
+    // kVecOffsetNm*0.6 first, so the axis distance the intercept needs is the
+    // one for that offset. Sizing on the current offset made the downwind pay
+    // twice for the same miles. [C. P. Potter]
+    const double y_at_intercept = std::min(std::fabs(y), kVecOffsetNm * 0.6);
+    const double dw_lat =
+        vec_required_s(y_at_intercept, kVecDownwindInterceptDeg) +
+        kVecTurnAllowNm;
+    const double dw_need = std::min(dw_cap, std::max(dw_lat, desc_need));
     if (s >= dw_need) {
-      if (desc_need > vec_required_s(y) + kVecTurnAllowNm)
+      if (desc_need > dw_lat)
         logging::info("[vector] downwind extended for the descent: %.1f NM "
                       "needed to lose %.0f ft (lateral wanted %.1f)",
-                      dw_need, ctx.altitude_ft_msl - faf.alt_ft,
-                      vec_required_s(y) + kVecTurnAllowNm);
+                      dw_need,
+                      static_cast<double>(ctx.altitude_ft_msl) - faf.alt_ft,
+                      dw_lat);
       // AIM AT THE POINT kVecInterceptPointNm BEFORE THE FAF, exactly as the
       // direct intercept does -- not at a blind 30 degrees. A fixed angle takes
       // no account of how much axis distance the downwind actually bought, so on
@@ -12040,14 +13014,28 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       // due with it; the level here is not the platform, so it defers to the
       // platform transmission exactly as the direct intercept does.
       s_vtf_clearance_pending = true;
-      s_vtf_leg = VecLeg::Intercept;
-      double ps = s, py = y;
-      vec_project(ctx, course, &ps, &py);
-      const double rel = vec_intercept_rel_deg(ps, py);
-      s_vtf_hdg = std::fmod(course + rel + 360.0, 360.0);
-      logging::info("[vector] intercept aimed at the point %.0f NM before %s "
-                    "after downwind: rel %+.0f deg (s=%.1f y=%.1f)",
-                    kVecInterceptPointNm, faf.ident.c_str(), rel, s, y);
+      // A RACETRACK HAS A BASE LEG. Going straight from the downwind to the
+      // intercept meant one instruction carrying a 163 degree turn -- "continue
+      // heading 043" then "turn left heading 240" -- which is a U-turn, not a
+      // pattern (user, real flight 2026-08-20). The shape is: outbound, then
+      // ninety degrees onto the base toward the axis, then the intercept at
+      // thirty. VecLeg::Base already existed with the whole Base -> Intercept
+      // transition written; nothing ever entered it. [C. P. Potter]
+      //
+      // The side is decided HERE, from the offset at this moment: the procedure
+      // vector arms the downwind without touching s_vtf_turn_left, so the Base
+      // block would otherwise have intercepted using a stale default and turned
+      // the aircraft AWAY from the axis.
+      s_vtf_turn_left = (y >= 0.0);
+      s_vtf_leg = VecLeg::Base;
+      // Perpendicular to the final course, pointing at the axis: from the right
+      // of the inbound direction close from the left, and vice versa.
+      s_vtf_hdg = std::fmod(course + (y >= 0.0 ? -90.0 : 90.0) + 360.0, 360.0);
+      logging::info("[vector] base leg hdg %03d (90 deg to axis %03d) after "
+                    "downwind, closing to %.1f NM before the intercept "
+                    "(s=%.1f y=%.1f)",
+                    static_cast<int>(s_vtf_hdg), faf.final_track_deg,
+                    kVecOffsetNm * 0.6, s, y);
       s_vtf_nudged = false;
       // PER-LEG state only. The assigned speed, the pending approach clearance,
       // the released-speed latch and the last level transmitted describe what
@@ -12065,7 +13053,7 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                   vec_speed_phrase(ctx, kVecSpeedDownwindKt) + ".";
       if (out_requires_readback)
         *out_requires_readback = true;
-      logging::info("[vector] intercept hdg %03d after downwind, speed 180 "
+      logging::info("[vector] base hdg %03d after downwind, speed 180 "
                     "(s=%.1f y=%.1f)", static_cast<int>(s_vtf_hdg), s, y);
       return true;
     }
@@ -12090,11 +13078,56 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
                                        ctx.altitude_ft_msl, cap,
                                        /*on_final_segment=*/true);
       std::string txt = callsign + ", " + vec_turn_phrase(ctx.heading_mag, s_vtf_hdg);
-      if (lvl > 0 && lvl < s_vtf_cleared_ft) {
-        const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
-        txt += ", descend " + format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta);
+      // THIS IS THE LAST VECTOR, so it carries the clearance package (Doc 4444
+      // 6.7.3.2.7): position relative to a fix on the final approach track, the
+      // level to be maintained until established, the approach clearance.
+      // Without it the aircraft was turned onto the intercept, descended to the
+      // platform -- and never cleared: the dedicated platform block downstream
+      // only fires on a step of 900 ft or more, and this block had already
+      // assigned the platform itself, so the pending clearance was stranded and
+      // the arrival ran off the end of the localiser. [C. P. Potter]
+      // Against the PLATFORM, like every other place that asks the question --
+      // this is the block that actually transmits the intercept vector, and it
+      // carried its own copy of the FAF-altitude test.
+      const int plat_leg_c = approach_platform_ft(ctx, faf);
+      const bool lvl_is_platform =
+          lvl > 0 && plat_leg_c > 0 && lvl <= plat_leg_c;
+      // THE LEVEL IS STATED WHETHER OR NOT IT IS A DESCENT. "maintain 7000
+      // until established" is not a descent clearance, it is the constraint the
+      // pilot flies -- and it is what tells him to arm the approach mode. When
+      // the aircraft is already AT the platform there is nothing to descend, and
+      // the phrase was dropped with the descent: the last vector went out as a
+      // bare heading plus a clearance, with no level and no "until established"
+      // (user, 2026-08-22: "sinon on peut ne pas avoir engage le mode APR").
+      // [C. P. Potter]
+      const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+      if (lvl_is_platform && s_vtf_clearance_pending && lvl > 0) {
+        char pos[96];
+        std::snprintf(pos, sizeof(pos), ", %.0f miles from %s, ", s,
+                      faf.ident.c_str());
+        txt += pos;
+        txt += vec_level_hold_phrase(ctx, lvl);
         s_vtf_cleared_ft = lvl;
         s_enroute_cleared_alt_ft = lvl;
+      } else if (lvl > 0 && lvl < s_vtf_cleared_ft) {
+        txt += ", descend " +
+               format_alt_clearance(lvl, AltHint::Auto, ctx.qnh_hpa, ta);
+        s_vtf_cleared_ft = lvl;
+        s_enroute_cleared_alt_ft = lvl;
+      }
+      if (lvl_is_platform && s_vtf_clearance_pending) {
+        const std::string ap = approach_clearance_phrase(ctx);
+        txt += (ap.empty() ? ", cleared approach" : ", cleared " + ap);
+        s_vtf_clearance_pending   = false;
+        s_approach_cleared_issued = true;
+        s_approach_final_issued   = true; // opens the Approach -> Tower handoff
+        const auto st_now = atc_state_machine::get_state();
+        if (st_now == AS::IFR_ARRIVAL || st_now == AS::IFR_DESCENT ||
+            st_now == AS::IFR_APPROACH_CONTACT)
+          atc_state_machine::set_state(AS::IFR_APPROACH_DESCENT);
+        logging::info("[vector] approach clearance issued with the intercept "
+                      "vector: %d ft, %.1f NM from %s", lvl, s,
+                      faf.ident.c_str());
       }
       *out_text = txt + ".";
       if (out_requires_readback)
@@ -12278,8 +13311,18 @@ bool poll_vector_to_final(const xplane_context::XPlaneContext &ctx, float dt,
       // Turn back toward the axis: y > 0 means right of it, so intercept from
       // the right by taking a heading LEFT of the course.
       const double sign = (y > 0.0) ? -1.0 : 1.0;
-      const double hdg =
-          std::fmod(course + kVecInterceptDeg * sign + 360.0, 360.0);
+      // PROPORTIONAL TO THE ERROR, not a fixed 30 degrees. A flat intercept
+      // angle is a control loop with no gain: at 0.8 NM off the axis it crosses
+      // in about a mile and a half, so the aircraft was sent back and forth --
+      // 0.8 right, 1.8 right, 1.2 left, 2.2 left, one correction each way and
+      // never settling (LSGG replay, 2026-08-22). It only became visible when
+      // the platform moved to its published level and the aircraft flew the axis
+      // for longer. A controller closes a small deviation with a small angle:
+      // ten degrees per mile, floored at five so the instruction is worth
+      // transmitting, capped at the usual thirty. [C. P. Potter]
+      const double corr = std::max(5.0, std::min(kVecInterceptDeg,
+                                                 std::fabs(y) * 10.0));
+      const double hdg = std::fmod(course + corr * sign + 360.0, 360.0);
       s_vtf_hdg = hdg;
       s_vtf_nudged = false;
       // ICAO phraseology, not a field idiom. "CLOSING" exists in Doc 4444 only
@@ -12578,6 +13621,16 @@ static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, f
   s_vec_assigned_left = (lr[0] == 'l');
   s_vec_follow_timer  = 0.0f;
   s_vec_nudged        = false;
+  // Same no-turn rule as vec_turn_phrase(): a vector within kVecNoTurnDeg of the
+  // heading being flown is CONTINUE HEADING, not a turn (Doc 4444 12.4.2.2). It
+  // is common here -- a sequencing vector often only confirms the present track.
+  // [C. P. Potter]
+  const double turn_delta = vec_norm180(static_cast<double>(h) - cur_mag);
+  char turn_buf[48];
+  if (std::fabs(turn_delta) <= kVecNoTurnDeg)
+    std::snprintf(turn_buf, sizeof(turn_buf), "continue heading %03d", h);
+  else
+    std::snprintf(turn_buf, sizeof(turn_buf), "turn %s heading %03d", lr, h);
   char buf[224];
   if (last) {
     const int maintain_ft = s_vec_plan.maintain_ft;
@@ -12596,9 +13649,9 @@ static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, f
             : "maintain";
     const std::string phrase = approach_clearance_phrase(ctx);
     std::snprintf(buf, sizeof(buf),
-                  "%s, turn %s heading %03d, %s %s until established on the "
+                  "%s, %s, %s %s until established on the "
                   "approach, cleared %s.",
-                  cs.c_str(), lr, h, alt_verb, alt_str.c_str(),
+                  cs.c_str(), turn_buf, alt_verb, alt_str.c_str(),
                   phrase.empty() ? "the approach" : phrase.c_str());
     s_approach_final_issued = true; // open the FAF/Tower handoff gate
     // Keep the cleared-alt tracker in sync with "descend to <alt> until established"
@@ -12612,9 +13665,8 @@ static bool poll_vector_to_intercept(const xplane_context::XPlaneContext &ctx, f
     logging::info("IFR arrival: vector-to-intercept -- final vector %03d + cleared "
                   "approach (%s %s)", h, alt_verb, alt_str.c_str());
   } else {
-    std::snprintf(buf, sizeof(buf),
-                  "%s, turn %s heading %03d, vectors for the approach.",
-                  cs.c_str(), lr, h);
+    std::snprintf(buf, sizeof(buf), "%s, %s, vectors for the approach.",
+                  cs.c_str(), turn_buf);
     ++s_vec_step;
   }
   s_vec_timer = 0.0f;
@@ -12721,7 +13773,17 @@ static bool poll_hold(const xplane_context::XPlaneContext &ctx, float dt,
 
     static bool s_hold_seeded = false;
     if (!s_hold_seeded) {
-      std::srand(static_cast<unsigned>(std::time(nullptr)));
+      // ATC_SEED makes a replay REPRODUCIBLE. These draws -- the published hold
+      // here, the STAR direct-to shortcut at one in five -- are the only
+      // non-determinism in the headless harness, and this line reseeded them
+      // from the WALL CLOCK. Two runs of the same binary then flew different
+      // arrivals: on 2026-08-19 one reported "cleared to land NO" and the next
+      // "yes", with nothing changed in between, and the difference was read as a
+      // regression. In the sim the variable is unset and the clock seed stands.
+      // [C. P. Potter]
+      const char *seed_env = std::getenv("ATC_SEED");
+      std::srand(seed_env ? static_cast<unsigned>(std::atoi(seed_env))
+                          : static_cast<unsigned>(std::time(nullptr)));
       s_hold_seeded = true;
     }
     // User switch (IFR tab): holds can be turned off entirely. Latch state 2
@@ -12825,23 +13887,9 @@ static bool poll_descent_second_step(const xplane_context::XPlaneContext &ctx,
   if (already_cleared > 0 && target >= already_cleared) {
     s_descent_second_step_issued = true;
     s_descent_final_target_ft = 0;
-  s_vector_mode_logged = false;
-  s_vtf_faf_key.clear();
-  s_vector_mode_final_known = false;
-  s_arrival_vectored = -1;
-  s_vtf_leg = VecLeg::None;
-  s_vtf_hdg = 0.0;
-  s_vtf_cleared_ft = 0;
-  s_vtf_nudge_secs = 0.0f;
-  s_vtf_nudged = false;
-  s_vtf_abandoned = false;
-  s_vtf_slow_issued = false;
-  s_vtf_prev_y = 0.0;
-  s_vtf_prev_s = 0.0;
-  s_vtf_capture_s = 0.0;
-  s_atc_assigned_speed_kt = 0;
-  s_vtf_clearance_pending = false;
-  s_vtf_recut_secs = 0.0f;
+    // Same graft as above: dropping a stale DESCENT target used to wipe the whole
+    // vectoring state, including the arrival's vectored/not-vectored latch and any
+    // leg in progress. Consuming the target is all this branch means to do.
     logging::info("IFR descent: stepped-descent target %d ft DROPPED -- already "
                   "cleared to %d ft (would have been a climb)",
                   target, already_cleared);
@@ -13379,6 +14427,20 @@ static bool poll_star_shortcut(const xplane_context::XPlaneContext &ctx,
 // transition to IFR_APPROACH_CONTACT so poll_approach() drives the local
 // INFO/Tower handoff at the FAF. (STAR step-downs under ACC are a future
 // refinement -- today poll_approach issues them after the handoff.)
+// True when the DESTINATION's terminal-frequency handoff is still owed and the
+// aircraft is ALREADY INSIDE that terminal volume -- i.e. poll_arrival's handoff
+// block below may speak it this very frame. Used to keep a level clearance from
+// jumping the queue ahead of the transfer. [C. P. Potter]
+static bool terminal_handoff_owed(const xplane_context::XPlaneContext &ctx) {
+  if (!s_arrival_freq_handoff_label.empty() || s_assigned_dest_icao.empty() ||
+      !openair_db::ready() || !on_destination_terminal(ctx))
+    return false;
+  const auto enc = openair_db::find_enclosing(ctx.latitude, ctx.longitude,
+                                              openair_alt(ctx));
+  return enc.ac_class == openair_db::AirspaceClass::TMA ||
+         enc.ac_class == openair_db::AirspaceClass::CTR;
+}
+
 bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
                   std::string *out_text,
                   bool *out_requires_readback) {
@@ -13432,7 +14494,28 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
   // reaches the highest FL below the TMA ceiling before the IAF, instead of being
   // handed to Approach while still above the ceiling (LFLP->LFMD: FL120 over the
   // FL115 NICE TMA). Respects block floors (defers when a fix min holds it high).
-  if (poll_descend_to_enter_tma(ctx, out_text, out_requires_readback))
+  //
+  // ...but a level belongs to the controller who is about to WORK the aircraft,
+  // not to the one walking out the door. LFML -> LSGG (real flight 2026-08-19):
+  // Marseille said "descend flight level 90" and SEVEN SECONDS later "contact
+  // Geneva Approach on 119.530". The aircraft had just descended into GENEVA TMA
+  // SECTOR 10 (11500-15500) -- and that same TMA entry is exactly what made
+  // Geneva the controller. The pilot got a clearance that plainly belonged to
+  // the next sector.
+  //
+  // So when the terminal handoff is owed THIS frame, hold the step-down and run
+  // the identical call AFTER the handoff block instead. Two properties matter:
+  //   * nothing can be lost -- if no handoff materialises (AFIS destinations
+  //     with no approach controller, LFQA), the deferred call still runs in the
+  //     SAME frame, so there is no deadlock and no timer;
+  //   * the 2026-07-22 ordering survives untouched -- the predicate requires
+  //     being INSIDE the terminal volume, and above the ceiling (FL120 over the
+  //     FL115 NICE TMA) the step-down still goes first and is what puts the
+  //     aircraft inside. [C. P. Potter]
+  const bool dte_deferred = terminal_handoff_owed(ctx);
+  if (dte_deferred)
+    logging::info("[dbg dte] step-down held -- dest terminal handoff owed this frame");
+  else if (poll_descend_to_enter_tma(ctx, out_text, out_requires_readback))
     return true;
 
   const std::string callsign = spoken_callsign(ctx);
@@ -13644,6 +14727,13 @@ bool poll_arrival(const xplane_context::XPlaneContext &ctx, float dt,
     // route point (LFLP 2026-07-15/20). The approach CLEARANCE is separate and
     // waits for the IAF-eta gate (Stage B).
   }
+
+  // Deferred step-down (see the note at the first call site): the handoff block
+  // above had its chance to speak first. Runs in the same frame, so a level is
+  // only ever postponed by one transmission, never dropped. [C. P. Potter]
+  if (dte_deferred &&
+      poll_descend_to_enter_tma(ctx, out_text, out_requires_readback))
+    return true;
 
   // ARRIVAL course enforcement. Previously OMITTED (the STAR is curved and
   // direct-bearing-vs-heading false-fired at the turns) -- now safe because
@@ -14035,7 +15125,18 @@ static void init_route_fixes(const xplane_context::XPlaneContext &ctx) {
   const auto &ofp = simbrief_ofp::get();
   std::unordered_set<std::string> seen;
   for (const auto &nf : ofp.navlog) {
-    if (nf.ident.empty() || nf.ident == s_assigned_dest_icao) continue;
+    // THE DESTINATION IS NOT A ROUTE FIX. The navlog ends on the aerodrome, and
+    // the STAR fixes are appended AFTER it -- so leaving it in makes every routed
+    // distance run to the field and back out along the arrival: 184 NM to PITOM
+    // for a real 110, and an IFR tab announcing a top of descent 85 NM ahead of
+    // an aircraft that had already passed it (real flight 2026-08-23).
+    // Compared against the OFP's own destination as well as the assigned one:
+    // the en-route jump rebuilds the route BEFORE anything sets
+    // s_assigned_dest_icao, so that test alone was inert exactly where it was
+    // needed most. [C. P. Potter]
+    if (nf.ident.empty() || nf.ident == s_assigned_dest_icao ||
+        (!ofp.destination_icao.empty() && nf.ident == ofp.destination_icao))
+      continue;
     if (nf.ident == "TOC" || nf.ident == "TOD") continue;
     if (seen.count(nf.ident)) continue;
     seen.insert(nf.ident);
@@ -14338,10 +15439,32 @@ std::string poll_route_tracker(const xplane_context::XPlaneContext &ctx) {
   // has crossed the abeam line at the fix, heading toward the next one. This clears a
   // fix the pilot overflew wide (no freeze) while NEVER passing a fix still AHEAD on a
   // curve (the FAF 10 NM before the turn projects BEHIND -> not passed), and NEVER
-  // jumping across the loop (PIRUV is not the NEXT fix from COLLO). No distance cap is
-  // needed: the dot product is a sound "past this fix" test at any range, so a tracker
-  // lagging several fixes behind (aircraft flew wide of them all) catches up one fix
-  // per tick. [C. P. Potter]
+  // jumping across the loop (PIRUV is not the NEXT fix from COLLO).
+  //
+  // "NO DISTANCE CAP IS NEEDED" WAS WRONG, and it cost the LOWI arrival.
+  //
+  // The dot product asks "is the aircraft on the far side of the abeam line at
+  // this fix, in the direction of the next one" -- sound only while the aircraft
+  // is somewhere near the leg. A procedure that DOUBLES BACK breaks it: LOWI
+  // R08-Z runs east to RTT (11.94E), out west to the IAF ELMEM (10.57E), then
+  // back east along WI749 -> WI754. Standing at RTT, 69 NM EAST of ELMEM, the
+  // aircraft is on the far side of ELMEM's abeam line relative to the eastbound
+  // ELMEM->WI749 leg, so the tracker declared:
+  //
+  //   passed ELMEM (69.2 NM wide) -> passed WI749 (66.1) -> passed WI751 (49.5)
+  //
+  // and skipped the whole reversal. The Tower gate then saw the tracker at
+  // WI754 with the aircraft 24 NM from the FAF, the aircraft flew straight at
+  // the field, and the arrival stalled -- which is what made the pilot press ENR
+  // in ARR to get anything to happen (user 2026-09-02). The log even printed the
+  // 69 NM; nothing read it.
+  //
+  // The added condition is scale-free and needs no invented constant: ADVANCING
+  // MUST BRING THE AIRCRAFT NEARER WHAT IS AHEAD. A fix genuinely overflown wide
+  // leaves the aircraft closer to the next fix than the fix it just passed was;
+  // a fix still 69 NM ahead does not. The slack covers the marginal case where
+  // the aircraft is abeam and the two distances are all but equal.
+  // [C. P. Potter]
   if (next && (next->lat != 0.0 || next->lon != 0.0)) {
     const double coslat = std::cos(fix.lat * M_PI / 180.0);
     const double legx = (next->lon - fix.lon) * coslat;
@@ -14349,9 +15472,27 @@ std::string poll_route_tracker(const xplane_context::XPlaneContext &ctx) {
     const double acx = (ctx.longitude - fix.lon) * coslat;
     const double acy = ctx.latitude - fix.lat;
     if (legx * acx + legy * acy > 0.0) {
-      logging::info("[route] passed %s (%.1f NM wide) along-track -> advancing, next: %s",
-                    fix.ident.c_str(), dist, next_ident);
-      s_route_fix_idx++;
+      constexpr double kAdvanceSlackNm = 2.0;
+      const double ac_to_next = traffic_geometry::distance_nm(
+          ctx.latitude, ctx.longitude, next->lat, next->lon);
+      const double fix_to_next = traffic_geometry::distance_nm(
+          fix.lat, fix.lon, next->lat, next->lon);
+      if (ac_to_next > fix_to_next + kAdvanceSlackNm) {
+        static std::string s_refused;
+        const std::string key = fix.ident + next->ident;
+        if (s_refused != key) {
+          s_refused = key;
+          logging::info("[route] NOT passed %s: %.1f NM wide, and %.1f NM from "
+                        "%s against the fix's own %.1f -- the aircraft has not "
+                        "reached it, it is still ahead",
+                        fix.ident.c_str(), dist, ac_to_next, next_ident,
+                        fix_to_next);
+        }
+      } else {
+        logging::info("[route] passed %s (%.1f NM wide) along-track -> advancing, next: %s",
+                      fix.ident.c_str(), dist, next_ident);
+        s_route_fix_idx++;
+      }
     }
   }
   return {};
@@ -14834,7 +15975,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           // frequency (same rationale as the en-route sector-change guard).
           const float active_com_ac =
               (ctx.active_com == 2) ? ctx.com2_freq_mhz : ctx.com1_freq_mhz;
-          if (std::fabs(active_com_ac - new_mhz) < 0.005f) {
+          if (std::fabs(active_com_ac - new_mhz) < 0.006f) {
             s_sector_checkin_pending = false;
             logging::info("[approach] sector change -> %s %.3f MHz (pilot already on freq -- silent)",
                           new_label.c_str(), new_mhz);
@@ -15067,10 +16208,26 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         // looping SALE3P, COLLO sits ~2 NM from PIRUV but 4 fixes earlier, so a
         // distance test fired the clearance at COLLO (LFLP 2026-07-16). The resync
         // keeps the tracker reliable through wide flying.
-        if (settings::debug_logging())
-          logging::info("[dbg appclr] eta=%.0f route_idx=%d iaf_idx=%d (need>=%d) "
-                        "on_term=1 checkin_pending=%d", eta, s_route_fix_idx,
-                        iaf_idx, iaf_idx - 2, s_sector_checkin_pending ? 1 : 0);
+        // On CHANGE of the decision inputs, not per frame. The eta ticks down by
+        // a second at a time, so an unchanged gate printed thousands of
+        // near-identical lines through the whole descent. What a reader needs is
+        // when an input moved. [C. P. Potter]
+        if (settings::debug_logging()) {
+          static int s_appclr_idx = -1, s_appclr_iaf = -1, s_appclr_ck = -1;
+          static int s_appclr_eta_bucket = -1;
+          const int eta_bucket = static_cast<int>(eta) / 30; // 30-second buckets
+          const int ck = s_sector_checkin_pending ? 1 : 0;
+          if (s_appclr_idx != s_route_fix_idx || s_appclr_iaf != iaf_idx ||
+              s_appclr_ck != ck || s_appclr_eta_bucket != eta_bucket) {
+            s_appclr_idx = s_route_fix_idx;
+            s_appclr_iaf = iaf_idx;
+            s_appclr_ck = ck;
+            s_appclr_eta_bucket = eta_bucket;
+            logging::info("[dbg appclr] eta=%.0f route_idx=%d iaf_idx=%d "
+                          "(need>=%d) on_term=1 checkin_pending=%d",
+                          eta, s_route_fix_idx, iaf_idx, iaf_idx - 2, ck);
+          }
+        }
         // Wait until the pilot has CHECKED IN on the terminal (approach)
         // controller before issuing the clearance. Firing while a handoff is still
         // pending clears the approach on the NEW freq before the pilot arrives --
@@ -15087,8 +16244,38 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         // at ~7 NM and advances the tracker PAST the IAF, killing the vector (real vol
         // LOWI R08-Z 2026-08-02). The FAF "vectors to final" case is separate. [CPP]
         // Never promise vectors again once a live sequence was given up.
-        const bool reversal =
-            !s_vtf_abandoned && approach_needs_reversal_vector(ctx);
+        // A PROMISE NOBODY COULD KEEP.
+        //
+        // Two independent decisions were never reconciled.
+        // approach_needs_reversal_vector() gates the "expect vectors" heads-up
+        // and the deferral of the straight clearance; s_vtf_to_final gates
+        // whether poll_vector_to_final will fly anything at all. When the mode
+        // resolves to VECTORS TO THE IAF that poll refuses outright --
+        // "mode 2 keeps the published procedure", by design, there is no leg
+        // builder for it -- and the only vectoring that can still run is the
+        // CIFP-PRESCRIBED kind (an FM/VM leg, as at LSGG GG512), which LOWI
+        // R08-Z does not have.
+        //
+        // So on 2026-08-30 ATC announced "expect vectors for RNAV Zulu approach
+        // runway 08", withheld the approach clearance for a manoeuvre that was
+        // never going to start, and said nothing for the rest of the flight.
+        // Do not promise what mode 2 has already declined: fall through to the
+        // published procedure, which is what mode 2 means. Implementing
+        // reversal vectors to the IAF is the real fix (open-questions Q9).
+        // [C. P. Potter]
+        const bool mode2_keeps_procedure =
+            s_vector_mode_final_known && !s_vtf_to_final && !s_star_vectors;
+        if (mode2_keeps_procedure && !s_vec_expect_issued) {
+          static bool s_mode2_logged = false;
+          if (!s_mode2_logged) {
+            s_mode2_logged = true;
+            logging::info("[approach] vectors to the IAF are not flown -- "
+                          "keeping the published procedure, no expect-vectors "
+                          "promise");
+          }
+        }
+        const bool reversal = !s_vtf_abandoned && !mode2_keeps_procedure &&
+                              approach_needs_reversal_vector(ctx);
         // Do not promise vectors there is no room to fly. The old bound was
         // 5 NM from the IAF, which is meaningless: the user was told "expect
         // vectors for ILS approach runway 06" at 4456 ft, a few miles from the
@@ -15110,7 +16297,14 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
         // General rule (user, 2026-08-16): once the aircraft has been brought to
         // the final vectoring point, the vectoring is OVER -- nothing further is
         // announced, whatever the geometry says.
-        const bool vec_over = s_vtf_leg == VecLeg::Done || s_vtf_abandoned;
+        // Also silent once a sequence has STARTED. "expect vectors for ILS
+        // approach runway 22" reached the pilot eight seconds after "turn left
+        // heading 240" on the flown arrival of 2026-08-20 -- he was already
+        // being vectored. vectoring_used() is true from the first vector on,
+        // including after the sequence ends, which is exactly the window in
+        // which the promise means nothing. [C. P. Potter]
+        const bool vec_over =
+            s_vtf_leg == VecLeg::Done || s_vtf_abandoned || vectoring_used();
         if (reversal && !vec_over && !s_vec_expect_issued &&
             !s_sector_checkin_pending && room_nm > kVecFloorNm) {
           s_vec_expect_issued = true;
@@ -15122,7 +16316,32 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
           rb(false);
           return true;
         }
-        if (!reversal && eta <= 180.0 && !s_sector_checkin_pending) {
+        // SAFETY VALVE: A PROMISE OF VECTORS IS NOT A CLEARANCE.
+        //
+        // When `reversal` holds, the straight clearance is deferred so the vector
+        // can own the arrival. If the vector then never starts, nothing owns it
+        // and the aircraft flies to the field in total silence -- which is what
+        // LOWI R08-Z does today: the mode resolves to VECTORS TO THE IAF (MSA
+        // 10300 ft over a 1905 ft field, curved axis after the FAF), that mode is
+        // not implemented, so "expect vectors for RNAV Zulu approach runway 08"
+        // was the last transmission of the flight (2026-08-30, log 42).
+        //
+        // A deferral is only legitimate while something else is going to speak.
+        // Once the aircraft is inside 90 s of the IAF with no leg started and no
+        // vector ever flown, the promise has failed: clear the published approach
+        // and let the pilot fly the procedure. Implementing vectors-to-IAF is the
+        // real fix (docs/open-questions.md Q9); this makes the arrival flyable
+        // meanwhile instead of silent. [C. P. Potter]
+        const bool vector_promised_but_absent =
+            reversal && s_vec_expect_issued && s_vtf_leg == VecLeg::None &&
+            !s_vtf_abandoned && !vectoring_used() && eta <= 90.0;
+        if (vector_promised_but_absent)
+          logging::info("[approach] vectors were promised and never started "
+                        "(%.0f s from IAF %s) -- clearing the published approach "
+                        "rather than staying silent",
+                        eta, iaf.ident.c_str());
+        if ((!reversal || vector_promised_but_absent) && eta <= 180.0 &&
+            !s_sector_checkin_pending) {
           const std::string phrase = approach_clearance_phrase(ctx);
           if (!phrase.empty()) {
             s_approach_cleared_issued = true;
@@ -15221,6 +16440,7 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
   // Checked BEFORE the waypoint loop so it fires regardless of any remaining
   // queued waypoints (e.g. MN04A constraint not yet cleared).
   // APP hands off to Tower when the aircraft is established on final (at FAF).
+
   if (s_approach_final_issued && !s_approach_tower_handed_off) {
     bool at_faf = false;
     // Per-approach OVERRIDE of the handoff trigger (airport+.json
@@ -15289,9 +16509,19 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       at_faf = (ctx.pressure_alt_ft <=
                 static_cast<float>(s_approach_faf.alt_ft) * 1.1f);
     } else {
+      // No FAF at all -- the approach publishes none. The CTR boundary is the
+      // transfer point; the AGL/distance guess stays underneath it for fields
+      // with no openair control zone. This branch is reached ONLY when the
+      // approach has neither a handoff-fix override, nor a FAF in the route,
+      // nor a FAF position, nor a FAF altitude -- so it cannot touch LOWI
+      // (FAF WI002, override WI103) or LSGG (FAF GG808). [C. P. Potter]
       double dist_to_apt = traffic_geometry::distance_nm(
           ctx.latitude, ctx.longitude, ctx.airport_lat, ctx.airport_lon);
-      at_faf = (ctx.height_agl_ft < 3500.0f && dist_to_apt < 12.0);
+      const bool in_ctr = inside_destination_ctr(ctx);
+      at_faf = in_ctr || (ctx.height_agl_ft < 3500.0f && dist_to_apt < 12.0);
+      if (at_faf && in_ctr)
+        logging::info("[approach] no FAF published -- Tower handoff on entering "
+                      "the destination CTR");
     }
 
     // ENTRY TRACE. When the Tower handoff simply never happens, Log.txt showed
@@ -15303,10 +16533,10 @@ bool poll_approach(const xplane_context::XPlaneContext &ctx, float dt,
       static std::string s_tower_entry_diag;
       char k[160];
       std::snprintf(k, sizeof(k),
-                    "at_faf=%d route=%d faf=%d iaf=%d vec_step=%d vec_done=%d "
-                    "vectoring=%d",
+                    "at_faf=%d route=%d faf=%d iaf=%d ho=%d vec_step=%d "
+                    "vec_done=%d vectoring=%d",
                     at_faf ? 1 : 0, s_route_fix_idx, s_faf_route_idx,
-                    s_iaf_route_idx, s_vec_step, s_vec_done ? 1 : 0,
+                    s_iaf_route_idx, ho_idx, s_vec_step, s_vec_done ? 1 : 0,
                     vectoring_used() ? 1 : 0);
       if (s_tower_entry_diag != k) {
         s_tower_entry_diag = k;
@@ -16160,6 +17390,12 @@ void set_pending_handoff_freq(float mhz) {
 }
 
 float pending_handoff_freq() { return s_pending_handoff_freq_mhz; }
+
+// Arm the "the pilot has not checked in on the new frequency yet" state, the
+// other half of a handoff. Exposed so a test can reproduce the exact situation
+// that froze two arrivals: a handoff outstanding and the pilot reading the new
+// frequency back while still on the old one. [C. P. Potter]
+void set_sector_checkin_pending(bool v) { s_sector_checkin_pending = v; }
 
 bool tod_to_go(float groundspeed_kts, float *out_nm, float *out_min) {
   if (s_tod_dist_nm < 0.0f || s_tod_alert_nm < 0.0f)

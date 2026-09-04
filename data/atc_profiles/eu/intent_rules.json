@@ -205,6 +205,81 @@
       "_note": "Voxtral turns 'decimal' into 'this is my' inside a frequency readback: 'Ground on 121, this is my 850' for 121.850 (LSGG 2026-08-20). No ICAO phraseology contains 'this is my', so the substitution is safe here.",
       "from": "this is my",
       "to": "decimal"
+    },
+    {
+      "_note": "Voxtral hears 'Rumble' for 'Romeo' in the callsign (real flight LSGG 2026-08-21). The callsign is the one word every rule keys on, so a mishearing there costs the whole transmission.",
+      "from": "rumble charlie",
+      "to": "romeo charlie"
+    },
+    {
+      "_note": "Readback of the landing clearance heard as one word, 'Pleatoland runway two-two' -- which drew a 'say again' on short final (LSGG 2026-08-21).",
+      "from": "pleatoland",
+      "to": "cleared to land"
+    },
+    {
+      "_note": "'Geneva Ground' called back as 'Grand' on the first taxi call (LSGG 2026-08-21). Anchored on the callsign that follows so the word 'grand' alone is never rewritten.",
+      "from": "grand november",
+      "to": "ground november"
+    },
+    {
+      "from": "decima ",
+      "to": "decimal "
+    },
+    {
+      "from": "decimo ",
+      "to": "decimal "
+    },
+    {
+      "from": "second sing",
+      "to": "sequencing"
+    },
+    {
+      "from": "second thing",
+      "to": "sequencing"
+    },
+    {
+      "from": "second 6 and",
+      "to": "sequencing"
+    },
+    {
+      "from": "room charlie",
+      "to": "romeo charlie"
+    },
+    {
+      "from": "rome, charlie",
+      "to": "romeo charlie"
+    },
+    {
+      "from": "november, no charlie",
+      "to": "november romeo charlie"
+    },
+    {
+      "from": "hit cap",
+      "to": "itcap"
+    },
+    {
+      "from": "nedit",
+      "to": "nanit"
+    },
+    {
+      "from": "rival to",
+      "to": "arrival to"
+    },
+    {
+      "from": "r90 approach",
+      "to": "rnav approach"
+    },
+    {
+      "from": "climb being to",
+      "to": "climbing to"
+    },
+    {
+      "from": "four'eight",
+      "to": "four eight"
+    },
+    {
+      "from": "room, charlie",
+      "to": "romeo charlie"
     }
   ],
   "rules": [
@@ -682,8 +757,67 @@
             "upwind",
             "traffic"
           ]
+        },
+        "ground on 1",
+        "tower on 1",
+        "approach on 1",
+        "departure on 1",
+        "radar on 1",
+        "control on 1",
+        "information on 1",
+        {
+          "all": [
+            {
+              "any": [
+                "climb",
+                "descend",
+                "descent",
+                "maintain"
+              ]
+            },
+            {
+              "any": [
+                "flight level",
+                "feet"
+              ]
+            }
+          ],
+          "none": [
+            "request",
+            "passing",
+            "reaching",
+            "unable",
+            "say again",
+            "confirm",
+            "expect",
+            {
+              "all": [
+                {
+                  "any": [
+                    "climbing",
+                    "descending",
+                    "maintaining"
+                  ]
+                },
+                {
+                  "any": [
+                    "radar",
+                    "control",
+                    "centre",
+                    "center",
+                    "approach",
+                    "information",
+                    "tower"
+                  ]
+                }
+              ]
+            }
+          ],
+          "_note": "The PARTICIPLE plus a facility name is a sector CHECK-IN, not a readback: 'Milan Radar, November 750XP, climbing to flight level 210' is how a pilot reports in on a new frequency, and INITIAL_CALL_CENTER owns it. Excluded here rather than merely demoted, because READBACK is evaluated first and would otherwise win outright. [C. P. Potter]"
         }
-      ]
+      ],
+      "_note_bare_freq": "A frequency readback WITHOUT the word 'contact' -- 'ground on 121 decimal 850' -- matched nothing and fell to INITIAL_CALL_GROUND at 0.30, so Tower answered a perfectly correct readback with 'contact Ground' (real flight LSGG 2026-08-21; the user had already reported that saying 'contact' works and omitting it does not). Real pilots drop the verb. 'on 1' is the discriminator: every VHF frequency starts with a 1, so the pair <facility> + 'on 1' is a frequency readback and nothing else. [C. P. Potter]",
+      "_note_level_readback": "A BARE LEVEL READBACK matched no rule at all: 'Climb flight level 110, November Romeo Charlie' scored UNKNOWN 0.00 and the whole thing rode on the cloud LM. On 2026-08-29 that LM answered HTTP 403 tier_not_allowed on every call, so the single most common IFR transmission drew 'say again, use standard phraseology' FIVE times in a row while the aircraft climbed correctly. The most frequent readback in IFR must not depend on a network round-trip. Guarded three ways: no service REQUEST, no REPORT ('passing'/'reaching' are reports, not readbacks), and the participle check-in form is demoted by an adjustment below when no readback is pending -- 'climbing to FL110' on a new frequency is a sector check-in and INITIAL_CALL_CENTER must keep it. [C. P. Potter]"
     },
     {
       "_note": "VFR cross-country departure: ready-for-departure plus a course/direction marker.",
@@ -792,14 +926,20 @@
           ]
         },
         {
-          "all": [
-            "left",
-            "runway"
+          "_note": "PHRASE, not two loose words. 'all: [left, runway]' fired on every transmission naming a parallel runway: 'taxi to holding point Charlie One, runway zero four LEFT' was classified RUNWAY_VACATED at 0.90 on the ground at Nice, 2026-08-28. At any field with L/R runways that is EVERY taxi, line-up and landing readback. A genuine vacated report says 'vacated' and is caught by the first branch; this one only has to catch 'left the runway'. [C. P. Potter]",
+          "any": [
+            "left runway",
+            "left the runway"
           ],
           "none": [
             "downwind",
             "base",
-            "request"
+            "request",
+            "holding point",
+            "taxi",
+            "line up",
+            "lined up",
+            "cross"
           ]
         }
       ]
@@ -949,7 +1089,6 @@
         "request frequency",
         "request a frequency",
         "request to leave",
-        "with you",
         "switching"
       ]
     },
@@ -1241,6 +1380,16 @@
       },
       "set_intent": "INITIAL_CALL_APPROACH",
       "set_confidence": 0.93
+    },
+    {
+      "_note": "'climbing TO flight level 110' with nothing outstanding is a sector CHECK-IN -- so hand it to INITIAL_CALL_CENTER outright instead of merely demoting the confidence. Demoting sent it to the LM, and on 2026-08-29 the LM was returning 403 for every call, so the demotion turned a valid transmission into 'say again'. A transmission must always end somewhere: a readback (silence) or a check-in (ack), never in the gap between them. [C. P. Potter]",
+      "if": {
+        "intent": "READBACK",
+        "readback_pending": false,
+        "text_contains": "ing to flight level"
+      },
+      "set_intent": "INITIAL_CALL_CENTER",
+      "set_confidence": 0.85
     }
   ]
 }

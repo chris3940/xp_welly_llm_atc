@@ -230,6 +230,12 @@ class Repl:
             out.append(line)
             if _raw_fh:
                 _raw_fh.write(line)
+            # The engine's own verdicts on the sequencing vector. They streamed
+            # past unread for days: the replay was releasing the vector 10 NM
+            # before the prescribed fix -- the very defect the flights kept
+            # reporting -- and nothing in the acceptance looked at it.
+            if "[vector] released at" in line or "[vector] refused:" in line:
+                VECTOR_VERDICTS.append(line.strip())
             if line.startswith("Region:") or "Region:    " in line:
                 break
         return out
@@ -250,11 +256,26 @@ RE_CONTACT = re.compile(r"contact ([A-Za-z .'-]+?) on (\d{3}\.\d{2,3})", re.I)
 # only the bare "descend flight level NN", so on the LSGG BELU3R scenario it
 # never learned it was cleared to FL90 and flew the entire arrival at FL240.
 # [C. P. Potter]
+# "DESCENT", not only "descend". The engine deliberately says "CONTINUE DESCENT
+# TO flight level 150" when it is restating a level the previous controller had
+# already assigned (that wording is in poll_approach's own comment: "continue
+# descent to X = maintaining previous Centre clearance"). The driver matched the
+# verb "descend" only, so it never learned it was cleared lower and flew the
+# whole LOWI arrival at FL190 with a FAF at 13 000 -- which is why replay-lowi
+# reported established NO / Tower NO / cleared to land NO while the PLUGIN was
+# behaving. The harness was the one not listening. [C. P. Potter]
 RE_FL = re.compile(
-    r"(descend|climb)(?:\s+via\s+.+?)?(?:\s+to)?\s+flight level (\d{2,3})", re.I)
-RE_ALT = re.compile(r"(descend|climb)(?: to)? ([\d ,]+) feet", re.I)
+    r"(descend|descent|climb)(?:\s+via\s+.+?)?(?:\s+to)?\s+flight level "
+    r"(\d{2,3})", re.I)
+RE_ALT = re.compile(r"(descend|descent|climb)(?: to)? ([\d ,]+) feet", re.I)
 RE_MAINTAIN_FL = re.compile(r"maintain flight level (\d{2,3})", re.I)
-RE_HEADING = re.compile(r"turn (left|right) heading (\d{2,3})", re.I)
+# "continue heading NNN" is the same instruction with no turn in it (ICAO Doc
+# 4444 12.4.2.2) -- the plugin emits it when the vector is within 5 deg of the
+# heading being flown. The driver must obey it, or it flies straight past a
+# vector it was never told to ignore and the engine nags it three times.
+VECTOR_VERDICTS = []   # "[vector] released at ..." / "[vector] refused: ..."
+
+RE_HEADING = re.compile(r"(?:turn (?:left|right)|continue) heading (\d{2,3})", re.I)
 RE_RESUME = re.compile(r"resume own navigation", re.I)
 RE_SPEED = re.compile(r"reduce speed(?: to)?,? (\d{3}) knots", re.I)
 # "contact Tower" arrives WITHOUT a frequency when the engine fails to resolve
@@ -264,7 +285,12 @@ RE_SPEED = re.compile(r"reduce speed(?: to)?,? (\d{3}) knots", re.I)
 # The REPL prints "ATC   : <text>" for a reply and "ATC state: IFR/..." for its
 # state dump. Only the first is speech.
 RE_ATC_REPLY = re.compile(r"^ATC\s+:")
-RE_TOWER = re.compile(r"contact tower", re.I)
+# "contact INNSBRUCK Tower on 120.100" -- the facility is NAMED whenever the
+# plugin can resolve it, and only the anonymous "contact Tower" form matched. So
+# the LOWI arrival was scored "no Tower handoff" while the handoff was right
+# there in the transcript; EDLW passed only because it happens to say "contact
+# Tower". [C. P. Potter]
+RE_TOWER = re.compile(r"contact\s+(?:[A-Za-z.'-]+\s+){0,3}tower\b", re.I)
 RE_LAND  = re.compile(r"cleared to land", re.I)
 # The engine prints the FAF it resolved. Parsing it gives the driver the REAL
 # axis -- position AND published final track -- instead of guessing. Without it
@@ -286,6 +312,8 @@ class Pilot:
         self.runway = ""         # for the "established" report
         self.faf = None          # (lat, lon) of the FAF, from the engine's own log
         self.faf_track = None    # published final approach track
+        self.dest = None         # (lat, lon) of the aerodrome -- the only
+                                 # reference an RF-leg final leaves to fly to
         self.assigned_kt = None  # speed ATC has assigned, and the pilot flies
         # THE CLEARED ROUTE, as the engine itself is tracking it. Read back from
         # the REPL every step (`fmsroute`), so the driver flies what it has been
@@ -405,7 +433,7 @@ class Pilot:
                 # assigned heading. Without this the compliance monitor sees a
                 # pilot who never turns, re-issues once and then abandons -- which
                 # is exactly what a fixed path produced on the first run.
-                if self.vector_hdg != float(m.group(2)):
+                if self.vector_hdg != float(m.group(1)):
                     # A pilot does not roll onto a new heading the instant ATC
                     # says it: he reads it back, then turns at a normal rate.
                     # Measured on the real flight of 2026-08-17: 39 s elapsed
@@ -414,7 +442,7 @@ class Pilot:
                     # laterally. Modelling neither is why this harness reported a
                     # clean intercept where the real one ran out of room.
                     self.react_s = REACT_SECS
-                self.vector_hdg = float(m.group(2))
+                self.vector_hdg = float(m.group(1))
             if RE_RESUME.search(msg):
                 self.vector_hdg = None
             if re.search(r"cleared .*approach", msg, re.I):
@@ -562,6 +590,34 @@ class Pilot:
                 or self.faf is None or self.faf_track is None
                 or not isinstance(where, tuple)):
             return
+        # A CURVED FINAL HAS NO AXIS TO CAPTURE.
+        #
+        # Everything below tests the aircraft against a STRAIGHT final approach
+        # track. LOWI RNAV Z 08 has none: the last segments are RF arcs, and the
+        # engine's own FAF line says so -- "FAF: ident=WI749 ... track=0". The
+        # axis test therefore compared the aircraft against a course of 000 and
+        # could never succeed, so the pilot never reported established and never
+        # got a landing clearance, however well the plugin flew the arrival.
+        #
+        # On an RNP with RF legs a pilot is established once he is on the
+        # published path inbound -- which is exactly why LOWI overrides the Tower
+        # handoff to the last turn fix WI754 rather than the FAF. Mirror that: no
+        # published track, cleared for the approach, FAF behind and the field
+        # close ahead means established. [C. P. Potter]
+        if not self.faf_track:
+            if self.dest is None:
+                return
+            d_field = nm(where, self.dest)
+            if d_field <= 10.0 and nm(where, self.faf) > 1.0:
+                self.established = True
+                # NO final_course: a curved final has none, and flying a frozen
+                # bearing snapped at the capture instant took the aircraft 42 NM
+                # past the field. Established here means "on the published path",
+                # so keep following the route fixes (WI751 ... WI754, RW08) --
+                # which is precisely what the aircraft is established ON.
+                self.final_course = None
+                self.vector_hdg = None
+            return
         # ESTABLISHED MEANS ESTABLISHED INBOUND. Lateral offset alone is not
         # enough: on a published transition the route passes over the field
         # (DOR is the aerodrome VOR) and back out to the approach fixes, so the
@@ -573,7 +629,19 @@ class Pilot:
         d_faf = nm(where, self.faf)
         rel = math.radians(bearing(where, self.faf) - self.faf_track)
         if d_faf * math.cos(rel) <= 0.5:
-            return  # the FAF is behind -- this is not an inbound capture
+            # THE FAF BEHIND IS NOT A REASON TO REFUSE -- PAST IT YOU ARE
+            # CERTAINLY ESTABLISHED. On a PUBLISHED transition the aircraft is
+            # delivered onto the axis AT the fix (EDLW: DOR -> CF06 -> KOLOT,
+            # and KOLOT is the FAF), so "the FAF must still be ahead" could
+            # never be satisfied and the pilot never reported established --
+            # replay-star ran out of route at the FAF and stopped, 6 000 ft over
+            # the field. What that test was really guarding is the overfly of
+            # the aerodrome VOR outbound on the extended axis, and the heading
+            # test below already rejects that (flying away = 180 deg off).
+            # Keep the refusal only when the aircraft is not closing on the
+            # field either. [C. P. Potter]
+            if self.dest is None or nm(where, self.dest) >= nm(self.faf, self.dest):
+                return  # behind the FAF AND not nearer the field -- not inbound
         if self.hdg is not None:
             err = abs((self.hdg - self.faf_track + 540.0) % 360.0 - 180.0)
             # 50 deg, not 30: the intercept heading is up to 45 deg off the
@@ -585,7 +653,14 @@ class Pilot:
             # overflying the field VOR on the extended axis.
             if err > 50.0:
                 return  # crossing the axis, not tracking it
-        if abs(cross_track(where, self.faf, self.faf_track)) < 0.5:
+        xt = cross_track(where, self.faf, self.faf_track)
+        if _raw_fh:
+            # Why a capture did or did not happen, at the moment it was judged.
+            # replay-star flies PARALLEL to the final at 11 NM and never
+            # intercepts; without this line that is invisible. [C. P. Potter]
+            _raw_fh.write("  [est?] xt=%.2f d_faf=%.1f trk=%.0f\n"
+                          % (xt, d_faf, self.faf_track))
+        if abs(xt) < 0.5:
             self.established = True
             self.final_course = self.faf_track
             self.vector_hdg = None
@@ -641,6 +716,8 @@ def main():
         repl.sync()
 
     pilot = Pilot(repl)
+    if isinstance(route.get("field"), list) and len(route["field"]) == 2:
+        pilot.dest = (float(route["field"][0]), float(route["field"][1]))
     alt = float(route["start_ft"])
     prev = path[0]
     flown = 0.0
@@ -656,6 +733,15 @@ def main():
             dest = (f[1], f[2])
 
     pilot.runway = str(route.get("runway", ""))
+    # POINT THE AIRCRAFT DOWN ITS OWN ROUTE BEFORE THE FIRST POLL. The engine's
+    # route tracker consumes any fix lying more than 90 degrees off the heading,
+    # and the heading defaults to north: a WESTBOUND route therefore had all its
+    # fixes eaten on the very first poll (`fmsroute idx=3 n=3`) and the driver had
+    # nothing left to fly. Invisible on the two existing scenarios, which both run
+    # eastbound; it surfaced the moment a LOWI arrival was added.
+    if len(path) > 1:
+        repl.send("set heading %.0f" % bearing(path[0], path[1]))
+    repl.send("set gs %.0f" % float(route.get("gs_kt", 280)))
     repl.send("poll 5")
     repl.send("fmsroute")          # seed the pilot's route before the first leg
     _l0 = repl.sync()
@@ -690,12 +776,37 @@ def main():
         elif FMS_MODE and pilot.fms:
             tgt = pilot.fms_advance(prev)
             if tgt is None:
-                break  # route flown out -- the final approach segment takes over
-            brg = bearing(prev, (tgt["lat"], tgt["lon"]))
-            d_t = nm(prev, (tgt["lat"], tgt["lon"]))
-            step = min(4.0, max(0.3, d_t))
-            pt = advance(prev, brg, step)
-            pilot.hdg = brg
+                # THE ROUTE ENDS BEFORE THE APPROACH IS APPENDED.
+                #
+                # The pilot's copy of the route stops at the STAR terminus
+                # (EDLW: ADEMI). The approach transition -- DOR, CF06, KOLOT,
+                # RW06 -- is only spliced in when the plugin CLEARS the
+                # approach, and it clears it once the aircraft gets close
+                # enough. Breaking out here stopped the aircraft at the last
+                # STAR fix, so the clearance never came, so the fixes never
+                # arrived: replay-star ended in IFR/DESCENT at ADEMI, 11 NM off
+                # an axis it had never been given. A pilot who runs out of route
+                # keeps flying toward the field and waits to be told; do the
+                # same, and pick the route back up when it grows.
+                # [C. P. Potter]
+                if dest is None or pilot.established or pilot.finished:
+                    break
+                if nm(prev, dest) < 1.0:
+                    break  # over the field with nothing left to fly
+                brg = bearing(prev, dest)
+                step = min(2.0, max(0.3, nm(prev, dest)))
+                pt = advance(prev, brg, step)
+                pilot.hdg = brg
+                if _raw_fh:
+                    _raw_fh.write("  [fms] route out at %.1f NM -- holding "
+                                  "toward the field, waiting for the approach\n"
+                                  % nm(prev, dest))
+            else:
+                brg = bearing(prev, (tgt["lat"], tgt["lon"]))
+                d_t = nm(prev, (tgt["lat"], tgt["lon"]))
+                step = min(4.0, max(0.3, d_t))
+                pt = advance(prev, brg, step)
+                pilot.hdg = brg
             idx += 1
         else:
             pt = path[idx]
@@ -767,7 +878,14 @@ def main():
         # The axis is the published final approach track through the FAF, which
         # the engine logged. The last vector was an INTERCEPT heading, so flying
         # it onward would take the aircraft across the localiser and off it.
-        crs = pilot.faf_track if pilot.faf_track is not None else bearing(prev, dest)
+        # A CURVED FINAL PUBLISHES NO TRACK, AND 0 IS NOT A TRACK.
+        # faf_track comes back as 0.0 on an RF-leg approach (LOWI RNAV Z 08:
+        # "FAF: ident=WI749 ... track=0"). `is not None` accepted it, so the
+        # aircraft flew a course of 000 -- due north, 42 NM past the field, with
+        # the runway behind it. On a curved final the runway itself is the only
+        # reference left, so steer at it and recompute each step.
+        curved = not pilot.faf_track
+        crs = bearing(prev, dest) if curved else pilot.faf_track
         for _ in range(40):
             # KEEP FLYING AFTER THE LANDING CLEARANCE. Stopping there ended the
             # replay 9 NM out at Geneva, before the aircraft had even passed its
@@ -808,12 +926,23 @@ def main():
             if pilot.faf is not None:
                 dfaf = nm(prev, pilot.faf)
                 ahead = dfaf * math.cos(math.radians(bearing(prev, pilot.faf) - crs))
-            if ahead > 0.6:
+            if curved:
+                crs_now = bearing(prev, dest)  # no axis -- fly to the runway
+            elif ahead > 0.6:
                 crs_now = bearing(prev, pilot.faf)
             else:
                 crs_now = crs
             pt = advance(prev, crs_now, step)
             alt = max(500.0, alt - step * 318.0)
+            # ARRIVE AT THE FIELD AT FIELD ELEVATION. Descending a flat 318 ft/NM
+            # from wherever the capture happened put the aircraft over Innsbruck
+            # at FL104 -- 10 400 ft above a 1 900 ft runway -- which is not a
+            # landing, whatever the acceptance lines say. Clamp to a 3 degree
+            # path to the threshold: the profile a pilot flies once he is on the
+            # approach, and the one the published altitudes describe.
+            # [C. P. Potter]
+            fld = float(route.get("field_elev_ft") or 0)
+            alt = min(alt, fld + nm(prev, dest) * 318.0 + 50.0)
             # The assigned level holds until the FAF; from the FAF inbound the
             # aircraft is on the glide path and ATC's floor no longer applies
             # (ICAO 8.9.4.2 -- maintain the last level until intercepting the
@@ -824,7 +953,11 @@ def main():
             # platform -- and it would hide a genuine descent below it by exactly
             # that margin. It showed up as 3900 ft on a 4000 ft platform
             # (user, 2026-08-19: "pourquoi 3900 ft et pas 4000 ?").
-            if pilot.cleared_ft is not None and ahead > 0.6:
+            # On a curved final there is no FAF ahead to hold the level until:
+            # the aircraft is already ON the procedure and descends on its
+            # published profile. Holding the last assigned level all the way in
+            # left it over the threshold at FL104 above a 1 900 ft field.
+            if pilot.cleared_ft is not None and not curved and ahead > 0.6:
                 alt = max(alt, float(pilot.cleared_ft))
             repl.send("set gs %.0f" % gs)
             repl.send("set heading %.0f" % crs_now)
@@ -844,17 +977,95 @@ def main():
 
     # Acceptance summary: the handful of numbers an arrival is judged on, so a
     # replay is read at a glance instead of by scrolling the timeline.
+    # A SUMMARY YOU SKIM IS NOT A TEST. Every criterion below now registers a
+    # verdict and the process exits non-zero when one fails, so `make replay*`
+    # goes red instead of printing a tidy table nobody reads to the end. The
+    # release distance sat in this output at 10 NM for days -- the exact defect
+    # the flights kept reporting -- while the eye stopped at "cleared to land"
+    # (user, 2026-08-21). [C. P. Potter]
+    failures = []
+    def verdict(ok, what):
+        if not ok:
+            failures.append(what)
+        return ok
+
     print("\n=== acceptance ===")
     est = [e for e in pilot.events if "established" in str(e[2]).lower()]
+    verdict(pilot.established, "the pilot never reported established")
     print("  %-34s %s" % ("established reported by the pilot",
                           "yes" if pilot.established else "NO"))
     print("  %-34s %s" % ("Tower handoff received",
                           "NO" if not (pilot.tower_called or pilot.tower_no_freq)
                           else ("yes, but WITHOUT a frequency" if pilot.tower_no_freq
                                 else "yes, with a frequency")))
+    verdict(pilot.finished, "no landing clearance")
     print("  %-34s %s" % ("cleared to land", "yes" if pilot.finished else "NO"))
     print("  %-34s %s" % ("final speed assigned",
                           ("%.0f kt" % pilot.assigned_kt) if pilot.assigned_kt else "none"))
+
+    # ── vector shape ────────────────────────────────────────────────────────
+    # A radar pattern is a sequencing leg, a base of about ninety degrees, then
+    # an intercept of thirty. Until 2026-08-20 the engine went straight from the
+    # downwind to the intercept, so the pilot got ONE instruction carrying a 163
+    # degree reversal -- and this harness reported the arrival as a clean pass,
+    # because it only ever checked that the aircraft landed. These three lines
+    # are what would have caught it. [C. P. Potter]
+    vec_hdgs, expect_after_vector = [], False
+    for _, _, msg in pilot.events:
+        text = str(msg)
+        if "ATC" not in text:
+            continue
+        low = text.lower()
+        if "expect vectors" in low and vec_hdgs:
+            expect_after_vector = True
+        if "confirm" in low:
+            continue                      # a compliance query is not a new vector
+        m = RE_HEADING.search(text)
+        if m:
+            vec_hdgs.append(int(m.group(1)))
+    turns = [abs((b - a + 180) % 360 - 180)
+             for a, b in zip(vec_hdgs, vec_hdgs[1:])]
+    worst = max(turns) if turns else 0
+    print("  %-34s %s" % ("vectors issued",
+                          " -> ".join("%03d" % h for h in vec_hdgs) or "none"))
+    print("  %-34s %s"
+          % ("largest single turn",
+             "n/a" if not turns else
+             ("%d deg%s" % (worst,
+                            "" if worst <= 110 else "   <-- REVERSAL, not a pattern"))))
+    verdict(not turns or worst <= 110, "a single vector turned %d deg" % worst)
+    # Intercept angle against the runway axis, from the runway in the clearance.
+    rwy_deg = None
+    for _, _, msg in pilot.events:
+        m = re.search(r"cleared .*runway (\d{2})", str(msg), re.I)
+        if m:
+            rwy_deg = int(m.group(1)) * 10
+    if rwy_deg is not None and vec_hdgs:
+        icpt = abs((vec_hdgs[-1] - rwy_deg + 180) % 360 - 180)
+        print("  %-34s %d deg%s"
+              % ("final intercept vs axis", icpt,
+                 "" if icpt <= 45 else "   <-- over the ICAO 45 deg maximum"))
+        verdict(icpt <= 45, "final intercept %d deg, over the ICAO maximum" % icpt)
+    rel = [v for v in VECTOR_VERDICTS if "released at" in v]
+    ref = [v for v in VECTOR_VERDICTS if "refused:" in v]
+    if rel:
+        m = re.search(r"released at (\S+): ([\d.]+) NM", rel[0])
+        if m:
+            d = float(m.group(2))
+            print("  %-34s %.1f NM from %s%s"
+                  % ("sequencing vector released", d, m.group(1),
+                     "" if d <= 4.0 else "   <-- not 'just before the fix'"))
+            verdict(d <= 4.0,
+                    "sequencing vector released %.1f NM from %s" % (d, m.group(1)))
+    print("  %-34s %s" % ("vectoring refused",
+                          "NO (correct)" if not ref
+                          else "yes   <-- " + ref[0].split("refused:")[-1].strip()))
+    verdict(not ref, "vectoring refused: " + (ref[0] if ref else ""))
+    print("  %-34s %s" % ("expect-vectors after a vector",
+                          "NO (correct)" if not expect_after_vector
+                          else "yes   <-- promised to an aircraft already vectored"))
+    verdict(not expect_after_vector,
+            "expect-vectors promised to an aircraft already being vectored")
 
     print("\n%-9s %-8s %s" % ("dist", "level", "event"))
     print("-" * 78)
@@ -862,6 +1073,13 @@ def main():
         d = nm(where, dest) if (dest and isinstance(where, tuple)) else 0.0
         lvl = ("FL%03d" % (a // 100)) if a >= 10000 else ("%d ft" % a)
         print("%6.0f NM %-8s %s" % (d, lvl, msg))
+
+    if failures:
+        print("\nREPLAY: FAIL -- %d criteria" % len(failures))
+        for f in failures:
+            print("  * %s" % f)
+        return 1
+    print("\nREPLAY: PASS")
     return 0
 
 

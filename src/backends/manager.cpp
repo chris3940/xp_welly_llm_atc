@@ -7,6 +7,7 @@
 
 #include "backends/manager.hpp"
 
+#include "core/logging.hpp"
 #include "persistence/settings.hpp"
 
 #include <curl/curl.h>
@@ -16,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -45,9 +47,36 @@ std::unique_ptr<ITextToSpeech> g_tts;
 // not thread-safe inside whisper.cpp / llama.cpp / Piper) and the
 // teardown path. We do not parallelise multiple inferences of the same
 // stage; the user-facing pipeline is sequential.
-std::mutex g_stt_call_mtx;
-std::mutex g_lm_call_mtx;
-std::mutex g_tts_call_mtx;
+// One in-flight call per backend. These are TIMED mutexes on purpose.
+//
+// The HTTP layer has always had timeouts (45 s TTS, 30 s STT/LM), but they only
+// bound the call that HOLDS the lock. Every other worker queued behind it waited
+// on a plain std::mutex -- an UNBOUNDED wait that no timeout covered, and one
+// that prints nothing while it lasts. That is the exact shape of the LOWI
+// freeze of 2026-08-28: from the Innsbruck Radar handoff to touchdown there was
+// no TTS request in Log.txt, no result and no failure, and the session sat in
+// PLAYING with the radio dead. A worker parked here would look precisely like
+// that. So the wait is bounded too, a little above the HTTP timeout it is
+// waiting behind, and giving up is reported as a normal backend failure --
+// which unwinds the caller's state instead of stranding it. See
+// docs/open-questions.md Q13. [C. P. Potter]
+std::timed_mutex g_stt_call_mtx;
+std::timed_mutex g_lm_call_mtx;
+std::timed_mutex g_tts_call_mtx;
+constexpr int kSttLockWaitSec = 45; // HTTP 30 s + margin
+constexpr int kLmLockWaitSec  = 45; // HTTP 30 s + margin
+constexpr int kTtsLockWaitSec = 60; // HTTP 45 s + margin
+
+// Reported like any other backend failure, so the caller's normal error path
+// runs: the async callback fires with success = false and the session leaves
+// PLAYING / PROCESSING instead of being stranded there.
+std::string backend_busy_msg(const char *what, int secs) {
+  char buf[128];
+  std::snprintf(buf, sizeof(buf),
+                "%s backend busy for more than %d s -- request dropped", what,
+                secs);
+  return buf;
+}
 
 // Pending main-thread callbacks. Worker threads enqueue here; the
 // X-Plane flight loop drains via drain_callback_queue().
@@ -301,9 +330,15 @@ void transcribe_async(std::vector<int16_t> pcm16, uint32_t sample_rate_hz,
     std::string transcript;
     std::string backend_error;
     {
-      std::lock_guard<std::mutex> lk(g_stt_call_mtx);
+      std::unique_lock<std::timed_mutex> lk(
+          g_stt_call_mtx, std::chrono::seconds(kSttLockWaitSec));
       ISpeechToText *stt_ptr = nullptr;
-      {
+      if (!lk.owns_lock()) {
+        // Another call has held the backend longer than its own HTTP timeout
+        // allows. Fail this one rather than queue behind it for ever.
+        backend_error = backend_busy_msg("STT", kSttLockWaitSec);
+        logging::error("%s", backend_error.c_str());
+      } else {
         std::lock_guard<std::mutex> lk2(g_backend_mtx);
         stt_ptr = g_stt.get();
       }
@@ -369,9 +404,15 @@ void respond_async(std::string system_prompt, std::string user_text,
     std::string reply;
     std::string backend_error;
     {
-      std::lock_guard<std::mutex> lk(g_lm_call_mtx);
+      std::unique_lock<std::timed_mutex> lk(
+          g_lm_call_mtx, std::chrono::seconds(kLmLockWaitSec));
       ILanguageModel *lm_ptr = nullptr;
-      {
+      if (!lk.owns_lock()) {
+        // Another call has held the backend longer than its own HTTP timeout
+        // allows. Fail this one rather than queue behind it for ever.
+        backend_error = backend_busy_msg("LM", kLmLockWaitSec);
+        logging::error("%s", backend_error.c_str());
+      } else {
         std::lock_guard<std::mutex> lk2(g_backend_mtx);
         lm_ptr = g_lm.get();
       }
@@ -547,9 +588,15 @@ void classify_with_repair_async(std::string transcript,
     std::string raw;
     std::string backend_error;
     {
-      std::lock_guard<std::mutex> lk(g_lm_call_mtx);
+      std::unique_lock<std::timed_mutex> lk(
+          g_lm_call_mtx, std::chrono::seconds(kLmLockWaitSec));
       ILanguageModel *lm_ptr = nullptr;
-      {
+      if (!lk.owns_lock()) {
+        // Another call has held the backend longer than its own HTTP timeout
+        // allows. Fail this one rather than queue behind it for ever.
+        backend_error = backend_busy_msg("LM", kLmLockWaitSec);
+        logging::error("%s", backend_error.c_str());
+      } else {
         std::lock_guard<std::mutex> lk2(g_backend_mtx);
         lm_ptr = g_lm.get();
       }
@@ -619,9 +666,15 @@ void classify_intent_async(std::string transcript, std::string system_prompt,
     std::string raw;
     std::string backend_error;
     {
-      std::lock_guard<std::mutex> lk(g_lm_call_mtx);
+      std::unique_lock<std::timed_mutex> lk(
+          g_lm_call_mtx, std::chrono::seconds(kLmLockWaitSec));
       ILanguageModel *lm_ptr = nullptr;
-      {
+      if (!lk.owns_lock()) {
+        // Another call has held the backend longer than its own HTTP timeout
+        // allows. Fail this one rather than queue behind it for ever.
+        backend_error = backend_busy_msg("LM", kLmLockWaitSec);
+        logging::error("%s", backend_error.c_str());
+      } else {
         std::lock_guard<std::mutex> lk2(g_backend_mtx);
         lm_ptr = g_lm.get();
       }
@@ -685,9 +738,15 @@ void synthesize_async(std::string text, model_manifest::VoiceRole role,
     Audio a;
     std::string backend_error;
     {
-      std::lock_guard<std::mutex> lk(g_tts_call_mtx);
+      std::unique_lock<std::timed_mutex> lk(
+          g_tts_call_mtx, std::chrono::seconds(kTtsLockWaitSec));
       ITextToSpeech *tts_ptr = nullptr;
-      {
+      if (!lk.owns_lock()) {
+        // Another call has held the backend longer than its own HTTP timeout
+        // allows. Fail this one rather than queue behind it for ever.
+        backend_error = backend_busy_msg("TTS", kTtsLockWaitSec);
+        logging::error("%s", backend_error.c_str());
+      } else {
         std::lock_guard<std::mutex> lk2(g_backend_mtx);
         tts_ptr = g_tts.get();
       }

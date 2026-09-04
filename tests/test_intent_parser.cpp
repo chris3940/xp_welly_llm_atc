@@ -1,4 +1,5 @@
 #include "atc/intent_parser.hpp"
+#include "atc/intent_rules.hpp"
 #include "core/xplane_context.hpp"
 
 #include <catch2/catch_amalgamated.hpp>
@@ -135,6 +136,13 @@ TEST_CASE("normalize_spoken_frequency: all read-back styles collapse to 125.630"
           "november seven five zero x-ray papa");
   // A non-frequency number + decimal outside the VHF band is left alone.
   REQUIRE(only("flight level two three zero") == "flight level two three zero");
+  // FULLY hyphenated, INCLUDING the separator, and with the trailing comma the
+  // transcription leaves on the last word. Exactly as flown on 2026-08-25:
+  // "And over on one-two-zero-decimal-eight-six-zero, November, Romeo, Charlie."
+  // -- a correct readback of 120.860 that the verifier reported as
+  // `field=freq expected=120.860 stated=(missing)` and answered "negative".
+  REQUIRE(only("and over on one-two-zero-decimal-eight-six-zero, november, "
+               "romeo, charlie.").find("120.860") != std::string::npos);
   // HYPHENATED digit strings. Voxtral punctuates them arbitrarily -- the same
   // pilot said the same frequency both ways on one flight, and only the spaced
   // form was understood, so a correct readback drew "negative, I say again"
@@ -152,4 +160,126 @@ TEST_CASE("normalize_spoken_frequency: all read-back styles collapse to 125.630"
   REQUIRE(only("one two five point six three zero") == "125.630");
   REQUIRE(only("one two five period six three zero") == "125.630");
   REQUIRE(only("taxi to holding point charlie") == "taxi to holding point charlie");
+}
+
+// Every transmission of the LFMN -> LOWI flight of 2026-08-28, run back through
+// the rules. Two things it found. [C. P. Potter]
+TEST_CASE("a parallel-runway designator is not a vacated report",
+          "[intent][runway_vacated]") {
+  intent_parser::init();
+  xplane_context::XPlaneContext ctx;
+  ctx.nearest_airport_id = "LFMN";
+  ctx.active_runway = "04R";
+  ctx.on_ground = true;
+
+  // The rule matched the two loose words "left" + "runway", so at a field with
+  // parallel runways EVERY transmission naming one fired RUNWAY_VACATED at 0.90
+  // and bypassed the LM. The real flight read back its taxi clearance and was
+  // recorded as having vacated a runway it had not yet reached.
+  REQUIRE(intent_parser::parse(
+              "taxi to holding point Charlie 1 November runway zero four left "
+              "November Romeo Charlie",
+              ctx)
+              .intent != intent_parser::PilotIntent::RUNWAY_VACATED);
+  REQUIRE(intent_parser::parse(
+              "Lined up runway zero four left, November Romeo Charlie.", ctx)
+              .intent != intent_parser::PilotIntent::RUNWAY_VACATED);
+
+  // A real vacated report still fires -- it says the word.
+  REQUIRE(intent_parser::parse(
+              "November Romeo Charlie, runway zero four left vacated.", ctx)
+              .intent == intent_parser::PilotIntent::RUNWAY_VACATED);
+  // And so does the phrase the branch actually exists for.
+  REQUIRE(intent_parser::parse("we have left runway 22, November Romeo Charlie",
+                               ctx)
+              .intent == intent_parser::PilotIntent::RUNWAY_VACATED);
+}
+
+TEST_CASE("Voxtral mishearings of 2026-08-28 are repaired", "[intent][stt]") {
+  intent_parser::init();
+  struct Case { const char *heard, *want; };
+  const Case cases[] = {
+      {"november room, charlie", "november romeo charlie"},
+      {"climb flight level 450 november, rome, charlie.", "romeo charlie"},
+      // read as TRAFFIC_NEGATIVE_CONTACT by the LM, silencing the reply
+      {"en route to rtt november, no charlie.", "november romeo charlie"},
+      {"direct hit cap, when able", "itcap"},
+      {"descend via nedit 2 alpha rival to flight level 190", "nanit"},
+      {"descend via nedit 2 alpha rival to flight level 190", "arrival to"},
+      {"expect r90 approach runway 26", "rnav approach"},
+      {"climb being to flight level 100", "climbing to"},
+      {"one one eight decimal four'eight zero", "four eight zero"},
+  };
+  for (const auto &c : cases) {
+    const std::string out = intent_rules::preprocess(c.heard);
+    INFO(c.heard << "  ->  " << out);
+    REQUIRE(out.find(c.want) != std::string::npos);
+  }
+}
+
+// The single most common IFR transmission must not need a network round-trip.
+//
+// Flight of 2026-08-29: the cloud LM answered HTTP 403 "tier_not_allowed" on
+// every call, and because no RULE covered a bare level readback, five textbook
+// readbacks of "climb flight level 110" in a row drew "say again, use standard
+// phraseology" while the aircraft climbed correctly. [C. P. Potter]
+TEST_CASE("a bare level readback is recognised without the LM",
+          "[intent][readback][level]") {
+  intent_parser::init();
+  xplane_context::XPlaneContext ctx;
+  ctx.nearest_airport_id = "LFMN";
+  ctx.active_runway = "04R";
+  ctx.on_ground = false;
+  using I = intent_parser::PilotIntent;
+
+  // Every form the pilot actually used, in order, before giving up.
+  for (const char *t : {"Climbing flight level 110, November Charlie.",
+                        "Climbing flight level 110, November, Romeo, Charlie.",
+                        "Climb flight level 110 November, Romeo Charlie.",
+                        "Climb flight level 110 November"}) {
+    const auto m = intent_parser::parse(t, ctx);
+    INFO(t);
+    REQUIRE(m.intent == I::READBACK);
+    REQUIRE(m.confidence >= 0.9f);
+  }
+  // The other levels, and feet with a QNH.
+  REQUIRE(intent_parser::parse("Descend flight level 150, November Romeo Charlie.", ctx)
+              .intent == I::READBACK);
+  REQUIRE(intent_parser::parse("Maintain flight level 190, November Romeo Charlie.", ctx)
+              .intent == I::READBACK);
+  REQUIRE(intent_parser::parse("Descend 3000 feet, QNH 1013, November Romeo Charlie.", ctx)
+              .intent == I::READBACK);
+}
+
+TEST_CASE("the level branch does not swallow requests or reports",
+          "[intent][readback][level]") {
+  intent_parser::init();
+  xplane_context::XPlaneContext ctx;
+  ctx.nearest_airport_id = "LFMN";
+  ctx.on_ground = false;
+  using I = intent_parser::PilotIntent;
+
+  // A request is not a readback.
+  REQUIRE(intent_parser::parse("Request descent, November Romeo Charlie.", ctx)
+              .intent != I::READBACK);
+  REQUIRE(intent_parser::parse("Request flight level 200, November Romeo Charlie.", ctx)
+              .intent != I::READBACK);
+  // "passing" / "reaching" are REPORTS the controller asked for.
+  REQUIRE(intent_parser::parse("November Romeo Charlie passing 3000 feet.", ctx)
+              .intent != I::READBACK);
+  REQUIRE(intent_parser::parse("November Romeo Charlie reaching flight level 110.", ctx)
+              .intent != I::READBACK);
+  // "expect FL190" is part of an arrival clearance being previewed, not an echo.
+  REQUIRE(intent_parser::parse("Expect flight level 190, November Romeo Charlie.", ctx)
+              .intent != I::READBACK);
+
+  // The participle form is a sector CHECK-IN when nothing is awaiting readback.
+  // It is handed to INITIAL_CALL_CENTER outright, NOT merely demoted: a demotion
+  // routes it to the LM, and a transmission must always end somewhere -- a
+  // readback (silence) or a check-in (ack), never in the gap between them where
+  // an LM outage turns it into "say again".
+  const auto ci =
+      intent_parser::parse("Climbing to flight level 110, November Romeo Charlie.", ctx);
+  REQUIRE(ci.intent == I::INITIAL_CALL_CENTER);
+  REQUIRE(ci.confidence >= 0.7f); // never routed to the LM
 }

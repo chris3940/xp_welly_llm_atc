@@ -83,6 +83,16 @@ bool departure_hold(const std::string &icao, const std::string &sid_last_fix,
 bool controller(const std::string &icao, const std::string &role,
                 std::string *out_name, float *out_freq_mhz);
 
+// The inverse lookup: which overlay controller does this frequency belong to at
+// `icao`? Fills the ROLE ("APPROACH", "TOWER", ...) and the spoken name. Matches
+// the primary freq and every "alt_freqs_mhz" alternate, with 5 kHz tolerance for
+// 8.33 kHz channel designators. The plugin hands the pilot frequencies that exist
+// only in this overlay (LOWI Innsbruck Radar 128.975); without this it could not
+// then recognise the frequency it had just told him to tune, and classified the
+// whole arrival as UNKNOWN. (C. P. Potter)
+bool role_for_freq(const std::string &icao, float freq_mhz,
+                   std::string *out_role, std::string *out_name);
+
 // Per-approach override of the Approach->Tower handoff trigger FIX, replacing the
 // FAF. For curved RNP finals whose FAF is far out and the aircraft is only
 // "established on final" at a late last-turn fix (LOWI RNP 08: FAF WI749 ~28 NM out
@@ -98,6 +108,14 @@ std::string tower_handoff_fix(const std::string &icao,
 // e.g. LFMN BASI8X: jets 10000 ft (FL100) / props 7000 ft (FL070). (C. P. Potter)
 int sid_initial_climb_ft(const std::string &icao, const std::string &sid_name,
                          bool is_jet);
+
+// Runway-holding-point name for icao + runway, from airport+.json. Empty when
+// none is declared -- the caller then names the runway alone rather than the
+// apt.dat guess, which keeps ONE point per runway (the taxiway passing nearest
+// the THRESHOLD) and so answered "Alpha 2" where the aircraft taxis to "Alpha 1"
+// (LFMN, real flight 2026-08-27). [C. P. Potter]
+std::string runway_holding_point(const std::string &icao,
+                                 const std::string &runway);
 
 } // namespace airport_overrides
 

@@ -11,6 +11,8 @@
 
 #include "atc/readback_verifier.hpp"
 
+#include "atc/intent_parser.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <regex>
@@ -97,8 +99,20 @@ static std::string merge_digit_hyphens(const std::string &s) {
 }
 
 // Full normalisation pipeline for a readback transcript.
+//
+// THE SPOKEN-FREQUENCY COLLAPSE COMES FIRST, and it is the intent parser's, not a
+// second implementation here. This file grew its own chain -- phonetics, then
+// hyphen merging, then digit compaction -- which handles digits but not number
+// WORDS, so "one-two-zero-decimal-eight-six-zero" reached extract_freq() as
+// letters and was reported `field=freq expected=120.860 stated=(missing)`: a
+// correct readback answered with "negative, I say again, 120.860" (real flight
+// EDLW 2026-08-25). intent_parser::normalize_spoken_frequency() already collapses
+// every spoken form -- spaced, hyphenated, cardinal, leading-1 dropped -- and is
+// covered by tests. Two implementations of one problem is how the same defect got
+// fixed twice on one side and never on the other. [C. P. Potter]
 static std::string normalise(const std::string &text) {
-  return compact_digit_spaces(merge_digit_hyphens(normalize_phonetics(text)));
+  return compact_digit_spaces(merge_digit_hyphens(
+      normalize_phonetics(intent_parser::normalize_spoken_frequency(text))));
 }
 
 // ── Value extractors ──────────────────────────────────────────────────────
@@ -123,6 +137,37 @@ static int extract_runway(const std::string &norm) {
     return std::stoi(m[1]);
   return -1;
 }
+
+// The FULL runway designator, side included: "04R", "22", "16C".
+//
+// extract_runway() throws the side away, and every correction built from it
+// said "runway zero four" to an aircraft lined up on 04R at Nice -- not a
+// runway designator at all, and at a parallel-runway field the one word that
+// carries the whole meaning (real flight 2026-08-28). ICAO Doc 4444 requires
+// the runway to be read back in full, so the side is compared as well as the
+// number. The side may be spoken ("zero four right") or written ("04R").
+// [C. P. Potter]
+static std::string extract_runway_desig(const std::string &norm) {
+  const int num = extract_runway(norm);
+  if (num < 0)
+    return "";
+  char head[4];
+  std::snprintf(head, sizeof(head), "%02d", num);
+  std::string out(head);
+
+  // Look for the side immediately after the number we just matched.
+  static const std::regex kRe(
+      R"(\b(?:runway|approach)\s*(?:runway\s*)?\d{1,2}\s*)"
+      R"((l|r|c|left|right|centre|center)\b)",
+      std::regex_constants::icase);
+  std::smatch m;
+  if (std::regex_search(norm, m, kRe)) {
+    const char side = static_cast<char>(std::tolower(m[1].str()[0]));
+    out += static_cast<char>(std::toupper(side));
+  }
+  return out;
+}
+
 
 // Returns flight level as int (90 for FL90 / "flight level 90" / "FL 090")
 // or 0 if absent.
@@ -273,6 +318,22 @@ static std::string runway_to_speech(int rwy) {
     out += kDigit[c - '0'];
   }
   return out;  // "two two", "zero niner"
+}
+
+// "04R" -> "zero four right", for the spoken correction.
+static std::string runway_desig_to_speech(const std::string &desig) {
+  if (desig.empty())
+    return "";
+  std::string out = runway_to_speech(std::stoi(desig.substr(0, 2)));
+  if (desig.size() > 2) {
+    switch (desig[2]) {
+    case 'L': out += " left";   break;
+    case 'R': out += " right";  break;
+    case 'C': out += " center"; break;
+    default: break;
+    }
+  }
+  return out;
 }
 
 // Format a flight level for ICAO speech (90 → "niner zero", 120 → "one two zero").
@@ -427,6 +488,18 @@ static bool readback_contains(const std::string &norm, int value) {
 // SKYbrary "Standard Phraseology" and the IVAO readback documentation, 2026-08-14
 // (user flagged it). The callsign and full stop are added by the caller.
 // [C. P. Potter]
+// "NEGATIVE, I SAY AGAIN ..." corrects a readback that was WRONG. An item the
+// pilot never mentioned is not wrong, it is missing, and ICAO Doc 4444 has a
+// different phrase for that: "READ BACK (items)". The two were conflated, so a
+// pilot who correctly read back the arrival clearance while a level clearance
+// issued nine seconds later was still outstanding heard "negative, I say again,
+// flight level one five zero" -- told he had made a mistake he had not made
+// (LOWI arrival, 2026-08-29). [C. P. Potter]
+static std::string correction_for(bool was_stated, const std::string &spoken) {
+  return was_stated ? "negative, I say again, " + spoken
+                    : "read back " + spoken;
+}
+
 std::vector<Mismatch> check(const std::string &clearance_text,
                             const std::string &readback_text) {
   std::vector<Mismatch> out;
@@ -438,15 +511,19 @@ std::vector<Mismatch> check(const std::string &clearance_text,
   const std::string rb = normalise(readback_text);
 
   // ── Runway ─────────────────────────────────────────────────────────────
-  int cl_rwy = extract_runway(cl);
-  if (cl_rwy >= 0) {
-    int rb_rwy = extract_runway(rb);
-    if (rb_rwy < 0 || rb_rwy != cl_rwy) {
+  // Compared as a FULL designator, side included: at a parallel-runway field
+  // "04" and "04R" are not the same clearance, and the correction that names
+  // only the number is not a runway at all (Nice, 2026-08-28).
+  const std::string cl_rwy = extract_runway_desig(cl);
+  if (!cl_rwy.empty()) {
+    const std::string rb_rwy = extract_runway_desig(rb);
+    if (rb_rwy != cl_rwy) {
       Mismatch m;
       m.field    = "runway";
-      m.expected = std::to_string(cl_rwy);
-      m.stated   = rb_rwy >= 0 ? std::to_string(rb_rwy) : "";
-      m.correction = "negative, I say again, runway " + runway_to_speech(cl_rwy);
+      m.expected = cl_rwy;
+      m.stated   = rb_rwy;
+      m.correction = correction_for(!m.stated.empty(),
+                                    "runway " + runway_desig_to_speech(cl_rwy));
       out.push_back(std::move(m));
     }
   }
@@ -462,7 +539,8 @@ std::vector<Mismatch> check(const std::string &clearance_text,
       m.field    = "fl";
       m.expected = std::to_string(cl_fl);
       m.stated   = rb_fl > 0 ? std::to_string(rb_fl) : "";
-      m.correction = "negative, I say again, flight level " + fl_to_speech(cl_fl);
+      m.correction = correction_for(!m.stated.empty(),
+                                    "flight level " + fl_to_speech(cl_fl));
       out.push_back(std::move(m));
     }
   }
@@ -482,7 +560,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
         m.stated   = rb_alt > 0 ? std::to_string(rb_alt) : "";
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%d feet", cl_alt);
-        m.correction = std::string("negative, I say again, ") + buf;
+        m.correction = correction_for(!m.stated.empty(), buf);
         out.push_back(std::move(m));
       }
     }
@@ -497,7 +575,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
       m.field      = "freq";
       m.expected   = cl_freq;
       m.stated     = rb_freq;
-      m.correction = "negative, I say again, " + cl_freq;
+      m.correction = correction_for(!m.stated.empty(), cl_freq);
       out.push_back(std::move(m));
     }
   }
@@ -511,7 +589,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
       m.field      = "squawk";
       m.expected   = cl_sq;
       m.stated     = rb_sq;
-      m.correction = "negative, I say again, squawk " + cl_sq;
+      m.correction = correction_for(!m.stated.empty(), "squawk " + cl_sq);
       out.push_back(std::move(m));
     }
   }
@@ -540,7 +618,7 @@ std::vector<Mismatch> check(const std::string &clearance_text,
         std::snprintf(buf, sizeof(buf), "%d knots or less", cl_spd);
       else
         std::snprintf(buf, sizeof(buf), "reduce speed to %d knots", cl_spd);
-      m.correction = std::string("negative, I say again, ") + buf;
+      m.correction = correction_for(!m.stated.empty(), buf);
       out.push_back(std::move(m));
     }
   }
@@ -557,8 +635,8 @@ std::vector<std::string> matched_fields(const std::string &clearance_text,
   const std::string cl = normalise(clearance_text);
   const std::string rb = normalise(readback_text);
 
-  int cl_rwy = extract_runway(cl);
-  if (cl_rwy >= 0 && extract_runway(rb) == cl_rwy)
+  const std::string cl_rwy = extract_runway_desig(cl);
+  if (!cl_rwy.empty() && extract_runway_desig(rb) == cl_rwy)
     ok.push_back("runway");
 
   int cl_fl = extract_fl(cl);

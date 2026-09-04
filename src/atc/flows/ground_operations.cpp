@@ -137,8 +137,14 @@ static std::string airport_name(const XPlaneContext &ctx) {
                          : (!ctx.nearest_airport_id.empty()
                                 ? ctx.nearest_airport_id
                                 : "Airport");
-  // Use city name only — strip local suffix ("Annecy Meythet" → "Annecy")
-  auto sep = name.find_first_of(" -");
+  // Use city name only — strip local suffix ("Annecy Meythet" → "Annecy").
+  // THE SLASH COUNTS TOO. apt.dat writes "Nice/Cote D'Azur", with no space
+  // before the slash, so cutting on space-or-hyphen kept "Nice/Cote" and every
+  // ground transmission at Nice said it -- ten times over, by the user's count
+  // (2026-08-26). spoken_airport_name() in engine.cpp has cut on '/' since it
+  // was written; this is the second implementation of the same need, and it was
+  // the one the ground flow used. [C. P. Potter]
+  auto sep = name.find_first_of(" -/");
   return (sep != std::string::npos) ? name.substr(0, sep) : name;
 }
 
@@ -485,6 +491,43 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
       // No airport-specific override here — constraints like FL090 (LFLP
       // Geneva TMA) are applied at radar contact via {ifr_departure_climb}.
       {"ifr_initial_altitude", [&]() -> std::string {
+        // THE PUBLISHED SID INITIAL CLIMB COMES FIRST. This is the variable the
+        // delivery clearance actually interpolates -- ifr_departure_climb is a
+        // different one, used in flight, and patching that one on 2026-08-26
+        // changed nothing on the ground: the clearance still said "initial climb
+        // to 5000 feet" for BASI8A, which publishes FL100 for jets and FL070 for
+        // props. Below, the CIFP's runway initial altitude answers 5000 at Nice
+        // (the transition altitude) and wins by being first. The airport+.json
+        // table is a chart annotation that the CIFP does not carry, so where a
+        // rule exists it IS the clearance. [C. P. Potter]
+        {
+          const std::string sid_now =
+              !ctx.ifr_cifp_sid.empty() ? ctx.ifr_cifp_sid : ctx.ifr_sid;
+          const bool jet_now =
+              ctx.aircraft_engine_kind == xplane_context::EngineKind::Jet;
+          const int ov = airport_overrides::sid_initial_climb_ft(
+              ctx.nearest_airport_id, sid_now, jet_now);
+          if (ov > 0) {
+            // ABOVE THE TRANSITION ALTITUDE IT IS A FLIGHT LEVEL. Nice
+            // publishes 5000 (apt.dat 1302), so BASI8A's 7000 for props and
+            // 10000 for jets are both flight levels -- FL070 and FL100, three
+            // digits, ICAO form. Below the transition altitude the same rule
+            // yields feet, which is why the test is on the value and not on the
+            // aerodrome. [C. P. Potter]
+            char buf[16];
+            const int ta_now =
+                ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft : 5000;
+            if (ov >= ta_now && ov % 100 == 0)
+              std::snprintf(buf, sizeof(buf), "FL%03d", ov / 100);
+            else
+              std::snprintf(buf, sizeof(buf), "%d feet", ov);
+            logging::info("[sid] %s %s initial climb -> %d ft (airport+.json, "
+                          "%s; transition alt %d) -> \"%s\"",
+                          ctx.nearest_airport_id.c_str(), sid_now.c_str(), ov,
+                          jet_now ? "jet" : "prop", ta_now, buf);
+            return buf;
+          }
+        }
         auto cifp = cifp_reader::initial_altitude(
             ctx.cifp_dir, ctx.nearest_airport_id, ctx.active_runway);
         if (cifp.feet > 0) {
@@ -538,6 +581,25 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
         // the pilot's climb clearance. Fix: use the current cleared
         // altitude when set; only fall through to phase-default on the
         // very first radar contact (before any climb clearance).
+        // THE PUBLISHED INITIAL CLIMB WINS BEFORE ANYTHING HAS BEEN CLEARED.
+        // The branch below returns the level already in force so an in-flight
+        // climb clearance is never reversed -- but at the DELIVERY clearance
+        // nothing has been transmitted yet, and what it returned was a computed
+        // default (the CIFP reciprocal-runway 5000 at Nice). BASI8A publishes
+        // FL100 for jets and FL070 for props, the rule was in airport+.json, and
+        // the clearance said "initial climb to 5000 feet" because this early
+        // return fired first (real flight LFMN 2026-08-26). [C. P. Potter]
+        {
+          const std::string sid_pre =
+              !ctx.ifr_cifp_sid.empty() ? ctx.ifr_cifp_sid : ctx.ifr_sid;
+          const bool is_jet_pre =
+              ctx.aircraft_engine_kind == xplane_context::EngineKind::Jet;
+          const int ov_pre = airport_overrides::sid_initial_climb_ft(
+              ctx.nearest_airport_id, sid_pre, is_jet_pre);
+          if (ov_pre > 0 && atc_state_machine::get_state() ==
+                                atc_state_machine::ATCState::IFR_PREDEP_CLEARANCE)
+            return fl_str(ov_pre / 100);
+        }
         const int current_cleared_ft = engine::current_cleared_alt_ft();
         if (current_cleared_ft > 0) {
           const int ta = ctx.transition_alt_ft > 0 ? ctx.transition_alt_ft
@@ -879,14 +941,44 @@ std::map<std::string, std::string> build_vars(const PilotMessage &msg,
         // was answered "roger, contact Tower", and crossed the runway on a
         // line-up clearance (real flight 2026-08-19). [C. P. Potter]
         const std::string cross = engine::runway_to_cross(ctx, rwy);
-        const std::string tail =
-            cross.empty() ? std::string()
-                          : (", hold short of runway " + cross);
+        // THE TAXI STOPS AT THE FIRST RUNWAY, AND SO DOES THE POINT NAMED. The
+        // hold-short was appended while the holding point named stayed the
+        // DEPARTURE runway's -- which lies on the far side of the very runway
+        // the pilot is told not to cross. At Nice: "taxi to holding point
+        // Whiskey Three, runway 04R, hold short of runway 04L" -- W3 is beyond
+        // 04L, so naming it reads as permission to cross (user, real flight
+        // 2026-08-26: "cela donne l'impression qu'on a le droit de couper la
+        // 04L"). Name the holding point of the runway to be CROSSED; if the
+        // taxi network does not give one, name no point at all rather than a
+        // wrong one -- "holding point runway 04L" is correct and complete, and
+        // the departure runway was already given in the IFR clearance. The
+        // crossing itself is a separate clearance from Tower. [C. P. Potter]
+        if (!cross.empty()) {
+          // Chosen in the context refresh: same side of the runway as the
+          // aircraft, nearest the threshold OF THE RUNWAY IN USE. Empty when the
+          // geometry cannot answer, and then the runway alone is spoken -- a
+          // wrong name is worse than none. See holding_point_for().
+          std::string hp_cross;
+          auto ic = ctx.runway_holding_points.find(cross);
+          if (ic != ctx.runway_holding_points.end())
+            hp_cross = ic->second;
+          logging::info("[ground] taxi limited at runway %s (departure %s): "
+                        "holding point %s",
+                        cross.c_str(), rwy.c_str(),
+                        hp_cross.empty() ? "(unnamed)" : hp_cross.c_str());
+          // Remember it: from the hold-short itself the geometry can no longer
+          // find this runway, and the Tower needs it to clear the crossing.
+          engine::remember_taxi_hold_short(cross);
+          if (hp_cross.empty())
+            return "holding point runway " + cross;
+          return "holding point " + atc_phonetic::spell_holding_point(hp_cross) +
+                 ", runway " + cross;
+        }
         if (hp.empty())
-          return "holding point runway " + rwy + tail;
+          return "holding point runway " + rwy;
         // Spoken ICAO form: "D" -> "Delta", "C1" -> "Charlie One" (big airports).
         return "holding point " + atc_phonetic::spell_holding_point(hp) +
-               ", runway " + rwy + tail;
+               ", runway " + rwy;
       }()},
   };
 }

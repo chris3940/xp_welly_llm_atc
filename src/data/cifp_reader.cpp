@@ -928,6 +928,22 @@ std::vector<StarWaypoint> sid_waypoints(const std::string &cifp_dir,
               return a.seq < b.seq;
             });
 
+  // Keep the FIRST occurrence of each ident: the transition record (lower seq)
+  // wins over the final-body duplicate, so nothing changes for an arrival that
+  // flies the transition, and the body's IF survives when it does not.
+  {
+    std::vector<StarWaypoint> uniq;
+    uniq.reserve(result.size());
+    for (const auto &w : result) {
+      bool seen = false;
+      for (const auto &u : uniq)
+        if (u.ident == w.ident) { seen = true; break; }
+      if (!seen)
+        uniq.push_back(w);
+    }
+    result.swap(uniq);
+  }
+
   logging::info("[cifp] %s SID %s rwy %s -> %d waypoints",
                 icao.c_str(), sid_name.c_str(),
                 active_runway.empty() ? "(any)" : active_runway.c_str(),
@@ -1518,11 +1534,41 @@ static std::unordered_map<std::string, std::vector<StarWaypoint>>
     g_star_waypoints_cache;
 
 // ── approach_transition_prescribes_vectors ────────────────────────────────
+int approach_inbound_level_ft(const std::string &cifp_dir,
+                              const std::string &icao,
+                              const std::string &approach) {
+  if (cifp_dir.empty() || icao.empty() || approach.empty())
+    return 0;
+  std::ifstream in(cifp_dir + "/" + icao + ".dat");
+  if (!in)
+    return 0;
+  int best = 0;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.size() < 6 || line.compare(0, 6, "APPCH:") != 0)
+      continue;
+    auto f = split_csv(line);
+    if (f.size() < 24)
+      continue;
+    if (trim(f[2]) != approach)
+      continue;
+    if (trim(f[1]) != "A" || trim(f[11]) != "IF")
+      continue;
+    const int ft = parse_alt(f[23]).feet;
+    if (ft <= 0)
+      continue;
+    if (best == 0 || ft < best)
+      best = ft;
+  }
+  return best;
+}
+
 bool approach_transition_prescribes_vectors(const std::string &cifp_dir,
                                             const std::string &icao,
                                             const std::string &approach,
                                             const std::string &transition,
-                                            std::string *out_fix) {
+                                            std::string *out_fix,
+                                            int *out_course_deg) {
   if (cifp_dir.empty() || icao.empty() || approach.empty() || transition.empty())
     return false;
   std::ifstream in(cifp_dir + "/" + icao + ".dat");
@@ -1543,6 +1589,19 @@ bool approach_transition_prescribes_vectors(const std::string &cifp_dir,
         pt == "VR") {
       if (out_fix)
         *out_fix = trim(f[4]);
+      // THE PUBLISHED COURSE, same field as the STAR reader (21, 0-based 20,
+      // tenths of a degree). It was not read here, so an approach transition
+      // that prescribes vectors handed the engine a fix and no heading -- and
+      // the procedure vector, which requires a course, never armed. At LFMN
+      // that matters twice over: the transitions from MUS (090) and NERAS (270)
+      // are NOISE ABATEMENT tracks (user, 2026-08-22), so the published heading
+      // is not a detail of the sequencing, it IS the procedure. Without it the
+      // engine would improvise a geometric pattern over the wrong ground.
+      // [C. P. Potter]
+      if (out_course_deg) {
+        const std::string c = f.size() > 20 ? trim(f[20]) : std::string();
+        *out_course_deg = c.empty() ? 0 : (std::atoi(c.c_str()) + 5) / 10;
+      }
       return true;
     }
   }
@@ -1655,6 +1714,17 @@ std::vector<StarWaypoint> star_waypoints(const std::string &cifp_dir,
     wp.is_floor   = (alt_desc == "+");
     if (alt_desc == "B" && f.size() > 24)
       wp.floor_ft = parse_alt(f[24]).feet; // 0 when the floor field is blank
+    // AN "AT OR ABOVE" IS A FLOOR TOO, and it was invisible. floor_ft was
+    // populated for block "B" constraints ONLY, so a plain "+" set is_floor but
+    // left floor_ft at zero -- and active_block_floor_ft(), which is what stops
+    // ATC clearing below a minimum still ahead, reads floor_ft. Result on the
+    // BELUS 3 ROMEO of 2026-08-21: GG502 publishes "+ FL100", the active floor
+    // read 7000 (BIVLO's, the only one that happened to be a block), and the
+    // aircraft was cleared to FL090 with GG502 still ahead. It crossed at FL120
+    // only because the pilot descended slowly -- the clearance authorised a
+    // profile that would have busted the published minimum. [C. P. Potter]
+    if (alt_desc == "+" && alt.feet > 0)
+      wp.floor_ft = alt.feet;
     wp.speed_kt   = speed_kt;
     wp.seq        = seq;
     result.push_back(wp);
@@ -1740,9 +1810,30 @@ std::string connector_star(const std::string &cifp_dir,
   if (cifp_dir.empty() || icao.empty() || from_fix.empty() || to_fixes.empty())
     return {};
 
+  // CACHED, like every other reader here -- this one was the outlier. It reparses
+  // the WHOLE CIFP file for the airport, and resolve_approach_iaf calls it from
+  // nine places, several of them per-frame polls. On the LOWI arrival of
+  // 2026-08-30 that meant a full file parse and a log line sixty times a second
+  // from the moment the connector was needed: 18 293 identical lines, more than
+  // half of a 2.7 MB Log.txt, drowning every other diagnostic at exactly the
+  // phase of flight we most need to read. The answer cannot change for a given
+  // (airport, entry fix, IAF set), so compute it once and say it once.
+  // [C. P. Potter]
+  std::string key = icao + "|" + from_fix;
+  for (const auto &t : to_fixes)
+    key += "|" + t;
+  static std::unordered_map<std::string, std::string> cache;
+  {
+    auto it = cache.find(key);
+    if (it != cache.end())
+      return it->second;
+  }
+
   std::ifstream in(make_cifp_path(cifp_dir, icao));
-  if (!in.good())
+  if (!in.good()) {
+    cache.emplace(key, std::string{}); // a missing file must not be reopened per frame
     return {};
+  }
 
   // Per STAR: entry fix (lowest seq) + terminating fix (highest seq).
   struct Ends {
@@ -1782,6 +1873,7 @@ std::string connector_star(const std::string &cifp_dir,
   std::sort(matches.begin(), matches.end());
   std::string result = matches.empty() ? std::string{} : matches.front();
 
+  cache.emplace(key, result);
   logging::info("[cifp] %s connector STAR from %s to approach IAF -> %s",
                 icao.c_str(), from_fix.c_str(),
                 result.empty() ? "(none)" : result.c_str());
@@ -1855,7 +1947,21 @@ std::vector<StarWaypoint> approach_procedure_waypoints(
       // RNAV arrivals hid this because they are the only type that matched.
       // [C. P. Potter]
       if (!trim(f[3]).empty()) continue;
-      if (path_term == "IF") continue; // IF entry = BISBO, already in transition above
+      // The final body's IF is dropped here, "already covered by the transition
+      // above" -- true for an arrival that FLIES a published transition, FALSE
+      // for a vectored one, which flies none. At LSGG that loses PETAL (IF,
+      // 4640) and with it every published minimum of the approach except the
+      // FAF's own 4000, which is why the engine offers 4000 twenty miles out.
+      //
+      // Restoring it (kept + de-duplicated after the sort) works and was
+      // measured -- but it also puts a fix ON THE AXIS into the route table,
+      // which the headless test pilot then steers toward instead of holding its
+      // assigned heading: the downwind closed from 6.3 NM off the axis to 1.0
+      // and every replay overshot. Real pilots fly the vector, so this is very
+      // probably a harness artefact -- but "probably" is not a reason to ship a
+      // geometry I cannot explain. Restore it together with the platform work.
+      // [C. P. Potter]
+      if (path_term == "IF") continue;
       if (is_holding(path_term)) continue;
     }
 
@@ -1897,6 +2003,10 @@ std::vector<StarWaypoint> approach_procedure_waypoints(
     wp.is_floor         = (alt_desc == "+");
     if (alt_desc == "B" && f.size() > 24)
       wp.floor_ft = parse_alt(f[24]).feet; // block lower bound (0 if blank)
+    // Same gap as the STAR parser above: "+" is a floor and must be readable as
+    // one, or nothing stops a clearance below an approach minimum still ahead.
+    if (alt_desc == "+" && alt.feet > 0)
+      wp.floor_ft = alt.feet;
     wp.speed_kt         = speed_kt;
     wp.seq              = seq;
     wp.is_approach_proc = true;

@@ -62,6 +62,11 @@ using Done = std::function<void(Output)>;
 // no "stop" phase.
 void reset();
 
+// Call once per frame with the live context. Detects a flight restart / teleport
+// (a position discontinuity the aircraft could not have flown) and resets the
+// IFR state when it sees one. Returns true on the frame it fires.
+bool note_frame(const xplane_context::XPlaneContext &ctx, float dt);
+
 // Training quick-start: skip normal flight phases and jump directly to the
 // target state. Position the aircraft in X-Plane first; the plugin picks up
 // normal proactive messaging from the new state on the next flight-loop tick.
@@ -159,6 +164,14 @@ bool poll_go_around(const xplane_context::XPlaneContext &ctx, double now_secs,
 bool poll_readback_reminder(const xplane_context::XPlaneContext &ctx,
                             double now_secs, std::string *out_text);
 
+// Lined up and waiting, pilot silent: Tower asks. Fires 45 s after entering
+// IFR_LINE_UP_AND_WAIT with no readback outstanding and the aircraft stationary,
+// then once more 60 s later; two prompts maximum. The wording is
+// "report when ready for departure" -- ICAO Doc 4444 reserves TAKE-OFF for the
+// clearance itself, so it must not appear in the question.
+bool poll_lineup_ready_prompt(const xplane_context::XPlaneContext &ctx, float dt,
+                              std::string *out_text);
+
 // IFR departure handoff: fires ~10 s into CLIMB after IFR_DEPARTURE_CLEARED.
 // Tells the pilot to contact Departure (large airport) or Approach (small).
 // Transitions to IFR_EN_ROUTE; returns true when the handoff fired.
@@ -236,6 +249,17 @@ bool poll_star_clearance_safety_net(const xplane_context::XPlaneContext &ctx,
 // to? Used to STOP the taxi clearance at the runway -- a clearance to a holding
 // point on the far side of an active runway, with no "hold short", is how an
 // aircraft crossed 31L at Marseille on a line-up clearance (2026-08-19).
+// The runway the TAXI CLEARANCE told the pilot to hold short of, remembered from
+// the moment it was computed. The geometry that finds it works from the parking,
+// where the route to the departure runway plainly crosses another; from the
+// hold-short itself the straight line to the departure threshold can miss the
+// paved segment, so the same test then answers "nothing in the way" -- which is
+// how an aircraft at Nice was told "runway 04R, line up and wait" from a holding
+// point on 04L with no crossing clearance (real flight 2026-08-26). Cleared by
+// engine::reset(). [C. P. Potter]
+void remember_taxi_hold_short(const std::string &runway);
+const std::string &taxi_hold_short_runway();
+
 std::string runway_to_cross(const xplane_context::XPlaneContext &ctx,
                             const std::string &dep_rwy);
 
@@ -380,6 +404,8 @@ int current_speed_restriction_kt();
 // Used by check_handoff_reissue() to re-state the instruction if the pilot
 // calls back on the wrong frequency.
 void set_pending_handoff_freq(float mhz);
+// Test hook: arm the pending sector check-in (the other half of a handoff).
+void set_sector_checkin_pending(bool v);
 float pending_handoff_freq();
 
 // Top-of-descent estimate for the IFR tab, updated while IFR en-route (before the

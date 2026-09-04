@@ -3,7 +3,9 @@
 #pragma once
 
 #include <cctype>
+#include <cstddef>
 #include <string>
+#include <vector>
 
 namespace atc_phonetic {
 
@@ -39,6 +41,68 @@ inline std::string spell_holding_point(const std::string &hp) {
     out += tok;
   }
   return out.empty() ? hp : out;
+}
+
+// The VARIABLE content of an ATC transmission, for the STT context bias.
+//
+// A fixed phrase list can anchor "cleared to land" or "report established". It
+// cannot anchor the part that changes every time -- the fix in "direct ELMEM",
+// the procedure in "expect RNAV Zulu approach runway 08" -- and that is exactly
+// what the pilot has to read back. Measured on the LOWI arrival of 2026-08-29:
+// "direct ELMEM" came back as "LMEM", "RNAV Zulu approach" as "Arnazul
+// approaching". ELMEM had been in the bias earlier in the flight and had dropped
+// out of the set in force when it was spoken; "RNAV Zulu" was in none of that
+// flight's five bias sets at all.
+//
+// Mining the transmission itself is the only construction that cannot drift out
+// of step with what was just said. Returns entries in the ORIGINAL casing.
+// See [[coding_bias_covers_readback]]. [C. P. Potter]
+inline std::vector<std::string> readback_anchors(const std::string &atc_text) {
+  std::vector<std::string> out;
+  auto push = [&out](std::string v) {
+    while (!v.empty() && (v.back() == ' ' || v.back() == ',' || v.back() == '.'))
+      v.pop_back();
+    if (v.empty())
+      return;
+    for (const auto &e : out)
+      if (e == v)
+        return;
+    out.push_back(std::move(v));
+  };
+  std::string lc = atc_text;
+  for (char &c : lc)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+  // "direct <FIX>" -- the phrase and the bare ident.
+  for (std::size_t p = lc.find("direct "); p != std::string::npos;
+       p = lc.find("direct ", p + 1)) {
+    std::size_t b = p + 7, e = b;
+    while (e < lc.size() && std::isalnum(static_cast<unsigned char>(lc[e])))
+      ++e;
+    if (e > b) {
+      const std::string fix = atc_text.substr(b, e - b);
+      push("direct " + fix);
+      push(fix);
+    }
+  }
+
+  // "<type> [letter] approach" -- "RNAV Zulu approach", "ILS approach".
+  // The 24-character window keeps the type and the word "approach" in the same
+  // clause, so "RNAV Zulu approach" matches and "... ILS ... contact approach"
+  // does not.
+  static const char *kTypes[] = {"rnav", "ils",       "rnp",   "vor",
+                                 "ndb",  "localizer", "visual", nullptr};
+  for (const char **t = kTypes; *t; ++t) {
+    const std::size_t q = lc.find(*t);
+    if (q == std::string::npos)
+      continue;
+    const std::size_t a = lc.find("approach", q);
+    if (a == std::string::npos || a <= q || a - q > 24)
+      continue;
+    push(atc_text.substr(q, a - q + 8)); // "RNAV Zulu approach"
+    push(atc_text.substr(q, a - q));     // "RNAV Zulu"
+  }
+  return out;
 }
 
 } // namespace atc_phonetic

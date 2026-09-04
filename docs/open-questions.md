@@ -421,3 +421,392 @@ A redundant transmission is a nuisance; an approach that cannot be flown is not.
 Closing this needs a "last level actually spoken to the pilot" record, written
 where the text is emitted rather than where the level is computed. That is the
 same shape as the QNH-once debt in Q5, and belongs with it.
+
+---
+
+## Q7 — The replay harness hangs about one run in eight — **OPEN, noted 2026-08-21**
+
+> **2026-08-29 — a second, more common flake, and this one is understood.**
+> Independently of the hang, `replay-lsgg` produces **two different arrivals**:
+> `043 -> 313 -> 253` with a 33 deg intercept, or `043 -> 313 -> 253 -> 186 -> 178`
+> with 42 deg. Roughly one run in three takes the long one. Diffing the raw logs
+> of the two outcomes shows the divergence is **pilot-side, not plugin-side**:
+>
+> ```
+> [profile] level challenge: cleared 10000 ft, actual 15000 ft (diff +5000), vs +0 fpm after 51 s
+> IFR arrival handoff: ... at 15000ft MSL   (vs 13457 ft on the short run)
+> ```
+>
+> `fly.py` occasionally misses a descent clearance, enters the Geneva TMA 1500 ft
+> high, and the vector plan legitimately grows two legs to lose it. So the plugin
+> is behaving; the simulated pilot is not. Worth fixing in the harness before the
+> vectored arrival is shown to a controller, because the acceptance line moves
+> under you between runs. Note also that the aircraft never complied with the
+> challenge and the approach continued regardless -- that is
+> [[project_offroute_recovery]], not this.
+
+
+`make replay-lsgg` occasionally produces a truncated run: the timeline stops
+mid-descent and the acceptance reports `established NO / cleared to land NO` for
+a binary that lands cleanly on the next run. It was first read as a code
+regression, then wrongly attributed to the wall-clock reseed of `std::rand()` in
+`poll_hold` — `ATC_SEED` was added for that and the flapping continued.
+
+Measured: eight consecutive direct runs of `fly.py` pass; a ninth timed out at
+60 s with an **empty** log, so the stall happens early and before any output is
+flushed. A watcher script with `gdb` ready to attach to `atc_ifr_repl` failed to
+reproduce it in eight further runs.
+
+What is not yet known: whether the REPL blocks or the Python driver does, and
+whether it is a deadlock on the pipe (a `sync()` waiting for a sentinel the REPL
+never prints) or a loop in the engine. The second possibility is the one that
+matters beyond the harness — the same polls run inside X-Plane's flight loop.
+
+**Opinion:** a pipe-protocol stall is much the more likely of the two. The engine
+polls are straight-line code with no unbounded loop that a hang could sit in, and
+the failure always lands at a point where the driver has just spoken. Worth an
+hour with a `faulthandler` timeout dump on the Python side before anything else.
+
+`ATC_SEED` is kept regardless: it removes a real source of run-to-run divergence,
+just not this one.
+
+---
+
+## Q8 — An aircraft delivered high gets a LONGER pattern, not a steeper descent — **OPEN, noted 2026-08-21**
+
+The outbound sequencing leg runs until there is room for both the intercept and
+the descent, so altitude buys distance:
+
+```
+downwind length = max( lateral requirement , (altitude − FAF alt) ÷ 265 + 2 )
+```
+
+On the flight of 2026-08-20 the aircraft reached the vector point 6000 ft above
+its FAF and the leg extended to 24.7 NM against a lateral requirement of 16.7 —
+it flew away from the field for four minutes purely to lose altitude. The
+immediate cause was a stale latch (`algorithm-descent.md` §8) and is fixed, but
+the coupling remains: any arrival that is high for any reason gets the same
+treatment.
+
+A real controller has three answers and the engine only has one. He can extend
+the downwind (what we do), he can ask for a rate — *"expedite descent"*, which
+the profile net already words elsewhere — or he can accept a steeper intercept
+and let the aircraft descend on the base. Which of the three he picks depends on
+traffic, and traffic is exactly what the engine does not model.
+
+**Opinion:** the reference gradient of 265 ft/NM is a cruise-descent figure and
+is too gentle for a terminal pattern; a vectored aircraft under radar control
+routinely descends at 1000 ft/min at 180 kt, which is ~330 ft/NM. Using the
+terminal figure inside the pattern would cut several miles off the leg without
+touching the geometry. Undecided, and it needs a flown arrival to judge.
+
+**Undecided:** whether to cap the leg at all. A cap that fires leaves the
+aircraft high on the platform, which is worse than a long leg.
+
+---
+
+## Q9 — The LOWI arrival does not complete, and neither mechanism owns it — **OPEN, noted 2026-08-21**
+
+A LOWI scenario was added (`make replay-lowi`, RTT1B → RNAV Z 08 from the east)
+specifically to see whether the two vectoring mechanisms collide. They do not
+collide — the problem is the opposite, **neither takes the aircraft**:
+
+```
+[vector] LOWI R08-Z: MSA min 10300 ft, field 1907 ft (+8393), terrain TOO HIGH;
+         axis after FAF CURVED at WI752 -> WOULD USE vectors to IAF
+[vector] arrival decision latched: published procedure (approach R08-Z)
+IFR vector: not arming -- precondition empty: faf
+IFR arrival: entering APPROACH (IAF eta=-1s, enc='CTA C')
+IFR arrival: no Approach controller -- current sector handles approach to established
+[approach] profile enforcement yielded to Tower handoff (1.3 NM from FAF WI749)   (repeating)
+```
+
+The pattern mechanism (`poll_vector_to_final`) correctly stands aside: the MSA is
+8393 ft above the field and the final is a curved RF leg, so it latches the
+published procedure. The reversal mechanism (`poll_vector_to_intercept`) then
+declines with `precondition empty: faf` — the FAF is resolved only later, on
+entering APPROACH (`IFR approach: FAF resolved = WI749`), and by then the arrival
+decision has already latched. The aircraft flies to 3 NM at FL190 with no descent
+clearance, no approach clearance and no landing clearance, while the profile
+enforcement yields for ever to a Tower handoff that never comes.
+
+Three separate things to settle, and they are not the same defect:
+
+1. **Ordering** — the arrival decision latches before the FAF exists. A comment at
+   `engine.cpp` (poll_approach, "Ensure the FAF is resolved BEFORE the vector
+   arm") states the intent; the resolution still happens after.
+2. **Who owns a no-vectoring arrival** — when both mechanisms decline, nothing
+   drives the descent onto the published procedure. `replay-star` (EDLW, published
+   procedure, no vectors) fails the same way and **already failed before any of
+   this work** — verified against `1cba128`. So this is not a LOWI speciality: the
+   non-vectored arrival has no owner at all.
+3. **The Tower-handoff deadlock** — `profile enforcement yielded to Tower handoff`
+   repeating is the known "stands aside for a transfer that never comes" symptom
+   from `force-app-vectoring.md`.
+
+**Opinion:** (2) is the real one and it is a bigger hole than the vectoring work
+of the last three days, because every arrival the vectoring declines falls into
+it. (1) is a small ordering fix that would at least let LOWI use the reversal.
+
+The scenario is kept as `make replay-lowi`, deliberately NOT in `make test` — it
+is a known-failing case, and a failing target inside the default suite trains the
+eye to ignore red.
+
+---
+
+## Q10 - The departure field drifted, and ATC flew someone else's SID - **FIXED 2026-08-29**
+
+Flight LFMN -> LOWI of 2026-08-28 (packages 129/130). Climbing east out of Nice,
+ATC transmitted `"direct ITCAP, when able"`. ITCAP is on no part of the flight
+plan: it is the exit fix of Albenga's ITCA1B departure.
+
+`Log(39).txt` names the cause without ambiguity:
+
+```
+4146  [route] SID table: 7 fixes (SID (none) from CIFP + navlog, dep=LNMC rwy=)
+4147  IFR SID climb: ... dep=LNMC -> step1 FL110 step2 FL140 (sid_min=0)
+10127 [cifp] LIMG rwy 09 SID name -> ITCA1B
+10129 [cifp] LIMG SID ITCA1B last fix -> ITCAP
+10131 IFR SID climb: deferred direct ITCAP (15 NM crossing, forced)
+14018 [cifp] LIMJ rwy 10 SID name -> ITCA1H
+```
+
+Every departure-side CIFP lookup in `xplane_context_runtime.cpp` keyed on
+`ctx.nearest_airport_id`, which is a VFR-native concept: it follows the aircraft.
+On an easterly Nice departure it reads LFMN, then LNMC (Monaco), then LIMG
+(Albenga), then LIMJ (Genoa) — and the plugin dutifully resolved a departure
+procedure for each field it flew over. Two consequences, one visible and one not:
+
+- **visible** — a direct-to clearance naming a foreign SID's exit fix;
+- **silent** — the climb ladder was computed for LNMC, which publishes nothing,
+  so it fell back to FL110/FL140 instead of the FL100 that BASI8A publishes and
+  that the delivery clearance had already read out. The pilot was cleared to an
+  initial climb the departure controller then contradicted.
+
+`s_departure_apt_id` in the engine was meant to prevent exactly this, but it was
+captured at RADAR CONTACT — minutes after takeoff, by which time the drift had
+already happened.
+
+**Two independent defences, both in place:**
+
+1. `ctx.ifr_departure_icao` / `_runway` / `_lat` / `_lon` are latched while the
+   aircraft is ON THE GROUND and frozen at lift-off (OFP origin as the fallback
+   for a session started airborne). Every SID lookup keys on the latch;
+   `poll_sid_climb` prefers it over `nearest_airport_id`.
+2. `route_has_fix()` — a direct-to may only ever name a fix on the filed route.
+   A refusal is logged once per departure
+   (`IFR SID: direct-to REFUSED -- <fix> is not on the filed route`), so the next
+   occurrence of this class of bug announces itself instead of reaching the pilot.
+
+`make test-depfield` covers both.
+
+---
+
+## Q11 - Two survivors of the bulk edit of 2026-08-18 - **FIXED 2026-08-29**
+
+A scripted edit on 2026-08-18 grafted a full vectoring reset block into several
+unrelated sites and was committed. Two copies were found and removed at the time
+(the downwind->base and displace->intercept leg builders carry the note). Two
+were missed, and were still in `1cba128`:
+
+1. **The displaced-intercept vector builder.** The graft's last line,
+   `s_vtf_recut_secs = 0.0f`, cancelled the `kVecLeadSecs` guard set three lines
+   above — the one guarantee that an aircraft is given time to start its turn
+   before the next correction is judged. It also wiped `s_atc_assigned_speed_kt`
+   and `s_vtf_clearance_pending`, the two fields that record what the PILOT has
+   been given.
+2. **`poll_descent_second_step`**, on the branch that DROPS a stale stepped-
+   descent target: consuming the target also reset the whole vectoring state,
+   including `s_arrival_vectored` (the arrival's vectored/not-vectored latch) and
+   any leg in progress.
+
+Both removed. `make replay` and `make replay-lsgg` unchanged: the LSGG racetrack
+still reads 043 -> 313 -> 253, 90 deg base, 33 deg intercept, released 2.0 NM
+from GG512.
+
+**Worth a habit, not just a fix:** these were found by reading around an
+unrelated defect, not by any test. A grep for a reset sequence appearing at an
+indentation that does not match its block would have found all four in seconds.
+
+---
+
+## Q12 - The runway correction dropped the side - **FIXED 2026-08-29**
+
+Same Nice flight. An aircraft lined up on 04R heard:
+
+```
+November Romeo Charlie, negative, I say again, runway zero four.
+```
+
+`extract_runway()` returned an `int`, so `[lLrRcC]?` was matched and thrown away.
+At a parallel-runway field the side is the word that carries the whole meaning,
+and "zero four" is not a runway designator at all. Worse, 04L and 04R were
+indistinguishable to the verifier: a readback of the wrong parallel passed.
+
+Now compared as a full designator (`extract_runway_desig` -> "04R"), spoken side
+("zero four right") or written ("04R"), and spoken back in full by
+`runway_desig_to_speech`. A readback that omits the side is an incomplete
+readback per ICAO Doc 4444 and draws the correction. `tests/test_readback_runway.cpp`.
+
+**Known gap, deliberately left:** a readback with no "runway"/"approach" keyword
+at all ("cleared for takeoff zero four right") is still invisible to the
+extractor — that predates this change and every readback in the flown logs
+carries the word.
+
+---
+
+## Q13 - The radio died at the Innsbruck handoff - **FIXED 2026-08-30**
+
+The worst defect in `Log(39).txt`, and the reason there was no Approach clearance
+and no Tower at LOWI: **the session was stuck in `PLAYING` from the Innsbruck
+Radar handoff to touchdown.** Roughly ten minutes and an entire approach with
+every push-to-talk refused:
+
+```
+[handoff] reminder suppressed: the readback carries 128.975 -- acknowledged
+Set COM1 standby to 128975 (128.975 MHz)
+PTT blocked, state=3
+PTT blocked, state=3
+...                       (to the parking stand)
+```
+
+State 3 is `PLAYING`. After that point the log contains **no** TTS request, **no**
+synthesis result, **no** playback completion. The pilot flew the STAR, the
+approach, and landed, without ATC.
+
+**What could not be established.** Nothing logs the entry INTO a PTT state, so
+the log cannot say who set `PLAYING`, or when. The candidates all survive:
+`speak_response*` sets `PLAYING` + `tts_pending_` synchronously and relies on an
+async callback; `synthesize_async` serialises on `g_tts_call_mtx`, so a worker
+stuck under that lock silences every later request without printing anything;
+`audio_player`'s `is_playing_` is cleared only by an FMOD completion callback,
+and the PTT click that preceded the freeze has no matching "Playback finished".
+The HTTP backends all carry timeouts (45 s TTS, 30 s STT/LM), which is what makes
+a plain network hang the *least* likely explanation.
+
+**What is in place.** Not a cure — a net, plus the instrument that was missing:
+
+1. every PTT state change is logged with the duration of the previous state, so
+   the next occurrence names itself;
+2. `PLAYING` beyond 90 s or `PROCESSING` beyond 150 s is forced back to `IDLE`:
+   `tts_pending_` cleared, `audio_player::stop()` called (it also clears a stuck
+   `is_playing_`), and a System row tells the pilot the radio is back.
+
+Both bounds sit far above the worst honest case. **A lost ATC message is a
+nuisance; a lost radio is the flight.**
+
+**The two unbounded waits, found by asking "where is the timeout?" (user,
+2026-08-29).** The HTTP layer had timeouts all along — 45 s TTS, 30 s STT/LM —
+but a timeout on a call bounds only the call that HOLDS the resource. Two waits
+behind it were bounded by nothing at all, and both match the observed silence:
+
+1. **`g_stt_call_mtx` / `g_lm_call_mtx` / `g_tts_call_mtx`.** One in-flight call
+   per backend, taken with a plain `std::lock_guard`. A worker parked there waits
+   for ever and prints nothing — exactly what the log shows: no request, no
+   result, no failure. Now `std::timed_mutex` with `try_lock_for` (45 / 45 / 60 s,
+   each a little above the HTTP timeout it queues behind); giving up is reported
+   as an ordinary backend failure, so the caller's existing error path runs and
+   the session leaves `PLAYING`.
+
+2. **`audio_player::is_playing_`.** Cleared by one thing only: the FMOD
+   completion callback. A callback that never arrives pins the flag, and
+   `atc_session::update()` hangs its exit from `PLAYING` off it. The last PTT
+   click before the freeze has no matching "Playback finished". The buffer's
+   duration is known exactly when it is submitted, so `is_playing()` now clears
+   itself past `length + 2 s` and says so in the log. No guesswork.
+
+**Order of defence, from precise to blunt:** the audio deadline (exact, seconds),
+the HTTP timeouts (30–45 s), the backend-lock timeouts (45–60 s), the PTT
+watchdog (90 / 150 s). Each one below is only reached if everything above it
+failed.
+
+**ROOT CAUSE FOUND 2026-08-30, on the very next flight, by the state trace.**
+
+```
+[STT-MISTRAL] POST /v1/audio/transcriptions, 95744 samples
+PTT state TAIL_RECORDING -> PROCESSING (after 0.9s)
+STT response (quality=1.00): "one-two-eight decimal nine seven five in ..."
+[handoff] reminder suppressed: the readback carries 128.975 -- acknowledged
+Set COM1 standby to 128975 (128.975 MHz)
+PTT blocked, state=3
+...
+PTT watchdog: stuck in PROCESSING for 150s (tts_pending=0 audio_playing=0)
+```
+
+Two things the trace settled at once, and the first corrects this entry:
+
+1. **The stuck state was PROCESSING, not PLAYING.** `PTTState` is
+   `{IDLE, RECORDING, TAIL_RECORDING, PROCESSING, PLAYING}`, so `state=3` is
+   PROCESSING. Reading the flight-39 log as PLAYING was wrong, and it aimed the
+   first round of fixes at TTS and audio -- neither of which was involved.
+   `tts_pending=0 audio_playing=0` says so plainly.
+
+2. **The engine never completed the transcript.** The STT came back fine; the
+   handoff-readback suppression then hit a bare `return` -- the ONLY exit in the
+   whole of `process_transcript` that did not call `done()`. Verified by script
+   over the function: two bare returns, this one and a recursive re-dispatch that
+   forwards `done` correctly. Without the completion callback `atc_session` never
+   learns the transmission was handled and sits in PROCESSING for ever.
+
+It fires on the frequency readback a pilot makes at EVERY handoff while still on
+the old frequency -- the most ordinary transmission there is -- which is why it
+cost two Innsbruck arrivals rather than showing up in a test.
+
+Fixed: `done(Output{}); return;`. Silence is the right answer there; dropping the
+callback is not how you say nothing. `tests/test_done_leak.cpp`, **verified to
+fail against the unfixed engine** before being kept.
+
+**The nets stay.** They are what turned the second occurrence from a lost arrival
+into a 150 s gap: the watchdog fired, named the state, and gave the radio back.
+The TTS-lock and audio-deadline bounds were aimed at the wrong layer but they
+cost nothing and close real holes of their own.
+
+---
+
+## Q14 - The active airport walked down the arrival - **FIXED 2026-08-29**
+
+Second reason LOWI would have been silent even with a working radio. Descending
+through 13 000 ft the active airport went LOIK -> LOJK -> LOIZ -> LOIS -> LOII ->
+LOIU -> LOWI, one airfield per minute under the flight path, and the whole way
+down the frequency read:
+
+```
+COM1: 128.975 MHz -> Unknown | Airport: LOIK (1 freqs, ATIS=0.000, tower_only=0)
+```
+
+`Unknown`, because Innsbruck Radar 128.975 is an `airport+.json` controller and
+matches no apt.dat frequency, and because the field being matched against was not
+the destination. Runway, ATIS and towered/tower_only followed the same drift, and
+`[[feedback_approach_freq_defines_intent]]` — a pilot on a known Approach
+frequency must get a full clearance — cannot hold when the frequency classifies
+as Unknown.
+
+**Two causes, stacked. Both fixed.**
+
+1. *The wrong field.* Symmetrically to the departure latch (Q10): airborne,
+   within 60 NM of the filed destination, and with no frequency match already
+   claiming a field, the **destination is the active airport**. Logged once per
+   change.
+
+2. *The overlay could not name its own frequencies.* Even with LOWI as the active
+   field, 128.975 would still have read `Unknown`. The classifier's chain was
+   apt.dat (`airport_freqs.lookup`) -> atc.dat (`airspace_db::lookup_by_freq`,
+   and only when the resolved controller is a TRACON) -> `airport+.json`, **but
+   only for the `info` role**. Innsbruck Radar is in the overlay precisely
+   *because* atc.dat has no TRACON for LOWI and apt.dat does not list the
+   frequency — so the plugin told the pilot to tune a frequency that, by
+   construction, it could not then recognise.
+
+   `airport_overrides::role_for_freq(icao, mhz)` is the inverse lookup that was
+   missing: it walks the overlay's controllers and returns the role. APPROACH /
+   DEPARTURE -> `APPROACH`, TOWER, GROUND, ATIS, INFO. `delivery` stays unmapped
+   on purpose (shared ground/airborne — LFLU's Lyon 125.155). Consulted for the
+   active airport **and** the destination, because the handoff comes well before
+   the destination becomes the active field.
+
+   It also puts `alt_freqs_mhz` to work: that key had been in the file since the
+   overlay was written and **was parsed by nothing**, so LOWI's second arrival
+   frequency 119.275 classified as UNKNOWN exactly like the primary. Tolerance is
+   5 kHz, for 8.33 kHz channel designators.
+
+`tests/test_airport_overrides.cpp`.

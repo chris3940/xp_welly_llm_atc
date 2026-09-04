@@ -19,6 +19,7 @@
 #include "audio/audio_player.hpp"
 #include "persistence/settings.hpp"
 
+#include <XPLMProcessing.h>
 #include <XPLMSound.h>
 #include <XPLMUtilities.h>
 
@@ -43,6 +44,16 @@ static std::mutex channel_mutex_;
 // PCM buffer must remain valid until FMOD completion callback fires
 static std::vector<int16_t> active_pcm16_;
 
+// When the buffer just handed to FMOD MUST have finished, from its own length.
+// is_playing_ is otherwise cleared by one thing only -- the FMOD completion
+// callback -- and a callback that never arrives leaves the flag set for ever.
+// The whole session then hangs off it: PTT stays blocked and the pilot has no
+// radio for the rest of the flight (LOWI, 2026-08-28). The audio's duration is
+// known exactly at the moment it is submitted, so this needs no guesswork:
+// length + 2 s of slack. [C. P. Potter]
+static std::atomic<double> playback_deadline_{0.0};
+static constexpr double kPlaybackSlackSec = 2.0;
+
 static void pcm_complete_cb(void * /*inRefcon*/, FMOD_RESULT /*status*/) {
   std::lock_guard<std::mutex> lock(channel_mutex_);
   active_channel_ = nullptr;
@@ -63,6 +74,7 @@ static void play_pcm16(std::vector<int16_t> pcm16, int freq_hz, int channels,
     }
   }
   is_playing_ = false;
+  playback_deadline_ = 0.0;
 
   if (pcm16.empty()) {
     XPLMDebugString("[xp_wellys_atc] play_pcm16: empty buffer\n");
@@ -89,6 +101,13 @@ static void play_pcm16(std::vector<int16_t> pcm16, int freq_hz, int channels,
     std::lock_guard<std::mutex> lock(channel_mutex_);
     active_channel_ = ch;
   }
+  const double secs =
+      (freq_hz > 0 && channels > 0)
+          ? static_cast<double>(active_pcm16_.size()) /
+                (static_cast<double>(freq_hz) * static_cast<double>(channels))
+          : 0.0;
+  playback_deadline_ =
+      static_cast<double>(XPLMGetElapsedTime()) + secs + kPlaybackSlackSec;
   is_playing_ = true;
 
   const char *bus_name = "unknown";
@@ -206,6 +225,7 @@ void stop() {
   }
   is_playing_ = false;
   active_pcm16_.clear();
+  playback_deadline_ = 0.0;
 }
 
 void abort_playback() {
@@ -217,6 +237,7 @@ void abort_playback() {
   active_channel_ = nullptr;
   is_playing_ = false;
   active_pcm16_.clear();
+  playback_deadline_ = 0.0;
 }
 
 // ── PTT click ────────────────────────────────────────────────────
@@ -375,6 +396,23 @@ void play_wav(const std::vector<uint8_t> &wav_data, float volume) {
   play_pcm16(std::move(pcm16), sample_rate, channels, volume, bus);
 }
 
-bool is_playing() { return is_playing_.load(); }
+bool is_playing() {
+  if (!is_playing_.load())
+    return false;
+  const double deadline = playback_deadline_.load();
+  if (deadline > 0.0 &&
+      static_cast<double>(XPLMGetElapsedTime()) > deadline) {
+    // The sound is over whatever FMOD did or did not tell us. Say so, and stop
+    // holding the session hostage.
+    XPLMDebugString("[xp_wellys_atc] audio: no completion callback -- the "
+                    "buffer is over by its own length, clearing\n");
+    std::lock_guard<std::mutex> lock(channel_mutex_);
+    active_channel_ = nullptr;
+    is_playing_ = false;
+    playback_deadline_ = 0.0;
+    return false;
+  }
+  return true;
+}
 
 } // namespace audio_player

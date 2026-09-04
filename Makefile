@@ -47,7 +47,7 @@ LINT_EXCLUDE := $(LINT_EXCLUDE_WIN) src/audio/audio_input_coreaudio.cpp
 endif
 LINT_SOURCES := $(filter-out $(LINT_EXCLUDE),$(wildcard src/main.cpp src/*/*.cpp))
 
-.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay replay-star replay-lsgg test test-unit test-scenarios test-afis test-stars test-crossing ci-remote win-artifact skunkcrafts
+.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay replay-star replay-lsgg replay-lowi test-nice test-restart test-depfield test-climb test-lineup test test-unit test-scenarios test-afis test-stars test-crossing ci-remote win-artifact skunkcrafts
 
 .DEFAULT_GOAL := help
 
@@ -480,7 +480,7 @@ DIST_STAGE    := dist/$(DIST_NAME)/xp_wellys_atc
 # non-vectored arrival could only be found by flying it. [C. P. Potter]
 replay-star: ifr-repl
 	@echo "=== Replay: DIK -> EDLW, PUBLISHED procedure (no vectors), ILS ==="
-	@ATC_FMS=1 XP_ATC_FORCE_ILS=1 XP_ATC_HOLD_PCT=0 \
+	@ATC_SEED=$(ATC_SEED) ATC_FMS=1 XP_ATC_FORCE_ILS=1 XP_ATC_HOLD_PCT=0 \
 	    ATC_RAW=build/replay-star-raw.log \
 	    python3 testscripts/ifr_real/fly.py testscripts/ifr_real/route_dik_edlw.json
 	@echo
@@ -493,12 +493,43 @@ replay-star: ifr-repl
 # 'FM', course from fix to manual termination -- and because LSGG sits just
 # inside the terrain gate: MSA 7000 over a field at 1411 gives 5589 ft, 411 ft
 # under the 6000 ft threshold. [C. P. Potter]
+ATC_SEED ?= 1
+
+# LOWI RTT1B -> RNAV Z 08. The OTHER vectoring mechanism: the STAR ends west of
+# the field and the approach transition turns straight back to the IAF, a ~180
+# degree reversal that poll_vector_to_intercept owns. KNOWN FAILING -- kept
+# visible on purpose, see docs/open-questions.md Q9.
+replay-lowi: ifr-repl
+	@echo "=== Replay: RTT1B -> LOWI 08, IAF reversal (KNOWN FAILING) ==="
+	@ATC_SEED=$(ATC_SEED) ATC_FMS=1 XP_ATC_HOLD_PCT=0 \
+	    ATC_RAW=build/replay-lowi-raw.log \
+	    python3 testscripts/ifr_real/fly.py testscripts/ifr_real/route_lowi.json || true
+	@echo
+	@grep -h "\[vector\]" build/replay-lowi-raw.log | grep -v "turn word" || true
+
+test-nice: ifr-repl
+	@testscripts/ifr_real/nice_departure_regression.sh
+
+test-restart: ifr-repl
+	@testscripts/ifr_real/restart_reset_regression.sh
+
+test-depfield: ifr-repl
+	@testscripts/ifr_real/sid_departure_field_regression.sh
+
+test-climb: ifr-repl
+	@testscripts/ifr_real/climb_ladder_regression.sh
+
+test-lineup: ifr-repl
+	@testscripts/ifr_real/lineup_prompt_regression.sh
+
 replay-lsgg: ifr-repl
 	@echo "=== Replay: BELU3R -> LSGG 22, CIFP-prescribed vectors, ILS ==="
 	@# NO FORCE_VECTORING: the BELU3R ends on a CIFP 'FM' leg, so the procedure
 	@# itself prescribes the vectors. This target now proves that the data alone
 	@# triggers them -- which is what a controller expects.
-	@ATC_FMS=1 XP_ATC_FORCE_ILS=1 XP_ATC_HOLD_PCT=0 \
+	@# ATC_SEED pins the random draws (hold, STAR shortcut) so two runs of the
+	@# same binary fly the SAME arrival -- override to explore other draws.
+	@ATC_FMS=1 XP_ATC_FORCE_ILS=1 XP_ATC_HOLD_PCT=0 ATC_SEED=$(ATC_SEED) \
 	    ATC_RAW=build/replay-lsgg-raw.log \
 	    python3 testscripts/ifr_real/fly.py testscripts/ifr_real/route_belus_lsgg.json
 	@echo
@@ -507,7 +538,7 @@ replay-lsgg: ifr-repl
 
 replay: ifr-repl
 	@echo "=== Replay: DIK -> EDLW, forced vectoring, ILS ==="
-	@XP_ATC_FORCE_ILS=1 XP_ATC_FORCE_VECTORING=1 \
+	@ATC_SEED=$(ATC_SEED) XP_ATC_FORCE_ILS=1 XP_ATC_FORCE_VECTORING=1 \
 	    ATC_RAW=build/replay-raw.log \
 	    python3 testscripts/ifr_real/fly.py testscripts/ifr_real/route_dik_edlw.json
 	@echo

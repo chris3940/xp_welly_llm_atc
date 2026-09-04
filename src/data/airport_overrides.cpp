@@ -67,6 +67,10 @@ struct ControllerOverride {
   std::string role; // "APPROACH","DEPARTURE","TOWER","GROUND","DELIVERY","ATIS","INFO"
   std::string name; // spoken label, e.g. "Milan Radar"
   float freq_mhz = 0.0f;
+  // Sector alternates listed as "alt_freqs_mhz". Present in the file since the
+  // overlay was written and read by nothing until 2026-08-29 -- so LOWI's second
+  // arrival frequency 119.275 classified as UNKNOWN exactly like the primary.
+  std::vector<float> alt_freqs_mhz;
 };
 
 std::unordered_map<std::string, std::vector<ApproachRule>> s_approaches;
@@ -81,6 +85,9 @@ std::unordered_map<std::string, std::vector<ControllerOverride>> s_controllers;
 std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
     s_tower_handoff_fixes;
 std::unordered_map<std::string, std::vector<SidInitialClimb>> s_sid_initial_climb;
+// icao -> (runway -> holding-point name), from airport+.json.
+std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
+    s_runway_holding_points;
 bool s_ready = false;
 
 // Tailwind component (kt, +ve = tailwind) on a runway given the wind. Runway heading
@@ -257,6 +264,12 @@ void init(const std::string &path) {
         float f = 0.0f;
         read_num(entry, "freq_mhz", f);
         c.freq_mhz = f;
+        if (auto af = entry.find("alt_freqs_mhz");
+            af != entry.end() && af->is_array()) {
+          for (const auto &a : *af)
+            if (a.is_number())
+              c.alt_freqs_mhz.push_back(a.get<float>());
+        }
         if (!c.role.empty() && !c.name.empty())
           ctrls.push_back(std::move(c));
       }
@@ -277,6 +290,21 @@ void init(const std::string &path) {
       }
       if (!m.empty())
         s_tower_handoff_fixes[icao] = std::move(m);
+    }
+
+    // runway_holding_points: the REAL holding point per runway, which the apt.dat
+    // extraction cannot pick correctly (it keeps the taxiway nearest the
+    // threshold, one per runway).
+    if (auto rhp = it->find("runway_holding_points");
+        rhp != it->end() && rhp->is_object()) {
+      std::unordered_map<std::string, std::string> m;
+      for (auto kv = rhp->begin(); kv != rhp->end(); ++kv) {
+        if (kv.key().empty() || kv.key()[0] == '_' || !kv->is_string())
+          continue;
+        m[upper(kv.key())] = kv->get<std::string>();
+      }
+      if (!m.empty())
+        s_runway_holding_points[icao] = std::move(m);
     }
 
     // sid_initial_climb (published initial-climb clearance alt, a chart annotation)
@@ -328,6 +356,17 @@ void stop() {
 // set jet/prop value as a last-resort fallback). First rule whose match_sids contains
 // sid_name wins (empty match_sids = any SID). 0 = no override -> caller keeps the CIFP /
 // generic initial climb. [C. P. Potter]
+std::string runway_holding_point(const std::string &icao,
+                                 const std::string &runway) {
+  if (!s_ready || icao.empty() || runway.empty())
+    return {};
+  auto it = s_runway_holding_points.find(upper(icao));
+  if (it == s_runway_holding_points.end())
+    return {};
+  auto jt = it->second.find(upper(runway));
+  return jt == it->second.end() ? std::string() : jt->second;
+}
+
 int sid_initial_climb_ft(const std::string &icao, const std::string &sid_name,
                          bool is_jet) {
   if (!s_ready || icao.empty())
@@ -384,6 +423,37 @@ bool controller(const std::string &icao, const std::string &role,
       *out_name = c.name;
     if (out_freq_mhz)
       *out_freq_mhz = c.freq_mhz;
+    return true;
+  }
+  return false;
+}
+
+// Which overlay controller, if any, this frequency belongs to at `icao`.
+// The overlay exists because apt.dat and atc.dat are wrong or silent about these
+// facilities -- so it is also the only place that can say what the frequency IS.
+// Matches the primary and every alternate. 5 kHz tolerance covers 8.33 kHz
+// channel designators (118.705 names the 25 kHz channel 118.700).
+// [C. P. Potter]
+bool role_for_freq(const std::string &icao, float freq_mhz,
+                   std::string *out_role, std::string *out_name) {
+  if (!s_ready || icao.empty() || freq_mhz < 100.0f)
+    return false;
+  auto it = s_controllers.find(upper(icao));
+  if (it == s_controllers.end())
+    return false;
+  auto same = [freq_mhz](float f) {
+    return f > 100.0f && std::fabs(freq_mhz - f) < 0.006f;
+  };
+  for (const ControllerOverride &c : it->second) {
+    bool hit = same(c.freq_mhz);
+    for (float a : c.alt_freqs_mhz)
+      hit = hit || same(a);
+    if (!hit)
+      continue;
+    if (out_role)
+      *out_role = c.role;
+    if (out_name)
+      *out_name = c.name;
     return true;
   }
   return false;

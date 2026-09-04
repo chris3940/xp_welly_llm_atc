@@ -76,7 +76,15 @@ FrequencyType AirportFrequencies::lookup(float freq_mhz) const {
   for (const auto &f : all) {
     const uint32_t diff =
         (target > f.freq_khz) ? target - f.freq_khz : f.freq_khz - target;
-    if (diff > 1)
+    // 5 kHz, not 1: an 8.33 kHz radio names the 25 kHz channel 118.700 as
+    // "118.705", and that is what X-Plane shows. With a 1 kHz window the pilot
+    // sat on Geneva Tower and was told twice "you are not on the correct
+    // frequency, contact Geneva Tower on 118.700" -- he was (real flight
+    // 2026-08-22). The 8.33 designators offset the true frequency by at most
+    // 5 kHz (.005 -> .000, .030 -> .025, .055 -> .050, .080 -> .075), and no two
+    // channels at one aerodrome are closer than 8.33 kHz, so the window cannot
+    // make two facilities collide. [C. P. Potter]
+    if (diff > 5)
       continue;
     const int rank = priority_rank(f.type);
     if (rank > best_rank) {

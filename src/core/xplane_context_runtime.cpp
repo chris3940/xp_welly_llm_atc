@@ -15,6 +15,7 @@
 #include "data/airspace_db.hpp"
 #include "data/cifp_reader.hpp"
 #include "data/simbrief_ofp.hpp"
+#include "data/traffic_geometry.hpp"
 #include "persistence/settings.hpp"
 
 #include <XPLMDataAccess.h>
@@ -211,10 +212,19 @@ static std::unordered_map<std::string, std::string> name_cache_;
 static std::unordered_map<std::string, std::pair<double, double>> pos_cache_;
 // Field elevation in feet, parsed from apt.dat code-1 token #1 (0-indexed).
 static std::unordered_map<std::string, float> elevation_cache_;
-// Holding point name per (airport, runway end) — populated from apt.dat
-// 1201/1202/1204. Maps ICAO → (runway number → node name, e.g. "A3").
-static std::unordered_map<std::string,
-                          std::unordered_map<std::string, std::string>>
+// Holding points per (airport, runway end) — populated from apt.dat
+// 1201/1202/1204. EVERY candidate is kept with the position of its stop bar,
+// because a runway has several access points and the right one depends on where
+// the AIRCRAFT is. Keeping only the taxiway nearest the THRESHOLD named "Alpha
+// Two" to an aircraft taxiing to "Alpha One" (LFMN, real flight 2026-08-27).
+// The choice is made per frame in the context refresh, not here.
+// [C. P. Potter]
+struct HoldingCandidate {
+  std::string name;      // "A1", "W3", ...
+  double lat = 0.0, lon = 0.0; // stop-bar midpoint
+};
+static std::unordered_map<
+    std::string, std::unordered_map<std::string, std::vector<HoldingCandidate>>>
     holding_cache_;
 // Transition altitude in feet per airport — from apt.dat 1302 transition_alt.
 static std::unordered_map<std::string, int> transition_alt_cache_;
@@ -254,6 +264,85 @@ static double haversine_distance(double lat1, double lon1, double lat2,
                  std::sin(dlon / 2) * std::sin(dlon / 2);
   return kEarthRadiusM * 2.0 * std::atan2(std::sqrt(a), std::sqrt(1.0 - a));
 }
+
+// Threshold + far end of the runway END named `rwy` (e.g. "04L"), from the
+// airport's parsed runways. Returns false when the runway is unknown.
+static bool runway_ends_for(const std::vector<xplane_context::RunwayInfo> &rwys,
+                            const std::string &rwy, double *thr_lat,
+                            double *thr_lon, double *far_lat, double *far_lon) {
+  for (const auto &r : rwys) {
+    if (r.end1.number == rwy) {
+      *thr_lat = r.end1.lat; *thr_lon = r.end1.lon;
+      *far_lat = r.end2.lat; *far_lon = r.end2.lon;
+      return true;
+    }
+    if (r.end2.number == rwy) {
+      *thr_lat = r.end2.lat; *thr_lon = r.end2.lon;
+      *far_lat = r.end1.lat; *far_lon = r.end1.lon;
+      return true;
+    }
+  }
+  return false;
+}
+
+// THE HOLDING POINT OF THE RUNWAY, ON THE AIRCRAFT'S SIDE, NEAREST THE THRESHOLD
+// OF THE END IN SERVICE. Two heuristics were wrong before this one: "nearest the
+// threshold" over ALL candidates named Alpha Two at Nice, and "nearest the
+// aircraft" names Foxtrot One (0.16 NM away) where the taxi route reaches A1 at
+// 0.74 NM -- one of the farthest in a straight line. The rule a controller
+// applies (user, 2026-08-29): drop the points that would require crossing the
+// runway to reach, then take the one nearest the threshold of the direction in
+// service.
+//
+// THE DIRECTION, not "the departure runway": at Nice the departure is 04R while
+// the runway held short of is 04L, and both are used in the 04 sense. The cache
+// keys each end separately -- the apt.dat 1204 record lists them together
+// ("04L,22R") and the loader splits on the comma -- so every direction carries
+// the same candidates and picks its own reference. Measured on the Nice network,
+// aircraft on the south apron:
+//
+//   04L, orientation 04 -> A1 (0.03 NM), B1 (0.21), C1 (0.33)
+//   04L, orientation 22 -> J1 (0.04 NM), H1 (0.11), G1 (0.34)
+//   04R, from either side of 04L -> W3 (0.03 NM), Q3 (0.07), A3 (0.27)
+//
+// The second holding point falls out of the same rule with no special case: the
+// table is recomputed from the CURRENT position every refresh, so once the
+// aircraft has crossed 04L the 04R answer is already the one for its new side.
+// [C. P. Potter]
+static std::string
+holding_point_for(const std::vector<xplane_context::HoldingCandidate> &cands,
+                  double thr_lat, double thr_lon, double far_lat, double far_lon,
+                  double acft_lat, double acft_lon) {
+  if (cands.empty())
+    return {};
+  const double lat0 = thr_lat * M_PI / 180.0;
+  const auto side = [&](double la, double lo) {
+    const double ex = (far_lon - thr_lon) * std::cos(lat0) * 60.0;
+    const double ey = (far_lat - thr_lat) * 60.0;
+    const double px = (lo - thr_lon) * std::cos(lat0) * 60.0;
+    const double py = (la - thr_lat) * 60.0;
+    return ex * py - ey * px;
+  };
+  const double s_acft = side(acft_lat, acft_lon);
+  const xplane_context::HoldingCandidate *best = nullptr;
+  double best_d = 1e18;
+  for (const auto &c : cands) {
+    if (c.lat == 0.0 && c.lon == 0.0)
+      continue;
+    // Same side only: the others are reached by crossing the runway.
+    if (s_acft != 0.0 && side(c.lat, c.lon) * s_acft <= 0.0)
+      continue;
+    const double d = haversine_distance(thr_lat, thr_lon, c.lat, c.lon);
+    if (d < best_d) {
+      best_d = d;
+      best = &c;
+    }
+  }
+  // No candidate on this side (unknown aircraft position, or a field where the
+  // taxiways all sit across): say nothing rather than name the wrong side.
+  return best ? best->name : std::string();
+}
+
 
 static float initial_bearing(double lat1, double lon1, double lat2,
                              double lon2) {
@@ -676,7 +765,8 @@ struct AptParseData {
   std::unordered_map<std::string, std::string> names;
   std::unordered_map<std::string, std::pair<double, double>> positions;
   std::unordered_map<std::string, float> elevations;
-  std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
+  std::unordered_map<
+      std::string, std::unordered_map<std::string, std::vector<HoldingCandidate>>>
       holding;
   std::unordered_map<std::string, int> transition_alts;
   std::unordered_map<std::string, std::vector<TaxiwayMidpoint>> taxiways;
@@ -753,6 +843,7 @@ static void parse_apt_file(const std::string &path, AptParseData &d) {
       // points).
       std::string best_taxiway;
       double best_dist = 1e9;
+      std::vector<HoldingCandidate> all_cands;
       for (const auto &cand : candidates) {
         if (cand.taxiway.empty())
           continue;
@@ -763,6 +854,23 @@ static void parse_apt_file(const std::string &path, AptParseData &d) {
                         [](char c) { return std::isdigit(c); });
         if (is_runway_name)
           continue;
+        // A HOLDING POINT IS A LETTER, OPTIONALLY FOLLOWED BY DIGITS: A, C1,
+        // W3, Q3. Two letters running together -- EB, EF, EG, EY at Nice -- name
+        // a TAXIWAY, not a holding position, and "continue to holding point Echo
+        // Bravo" is not something a controller says (user, real flight
+        // 2026-08-28). Anything else with no digit and more than one letter is
+        // route naming (`taxiway_F` appears in this same data) and is dropped:
+        // the runway alone will be spoken instead. [C. P. Potter]
+        {
+          const std::string &n = cand.taxiway;
+          size_t letters = 0, digits = 0;
+          for (char c : n) {
+            if (std::isalpha(static_cast<unsigned char>(c))) ++letters;
+            else if (std::isdigit(static_cast<unsigned char>(c))) ++digits;
+          }
+          if (letters > 1 && digits == 0)
+            continue;
+        }
 
         // Distance from the hold-bar midpoint to the runway threshold.
         // The midpoint of the 1204 edge is the physical stop-bar position.
@@ -781,9 +889,25 @@ static void parse_apt_file(const std::string &path, AptParseData &d) {
           best_dist = dist;
           best_taxiway = cand.taxiway;
         }
+        // Keep it whatever its rank: the aircraft, not the threshold, decides.
+        {
+          HoldingCandidate hc;
+          hc.name = cand.taxiway;
+          auto fi2 = cur_nodes.find(cand.from);
+          auto ti2 = cur_nodes.find(cand.to);
+          if (fi2 != cur_nodes.end() && ti2 != cur_nodes.end()) {
+            hc.lat = (fi2->second.lat + ti2->second.lat) * 0.5;
+            hc.lon = (fi2->second.lon + ti2->second.lon) * 0.5;
+          }
+          bool dup = false;
+          for (const auto &x : all_cands)
+            if (x.name == hc.name) { dup = true; break; }
+          if (!dup && hc.lat != 0.0)
+            all_cands.push_back(hc);
+        }
       }
-      if (!best_taxiway.empty())
-        holding[current_icao][rwy_num] = best_taxiway;
+      if (!all_cands.empty())
+        holding[current_icao][rwy_num] = std::move(all_cands);
     }
     // Build taxiway midpoint list for nearest-taxiway-on-vacate lookup.
     if (!current_icao.empty() && !cur_all_twy_edges.empty()) {
@@ -1521,11 +1645,43 @@ void update() {
     }
   }
 
+  // ── Departure field latch ────────────────────────────────────────────────
+  // While the aircraft is on the ground, the nearest airport IS the departure
+  // field, so track it. The instant it lifts off the latch freezes: airborne,
+  // nearest_airport_id drifts to every field along the route and would make
+  // the CIFP block below resolve a SID for an airport being overflown.
+  // Fallback for a session started airborne: the OFP origin. [C. P. Potter]
+  if (ctx.on_ground && !ctx.nearest_airport_id.empty()) {
+    if (ctx.ifr_departure_icao != ctx.nearest_airport_id) {
+      ctx.ifr_departure_icao = ctx.nearest_airport_id;
+      char dbg[96];
+      std::snprintf(dbg, sizeof(dbg),
+                    "[xp_wellys_atc] IFR departure field latched: %s\n",
+                    ctx.ifr_departure_icao.c_str());
+      XPLMDebugString(dbg);
+    }
+    ctx.ifr_departure_lat = ctx.airport_lat;
+    ctx.ifr_departure_lon = ctx.airport_lon;
+    if (!ctx.active_runway.empty())
+      ctx.ifr_departure_runway = ctx.active_runway;
+  } else if (ctx.ifr_departure_icao.empty()) {
+    const auto ofp_dep = simbrief_ofp::get();
+    if (ofp_dep.valid && !ofp_dep.origin_icao.empty())
+      ctx.ifr_departure_icao = ofp_dep.origin_icao;
+  }
+
   // CIFP-derived SID name and binding minimum altitude for the active runway.
   // Both are cached in cifp_reader, so the file is only read on first query
   // per airport+runway combination.
-  if (!ctx.cifp_dir.empty() && !ctx.nearest_airport_id.empty() &&
-      !ctx.active_runway.empty()) {
+  //
+  // Keyed on the LATCHED departure field, never on nearest_airport_id.
+  const std::string &dep_icao =
+      ctx.ifr_departure_icao.empty() ? ctx.nearest_airport_id
+                                     : ctx.ifr_departure_icao;
+  const std::string &dep_rwy =
+      ctx.ifr_departure_runway.empty() ? ctx.active_runway
+                                       : ctx.ifr_departure_runway;
+  if (!ctx.cifp_dir.empty() && !dep_icao.empty() && !dep_rwy.empty()) {
     // SID resolution — three-step search when FPL first fix is known:
     // 1. Exact last-fix match on active runway (fastest, most precise).
     // 2. Exact last-fix match on ANY runway — handles airports like LFLP
@@ -1538,22 +1694,22 @@ void update() {
     // Fallback: alphabetically first SID for the active runway.
     if (!ctx.ifr_fpl_first_fix.empty()) {
       ctx.ifr_cifp_sid = cifp_reader::sid_name_for_last_fix(
-          ctx.cifp_dir, ctx.nearest_airport_id, ctx.active_runway,
+          ctx.cifp_dir, dep_icao, dep_rwy,
           ctx.ifr_fpl_first_fix);
       if (ctx.ifr_cifp_sid.empty())
         ctx.ifr_cifp_sid = cifp_reader::sid_name_for_last_fix(
-            ctx.cifp_dir, ctx.nearest_airport_id, /*any runway*/ "",
+            ctx.cifp_dir, dep_icao, /*any runway*/ "",
             ctx.ifr_fpl_first_fix);
       if (ctx.ifr_cifp_sid.empty() && ctx.ifr_fpl_first_fix.size() >= 3)
         ctx.ifr_cifp_sid = cifp_reader::sid_name_for_fix_prefix(
-            ctx.cifp_dir, ctx.nearest_airport_id,
+            ctx.cifp_dir, dep_icao,
             ctx.ifr_fpl_first_fix.substr(0, 3));
     }
     if (ctx.ifr_cifp_sid.empty())
       ctx.ifr_cifp_sid = cifp_reader::sid_name_for_runway(
-          ctx.cifp_dir, ctx.nearest_airport_id, ctx.active_runway);
+          ctx.cifp_dir, dep_icao, dep_rwy);
     auto bind = cifp_reader::sid_binding_altitude(
-        ctx.cifp_dir, ctx.nearest_airport_id, ctx.active_runway,
+        ctx.cifp_dir, dep_icao, dep_rwy,
         ctx.ifr_cifp_sid);
     ctx.ifr_sid_min_alt_ft = bind.alt.feet;
     ctx.ifr_sid_min_is_fl = bind.alt.is_fl;
@@ -1561,7 +1717,7 @@ void update() {
     ctx.ifr_sid_floor_alt_ft = bind.floor_alt.feet;
     ctx.ifr_sid_floor_waypoint = bind.floor_waypoint;
     ctx.ifr_sid_last_fix = cifp_reader::sid_last_fix(
-        ctx.cifp_dir, ctx.nearest_airport_id, ctx.ifr_cifp_sid);
+        ctx.cifp_dir, dep_icao, ctx.ifr_cifp_sid);
   } else {
     ctx.ifr_cifp_sid.clear();
     ctx.ifr_sid_min_alt_ft = 0;
@@ -1577,17 +1733,14 @@ void update() {
   // for this runway.  When CIFP is absent the SID is kept as a best-effort
   // fallback.
   if (!ctx.ifr_sid.empty() && !ctx.ifr_cifp_sid.empty() &&
-      !ctx.cifp_dir.empty() && !ctx.nearest_airport_id.empty() &&
-      !ctx.active_runway.empty()) {
-    if (!cifp_reader::is_sid_valid_for_runway(ctx.cifp_dir,
-                                              ctx.nearest_airport_id,
-                                              ctx.ifr_sid, ctx.active_runway)) {
+      !ctx.cifp_dir.empty() && !dep_icao.empty() && !dep_rwy.empty()) {
+    if (!cifp_reader::is_sid_valid_for_runway(ctx.cifp_dir, dep_icao,
+                                              ctx.ifr_sid, dep_rwy)) {
       char msg[256];
       std::snprintf(msg, sizeof(msg),
                     "[xp_wellys_atc] CIFP: SimBrief SID %s rejected -- "
                     "not in CIFP for %s RW%s\n",
-                    ctx.ifr_sid.c_str(), ctx.nearest_airport_id.c_str(),
-                    ctx.active_runway.c_str());
+                    ctx.ifr_sid.c_str(), dep_icao.c_str(), dep_rwy.c_str());
       XPLMDebugString(msg);
       ctx.ifr_sid.clear();
     }
@@ -1768,6 +1921,62 @@ void update() {
           f > 100.0f && std::fabs(active_freq - f) < 0.02f)
         ctx.frequency_type = FrequencyType::INFO;
     }
+
+    // ── The overlay also has to be able to NAME its own frequencies ────────
+    // The plugin hands the pilot frequencies that exist ONLY in airport+.json --
+    // Innsbruck Radar 128.975 is there precisely because atc.dat has no TRACON
+    // for LOWI and apt.dat does not list it. Classifying it against apt.dat and
+    // atc.dat therefore had to fail, and only the "info" role was ever consulted
+    // here: descending into Innsbruck on 2026-08-28 the plugin said "contact
+    // Innsbruck Radar on 128.975" and then logged, for the whole descent,
+    // "128.975 MHz -> Unknown". A pilot on a frequency ATC cannot classify gets
+    // no clearance ([[feedback_approach_freq_defines_intent]]).
+    //
+    // Checked for the active airport AND, on an arrival, the destination -- the
+    // handoff comes well before the destination becomes the active field.
+    // "delivery" is deliberately NOT mapped: it is shared ground/airborne and
+    // must keep whatever apt.dat says (LFLU's Lyon 125.155). [C. P. Potter]
+    if (ctx.frequency_type == FrequencyType::UNKNOWN && active_freq > 100.0f) {
+      // Same reason as the arrival override below: ifr_destination is empty on a
+      // flight planned outside the sim, so the OFP is the fallback -- otherwise
+      // the overlay is never consulted for the destination's own frequencies.
+      const std::string cand[3] = {ctx.nearest_airport_id, ctx.ifr_destination,
+                                   simbrief_ofp::get().destination_icao};
+      for (const std::string &icao : cand) {
+        if (icao.empty())
+          continue;
+        std::string role, nm;
+        if (!airport_overrides::role_for_freq(icao, active_freq, &role, &nm))
+          continue;
+        FrequencyType t = FrequencyType::UNKNOWN;
+        if (role == "APPROACH" || role == "DEPARTURE")
+          t = FrequencyType::APPROACH;
+        else if (role == "TOWER")
+          t = FrequencyType::TOWER;
+        else if (role == "GROUND")
+          t = FrequencyType::GROUND;
+        else if (role == "ATIS")
+          t = FrequencyType::ATIS;
+        else if (role == "INFO")
+          t = FrequencyType::INFO;
+        if (t == FrequencyType::UNKNOWN)
+          continue;
+        ctx.frequency_type = t;
+        static std::string last_logged;
+        std::string key = icao + role + std::to_string(active_freq);
+        if (key != last_logged) {
+          last_logged = key;
+          char flog[192];
+          std::snprintf(flog, sizeof(flog),
+                        "[xp_wellys_atc] Frequency %.3f classified %s from "
+                        "airport+.json (%s %s)\n",
+                        static_cast<double>(active_freq), role.c_str(),
+                        icao.c_str(), nm.c_str());
+          XPLMDebugString(flog);
+        }
+        break;
+      }
+    }
   }
 
   // Nearest airport lookup — throttled to every 60 frames (~1s)
@@ -1886,6 +2095,51 @@ void update() {
         ctx.airport_lon = apt_lon;
       }
 
+      // ── Arrival: the DESTINATION is the active airport ──────────────────
+      // Symmetric with the departure latch above. Descending into Innsbruck on
+      // 2026-08-28 the active airport walked LOIK -> LOJK -> LOIZ -> LOIS ->
+      // LOII -> LOIU, one airfield per minute under the flight path, and the
+      // frequency read "Unknown" the whole way down because Innsbruck Radar
+      // 128.975 is an airport+.json controller and matches no apt.dat entry.
+      // Runway, ATIS and towered/tower_only followed the same drift.
+      // Applies only airborne, only inside the arrival environment, and only
+      // when no frequency match already claimed a field.
+      // See [[feedback_nearest_airport_ifr]]. [C. P. Potter]
+      constexpr double kDestActiveNm = 60.0;
+      // ctx.ifr_destination comes from the FMS / DataRef and is EMPTY on a flight
+      // planned outside the sim: on the LOWI arrival of 2026-08-30 it never
+      // appeared once, so this whole override sat inert and the active airport
+      // walked LOIS -> LOII -> LOIU -> LOJI -> LOIV while Innsbruck Radar 128.975
+      // flipped between "Approach" and "Unknown" underneath it. The OFP knows the
+      // destination whenever the FMS does not; it is the same source the engine
+      // binds its own destination from. [C. P. Potter]
+      const std::string dest_icao =
+          !ctx.ifr_destination.empty() ? ctx.ifr_destination
+                                       : simbrief_ofp::get().destination_icao;
+      if (cached_match_id.empty() && !ctx.on_ground && !dest_icao.empty() &&
+          dest_icao != ctx.nearest_airport_id) {
+        auto dst_it = pos_cache_.find(dest_icao);
+        if (dst_it != pos_cache_.end()) {
+          const double d = traffic_geometry::distance_nm(
+              ctx.latitude, ctx.longitude, dst_it->second.first,
+              dst_it->second.second);
+          if (d <= kDestActiveNm) {
+            if (ctx.nearest_airport_id != dest_icao) {
+              char dlog[192];
+              std::snprintf(dlog, sizeof(dlog),
+                            "[xp_wellys_atc] Arrival: active airport -> %s "
+                            "(destination, %.0f NM) instead of %s\n",
+                            dest_icao.c_str(), d,
+                            ctx.nearest_airport_id.c_str());
+              XPLMDebugString(dlog);
+            }
+            ctx.nearest_airport_id = dest_icao;
+            ctx.airport_lat = dst_it->second.first;
+            ctx.airport_lon = dst_it->second.second;
+          }
+        }
+      }
+
       // Airport name from cache
       auto name_it = name_cache_.find(ctx.nearest_airport_id);
       ctx.nearest_airport_name =
@@ -1933,12 +2187,21 @@ void update() {
         ctx.runway_holding_points.clear();
         auto hit = holding_cache_.find(ctx.nearest_airport_id);
         if (hit != holding_cache_.end()) {
-          for (const auto &kv : hit->second)
-            ctx.runway_holding_points[kv.first] = kv.second;
+          for (const auto &kv : hit->second) {
+            double tla = 0, tlo = 0, fla = 0, flo = 0;
+            if (!runway_ends_for(ctx.runways, kv.first, &tla, &tlo, &fla, &flo))
+              continue; // unknown runway geometry -> name nothing
+            ctx.runway_holding_points[kv.first] = holding_point_for(
+                kv.second, tla, tlo, fla, flo, ctx.latitude, ctx.longitude);
+          }
           if (!ctx.active_runway.empty()) {
             auto rit = hit->second.find(ctx.active_runway);
-            if (rit != hit->second.end())
-              ctx.active_runway_holding_point = rit->second;
+            double tla = 0, tlo = 0, fla = 0, flo = 0;
+            if (rit != hit->second.end() &&
+                runway_ends_for(ctx.runways, ctx.active_runway, &tla, &tlo, &fla,
+                                &flo))
+              ctx.active_runway_holding_point = holding_point_for(
+                  rit->second, tla, tlo, fla, flo, ctx.latitude, ctx.longitude);
           }
         }
 
@@ -1997,8 +2260,13 @@ void update() {
             ctx.active_runway_holding_point.clear();
             if (hit != holding_cache_.end()) {
               auto rit2 = hit->second.find(ctx.active_runway);
-              if (rit2 != hit->second.end())
-                ctx.active_runway_holding_point = rit2->second;
+              double tla = 0, tlo = 0, fla = 0, flo = 0;
+              if (rit2 != hit->second.end() &&
+                  runway_ends_for(ctx.runways, ctx.active_runway, &tla, &tlo,
+                                  &fla, &flo))
+                ctx.active_runway_holding_point = holding_point_for(
+                    rit2->second, tla, tlo, fla, flo, ctx.latitude,
+                    ctx.longitude);
             }
             break;
           }

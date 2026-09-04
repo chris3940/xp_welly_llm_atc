@@ -154,6 +154,17 @@ struct XPlaneContext {
   std::string ifr_sid_floor_waypoint;
   std::string ifr_sid_last_fix; // last waypoint on the assigned SID (for
                                 // direct-to shortcut)
+  // DEPARTURE FIELD, latched on the ground and never recomputed airborne.
+  // Every departure-side CIFP lookup (SID name, binding altitude, last fix)
+  // must key on this and NOT on nearest_airport_id: the latter drifts to
+  // whatever field the aircraft is flying over (LFMN -> LNMC -> LIMG -> LIMJ
+  // on a Nice easterly departure) and made ATC resolve a SID for an airport
+  // the aircraft was merely overflying, then clear "direct" to that foreign
+  // SID's exit fix. See [[feedback_nearest_airport_ifr]]. [C. P. Potter]
+  std::string ifr_departure_icao;
+  std::string ifr_departure_runway;
+  double ifr_departure_lat = 0.0;
+  double ifr_departure_lon = 0.0;
   int ifr_cruise_alt_ft =
       0; // cruise altitude from SimBrief OFP (0 when no plan)
   std::string nearest_airport_id;   // active airport (may be frequency-tuned)
