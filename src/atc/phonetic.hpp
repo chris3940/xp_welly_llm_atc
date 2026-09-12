@@ -105,4 +105,93 @@ inline std::vector<std::string> readback_anchors(const std::string &atc_text) {
   return out;
 }
 
+
+// Spell a run of digits the way ATC says them: "730" -> "seven three zero".
+// Non-digits are skipped. Shared by the TTS expanders and the STT bias so the
+// spoken form and the biased form are the same string. See
+// coding_atc_number_spelling.
+inline std::string spell_digits(const std::string &num) {
+  static const char *kDigit[] = {"zero", "one", "two",   "three", "four",
+                                 "five", "six", "seven", "eight", "nine"};
+  std::string out;
+  for (char c : num) {
+    if (!std::isdigit(static_cast<unsigned char>(c)))
+      continue;
+    if (!out.empty())
+      out += ' ';
+    out += kDigit[c - '0'];
+  }
+  return out;
+}
+
+// Spell a VHF frequency digit-by-digit with "decimal" for the dot (ICAO/EU):
+// "120.230" -> "one two zero decimal two three zero".
+inline std::string spell_frequency(const std::string &mhz) {
+  const auto dot = mhz.find('.');
+  if (dot == std::string::npos)
+    return spell_digits(mhz);
+  const std::string whole = spell_digits(mhz.substr(0, dot));
+  const std::string frac = spell_digits(mhz.substr(dot + 1));
+  if (whole.empty() && frac.empty())
+    return {};
+  std::string s = whole;
+  s += (s.empty() ? "" : " ") + std::string("decimal");
+  if (!frac.empty())
+    s += " " + frac;
+  return s;
+}
+
+// A FREQUENCY IS NEVER A CARDINAL NUMBER.
+//
+// The TTS chain already expands squawk, flight levels, runways and navigation
+// fixes, but frequencies were handed to the voice as bare numerals -- and a
+// neural voice reads "121.730" however it feels like on the day: sometimes
+// "one twenty one point seven thirty", sometimes the outright wrong "one
+// hundred twenty one decimal seven hundred thirty" the user heard on
+// 2026-09-10. The pilot then reads back what he heard, and the read-back
+// verifier rejects it. ICAO Doc 4444 is unambiguous: frequencies are spoken
+// digit by digit, with "decimal".
+//
+// Only a plausible VHF aviation frequency is rewritten -- three digits in the
+// 108-137 MHz band, a dot, then two or three digits. That shape does not occur
+// anywhere else in ATC speech: QNH and squawk carry no dot, altitudes and
+// speeds are cardinals without one, and a distance in that band with two
+// decimals is not something a controller says. [C. P. Potter]
+inline std::string speak_frequencies(const std::string &text) {
+  std::string out;
+  out.reserve(text.size() + 32);
+  size_t i = 0;
+  while (i < text.size()) {
+    const bool left_ok =
+        (i == 0) || (!std::isalnum(static_cast<unsigned char>(text[i - 1])) &&
+                     text[i - 1] != '.');
+    size_t e = i;
+    while (e < text.size() && std::isdigit(static_cast<unsigned char>(text[e])))
+      ++e;
+    const size_t whole_len = e - i;
+    bool matched = false;
+    if (left_ok && whole_len == 3 && e < text.size() && text[e] == '.') {
+      size_t f = e + 1;
+      while (f < text.size() && std::isdigit(static_cast<unsigned char>(text[f])))
+        ++f;
+      const size_t frac_len = f - (e + 1);
+      const bool right_ok =
+          f >= text.size() || !std::isalnum(static_cast<unsigned char>(text[f]));
+      const int mhz = (text[i] - '0') * 100 + (text[i + 1] - '0') * 10 +
+                      (text[i + 2] - '0');
+      if ((frac_len == 2 || frac_len == 3) && right_ok && mhz >= 108 &&
+          mhz <= 137) {
+        out += spell_frequency(text.substr(i, f - i));
+        i = f;
+        matched = true;
+      }
+    }
+    if (!matched) {
+      out += text[i];
+      ++i;
+    }
+  }
+  return out;
+}
+
 } // namespace atc_phonetic

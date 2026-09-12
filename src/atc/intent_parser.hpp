@@ -36,6 +36,10 @@ enum class PilotIntent {
   INITIAL_CALL_APPROACH,
   REQUEST_TAXI,
   REQUEST_TAXI_PARKING,
+  // "backtrack runway 19" -- routine at a field whose only taxiway is the runway
+  // itself. It drew "unable" at Valence (2026-09-08) because no intent existed.
+  REQUEST_BACKTRACK,
+  REPORT_TAKING_OFF,
   READY_FOR_DEPARTURE,
   READY_FOR_DEPARTURE_VFR,
   REPORT_POSITION,

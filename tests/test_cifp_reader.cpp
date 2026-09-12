@@ -281,3 +281,28 @@ TEST_CASE("cifp: best_approach prefers Zulu variant on same-type tie",
   CHECK(appr.runway == "04");
   CHECK(appr.type_str == "RNAV");
 }
+
+// AN IFR ARRIVAL RUNWAY MUST HAVE AN APPROACH.
+//
+// LFLP publishes R04-Y and R04-Z and nothing for 22. The airport+.json wind
+// configuration nonetheless offers "arrival": "22", and on 2026-09-08 the wind
+// selected it: the approach lookup returned nothing, so the arrival clearance
+// went out as a bare "cleared via ROMAM Three Papa arrival" with no "expect RNAV
+// Zulu approach runway 04" -- the pilot learned his approach ten minutes later.
+// pick_arrival_runway now probes the overlay's runway and falls back to
+// best_runway_for_approach, which only ever considers runways that have APPCH
+// records. These two facts are what that fallback rests on. [C. P. Potter]
+TEST_CASE("cifp: a runway with no published approach is detectable",
+          "[cifp][lflp][approach]") {
+  const std::string dir = "tests/fixtures/cifp";
+
+  // 22 publishes nothing, at any visibility.
+  REQUIRE(cifp_reader::best_approach(dir, "LFLP", "22", 99999.0f)
+              .type_str.empty());
+  // 04 does.
+  REQUIRE_FALSE(cifp_reader::best_approach(dir, "LFLP", "04", 99999.0f)
+                    .type_str.empty());
+  // And the runway picker only ever offers a runway that has one.
+  REQUIRE(cifp_reader::best_runway_for_approach(dir, "LFLP", 220.0f, 10000.0f) ==
+          "04");
+}

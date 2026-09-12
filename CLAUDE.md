@@ -7,7 +7,7 @@ Read this file completely before doing anything else.
 
 ## Project Overview
 
-**xp_wellys_atc** (repo `xp_welly_llm_atc`) is a C++17 X-Plane 12 plugin for
+**xp_wellys_atc** (repo `xplane-ifr-atc`) is a C++17 X-Plane 12 plugin for
 **macOS 13.3+** that provides AI-powered ATC voice communication for VFR
 flight simulation. Ships as a **universal binary** (`arm64 + x86_64`).
 
@@ -119,7 +119,7 @@ inline in `CMakeLists.txt`.
 ## Directory Structure
 
 ```
-xp_welly_llm_atc/
+xplane-ifr-atc/
 ├── CLAUDE.md
 ├── README.md, THIRD_PARTY.md, LICENSE
 ├── CMakeLists.txt

@@ -791,6 +791,51 @@ check_frequency_precondition(const std::string &intent_key,
       return {}; // explicitly permitted
   }
 
+  // AN UNIDENTIFIED FREQUENCY IS NOT A WRONG ONE.
+  //
+  // freq_type UNKNOWN means the tuned frequency matched nothing in the
+  // airport's frequency list. That is not a pilot error, it is absence of
+  // data, and it is the NORMAL case twice over: an en-route centre belongs to
+  // no airport at all (Lyon Control 125.155), and a field whose scenery pack
+  // we do not have has an empty frequency list outright -- which is most of
+  // them. The guard was refusing on ignorance: a correct read-back of the Lyon
+  // handoff was answered "November One One One Romeo Charlie, unable" (user
+  // 2026-09-10, log: "Frequency guard: READBACK blocked on freq_type 0").
+  // Refuse only when the frequency is IDENTIFIED and wrong. [C. P. Potter]
+  if (freq_type == xplane_context::FrequencyType::UNKNOWN) {
+    logging::info("[guard] %s allowed -- frequency not identified",
+                  intent_key.c_str());
+    return {};
+  }
+
+  // AN AFIS "INFORMATION" FREQUENCY STANDS IN FOR GROUND *AND* TOWER.
+  //
+  // At a field with no ATC there is exactly one frequency, and the AFIS
+  // officer holds every position: the pilot requests taxi on it, reports
+  // holding short on it, reads back on it, announces vacated on it. The
+  // frequency tables were written for towered fields and list GROUND / TOWER;
+  // INFO appears in NOT ONE of the 32 entries. So the moment the pilot tuned
+  // Valence Information every guarded intent was refused -- a correct read-back
+  // answered "November Romeo Charlie, unable" (user 2026-09-09, LFLU, log:
+  // "Frequency guard: READBACK blocked on freq_type 9").
+  //
+  // Mapped here rather than by adding "INFO" to twenty JSON lists, so a new
+  // intent cannot silently reintroduce the hole. The substitution is safe
+  // because the INFO type is only ever produced by an airport+.json "info"
+  // role, which exists only where there is no Tower and no Ground. It is
+  // deliberately NOT extended to UNICOM / CTAF: self-announce on an AFIS
+  // frequency is a different thing, and nobody is listening for it.
+  // [C. P. Potter]
+  if (freq_type == xplane_context::FrequencyType::INFO) {
+    for (const auto &f : it->second.allowed) {
+      if (f == "GROUND" || f == "TOWER") {
+        logging::info("[guard] %s allowed on the AFIS information frequency",
+                      intent_key.c_str());
+        return {}; // the AFIS officer answers for both
+      }
+    }
+  }
+
   // Not allowed — return configured rejection (may be empty if unconfigured).
   return it->second.rejection;
 }

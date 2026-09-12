@@ -312,6 +312,7 @@ class Pilot:
         self.runway = ""         # for the "established" report
         self.faf = None          # (lat, lon) of the FAF, from the engine's own log
         self.faf_track = None    # published final approach track
+        self.faf_passed = False  # the FAF was actually overflown
         self.dest = None         # (lat, lon) of the aerodrome -- the only
                                  # reference an RF-leg final leaves to fly to
         self.assigned_kt = None  # speed ATC has assigned, and the pilot flies
@@ -590,6 +591,10 @@ class Pilot:
                 or self.faf is None or self.faf_track is None
                 or not isinstance(where, tuple)):
             return
+        # Overflying the FAF is recorded FIRST: the curved-final branch below
+        # returns, so a setter placed after it could never run. [C. P. Potter]
+        if nm(where, self.faf) <= 6.0:
+            self.faf_passed = True
         # A CURVED FINAL HAS NO AXIS TO CAPTURE.
         #
         # Everything below tests the aircraft against a STRAIGHT final approach
@@ -608,6 +613,14 @@ class Pilot:
             if self.dest is None:
                 return
             d_field = nm(where, self.dest)
+            # AND HE MUST ACTUALLY HAVE FLOWN THE APPROACH. "Close to the
+            # field" alone let the driver declare itself established 9 NM out
+            # having cut straight across to the runway without ever flying the
+            # reversal out to the IAF -- the plugin was meanwhile telling it
+            # "expected 263 to ELMEM". You are established on a procedure you
+            # have joined, not on one you skipped. [C. P. Potter]
+            if not self.faf_passed:
+                return
             if d_field <= 10.0 and nm(where, self.faf) > 1.0:
                 self.established = True
                 # NO final_course: a curved final has none, and flying a frozen

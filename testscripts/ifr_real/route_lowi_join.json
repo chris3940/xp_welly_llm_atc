@@ -1,0 +1,71 @@
+{
+  "_comment": "THE SHAPE THE USER ACTUALLY FLIES, and the one no replay covered: the aircraft JOINS its route in mid-flight. He loads a saved situation near NANIT, so the plugin builds the route from the DEPARTURE fix (BASIP, 273 NM astern) while the aircraft is already in the arrival. Every earlier route file starts the aircraft ON its first navlog fix, so the tracker never had to catch up -- which is exactly how the 2026-09-04 freeze at route_idx=0 reached a real flight. Same LOWI RNAV Z 08 arrival as route_lowi.json; only the joining point differs. [C. P. Potter]",
+  "dest": "LOWI",
+  "runway": "08",
+  "field": [
+    47.2602,
+    11.3439
+  ],
+  "field_elev_ft": 1907,
+  "tower_freq": "120.100",
+  "cruise_ft": 15000,
+  "start_ft": 15500,
+  "com": "118.525",
+  "gs_kt": 280,
+  "navlog": [
+    [
+      "BASIP",
+      43.9,
+      7.05,
+      15000,
+      "CLB",
+      0
+    ],
+    [
+      "ANAKI",
+      44.6,
+      8.2,
+      45000,
+      "CRZ",
+      0
+    ],
+    [
+      "OSPEN",
+      47.6,
+      13.6,
+      24000,
+      "CRZ",
+      0
+    ],
+    [
+      "NANIT",
+      47.393019,
+      12.346436,
+      15000,
+      "DSC",
+      0
+    ],
+    [
+      "RTT",
+      47.430922,
+      11.940053,
+      13000,
+      "DSC",
+      1
+    ]
+  ],
+  "path": [
+    [
+      47.3962,
+      12.3236
+    ],
+    [
+      47.393019,
+      12.346436
+    ],
+    [
+      47.430922,
+      11.940053
+    ]
+  ]
+}

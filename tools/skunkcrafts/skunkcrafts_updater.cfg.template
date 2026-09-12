@@ -1,7 +1,7 @@
 zone|custom
 liveries|false
-module|https://raw.githubusercontent.com/rwellinger/xp_welly_llm_atc/refs/heads/release/
+module|https://raw.githubusercontent.com/chris3940/xplane-ifr-atc/refs/heads/release/
 version|@VERSION@
-disabled|false
-name|Welly's AI ATC (IFR & VFR)
+disabled|@DISABLED@
+name|IFR ATC for X-Plane 12
 locked|false

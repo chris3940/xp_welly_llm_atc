@@ -23,6 +23,7 @@
 #include "data/airport_vrps.hpp"
 #include "persistence/settings.hpp"
 
+#include <regex>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -610,6 +611,10 @@ const char *intent_name(PilotIntent intent) {
     return "REQUEST_TAXI";
   case PilotIntent::REQUEST_TAXI_PARKING:
     return "REQUEST_TAXI_PARKING";
+  case PilotIntent::REQUEST_BACKTRACK:
+    return "REQUEST_BACKTRACK";
+  case PilotIntent::REPORT_TAKING_OFF:
+    return "REPORT_TAKING_OFF";
   case PilotIntent::READY_FOR_DEPARTURE:
     return "READY_FOR_DEPARTURE";
   case PilotIntent::READY_FOR_DEPARTURE_VFR:
@@ -692,6 +697,8 @@ PilotIntent intent_from_key(const std::string &key) {
       {"INITIAL_CALL_APPROACH", PilotIntent::INITIAL_CALL_APPROACH},
       {"REQUEST_TAXI", PilotIntent::REQUEST_TAXI},
       {"REQUEST_TAXI_PARKING", PilotIntent::REQUEST_TAXI_PARKING},
+      {"REQUEST_BACKTRACK", PilotIntent::REQUEST_BACKTRACK},
+      {"REPORT_TAKING_OFF", PilotIntent::REPORT_TAKING_OFF},
       {"READY_FOR_DEPARTURE", PilotIntent::READY_FOR_DEPARTURE},
       {"READY_FOR_DEPARTURE_VFR", PilotIntent::READY_FOR_DEPARTURE_VFR},
       {"REPORT_POSITION", PilotIntent::REPORT_POSITION},
@@ -747,9 +754,33 @@ std::string fq_lc_alpha(const std::string &w) {
       o += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   return o;
 }
+// DIGITS ARE NUMBER WORDS TOO. A pilot spelling a frequency out loud gets
+// transcribed either way -- "one two five decimal one five five" or
+// "1 2 5 decimal 1 5 5" -- and Voxtral mixes the two shapes inside a single
+// transmission. fq_lc_alpha() keeps letters only, so every digit token used to
+// vanish before the run parser saw it and the whole collapse silently failed.
+// This form keeps letters AND digits while still dropping the punctuation
+// Voxtral sprinkles ("125," / "5."). [C. P. Potter]
+std::string fq_tok_norm(const std::string &w) {
+  std::string o;
+  for (char c : w)
+    if (std::isalnum(static_cast<unsigned char>(c)))
+      o += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return o;
+}
+// A bare digit group, 1 to 3 digits ("5", "25", "125"). Longer is not a
+// frequency component.
+bool fq_is_digits(const std::string &t) {
+  if (t.empty() || t.size() > 3)
+    return false;
+  for (char c : t)
+    if (!std::isdigit(static_cast<unsigned char>(c)))
+      return false;
+  return true;
+}
 bool fq_is_num_word(const std::string &lw) {
   return kFqUnit.count(lw) || kFqTeen.count(lw) || kFqTens.count(lw) ||
-         lw == "hundred";
+         lw == "hundred" || fq_is_digits(lw);
 }
 // The frequency separator the pilot may say: ICAO "decimal", or the US "point" /
 // "period". Safe to accept all three here because the collapse ALSO requires
@@ -762,10 +793,17 @@ bool fq_is_separator(const std::string &lw) {
 // the fractional side.
 void fq_parse_run(const std::vector<std::string> &w, int &value,
                   std::string &digits) {
-  bool cardinal = false;
+  // A run carrying a digit token is read digit-by-digit, never as a cardinal:
+  // "1 2 5" is one-two-five, and "125" already IS the digit string.
+  bool has_digits = false;
   for (const auto &x : w)
-    if (kFqTeen.count(x) || kFqTens.count(x) || x == "hundred")
-      cardinal = true;
+    if (fq_is_digits(x))
+      has_digits = true;
+  bool cardinal = false;
+  if (!has_digits)
+    for (const auto &x : w)
+      if (kFqTeen.count(x) || kFqTens.count(x) || x == "hundred")
+        cardinal = true;
   if (cardinal) {
     int cur = 0;
     for (const auto &x : w) {
@@ -782,15 +820,62 @@ void fq_parse_run(const std::vector<std::string> &w, int &value,
     digits = std::to_string(cur);
   } else {
     std::string d;
-    for (const auto &x : w)
-      d += static_cast<char>('0' + kFqUnit.at(x));
+    for (const auto &x : w) {
+      if (fq_is_digits(x))
+        d += x;
+      else if (kFqUnit.count(x))
+        d += static_cast<char>('0' + kFqUnit.at(x));
+    }
     digits = d;
     value = d.empty() ? 0 : std::stoi(d);
   }
 }
 } // namespace
 
-std::string normalize_spoken_frequency(const std::string &text) {
+std::string normalize_spoken_frequency(const std::string &text_in) {
+  // THE DIGITS MAY ALREADY BE DIGITS. Everything above collapses the fully
+  // SPELLED form ("one two five decimal one five five"). Voxtral just as often
+  // writes the numeric one -- "125, decimal 155" or "125 decimal 155" -- and
+  // that fell through untouched, so the bare-frequency readback rule (which
+  // wants "125.155") never matched and a correct readback of a handoff drew
+  // "garbled, say again" three times on the ground at Valence, 2026-09-08.
+  // Same job, second shape. The fractional part is padded or cut to three
+  // digits, so "125 decimal 15" reads 125.150 as a pilot means it.
+  // [C. P. Potter]
+  std::string res0 = text_in;
+  {
+    // "TO" IS "TWO" HERE. Voxtral writes the digit two as the preposition when
+    // it sits inside a number string: "120 decimal to 30" for 120.230 (real
+    // flight 2026-09-08). Repaired only immediately after "decimal", where the
+    // preposition cannot mean anything else -- the word is left alone
+    // everywhere else in the transcript. [C. P. Potter]
+    for (const char *from : {"decimal to ", "decimal too "}) {
+      std::string::size_type p2 = 0;
+      const std::string f(from);
+      while ((p2 = res0.find(f, p2)) != std::string::npos) {
+        res0.replace(p2, f.size(), "decimal 2 ");
+        p2 += 10;
+      }
+    }
+    static const std::regex kNum(
+        R"((\b1[0-3][0-9])\s*[,.]?\s*decimal\s*([0-9](?:\s*[0-9]){0,2}))",
+        std::regex_constants::icase);
+    std::smatch m;
+    std::string acc;
+    auto res0t = res0;
+    while (std::regex_search(res0t, m, kNum)) {
+      std::string frac = m[2].str();
+      frac.erase(std::remove_if(frac.begin(), frac.end(),
+                                [](unsigned char c) { return !std::isdigit(c); }),
+                 frac.end());
+      frac.resize(3, '0');
+      acc += m.prefix().str() + m[1].str() + "." + frac;
+      res0t = m.suffix().str();
+    }
+    if (!acc.empty())
+      res0 = acc + res0t;
+  }
+  const std::string &text = res0;
   std::vector<std::string> tok;
   {
     // HYPHENS SPLIT LIKE SPACES. Voxtral punctuates spoken digit strings, and
@@ -829,7 +914,7 @@ std::string normalize_spoken_frequency(const std::string &text) {
           parts.push_back(p);
         bool splittable = parts.size() > 1;
         for (const auto &x : parts) {
-          const std::string l = fq_lc_alpha(x);
+          const std::string l = fq_tok_norm(x);
           if (!fq_is_num_word(l) && !fq_is_separator(l)) {
             splittable = false;
             break;
@@ -856,7 +941,7 @@ std::string normalize_spoken_frequency(const std::string &text) {
   }
   std::vector<std::string> lc(tok.size());
   for (size_t i = 0; i < tok.size(); ++i)
-    lc[i] = fq_lc_alpha(tok[i]);
+    lc[i] = fq_tok_norm(tok[i]);
 
   std::vector<std::string> out;
   for (size_t i = 0; i < tok.size();) {
@@ -867,7 +952,7 @@ std::string normalize_spoken_frequency(const std::string &text) {
     }
     // Whole run = trailing number-words already pushed onto `out`.
     std::vector<std::string> whole_orig;
-    while (!out.empty() && fq_is_num_word(fq_lc_alpha(out.back()))) {
+    while (!out.empty() && fq_is_num_word(fq_tok_norm(out.back()))) {
       whole_orig.insert(whole_orig.begin(), out.back());
       out.pop_back();
     }
@@ -887,7 +972,7 @@ std::string normalize_spoken_frequency(const std::string &text) {
     }
     std::vector<std::string> whole_lc;
     for (const auto &x : whole_orig)
-      whole_lc.push_back(fq_lc_alpha(x));
+      whole_lc.push_back(fq_tok_norm(x));
     int wval = 0, fval = 0;
     std::string wdig, fdig;
     fq_parse_run(whole_lc, wval, wdig);
@@ -902,6 +987,11 @@ std::string normalize_spoken_frequency(const std::string &text) {
       ++i;
       continue;
     }
+    // 125.15 means 125.150 to a pilot -- the numeric collapse above already
+    // pads, and the two paths must agree or the read-back comparison fails on
+    // the shape alone.
+    if (fdig.size() < 3)
+      fdig.resize(3, '0');
     out.push_back(std::to_string(wval) + "." + fdig);
     i = f; // skip the consumed fractional words
   }
@@ -911,6 +1001,15 @@ std::string normalize_spoken_frequency(const std::string &text) {
       res += ' ';
     res += out[i];
   }
+
+  // TRACE THE REWRITE. Every frequency defect so far has been a shape this
+  // function did not recognise, and each one cost a flight to find because
+  // nothing in the log said what the collapse had -- or had not -- done with
+  // the transcript. One line, only when the text actually changed.
+  // [C. P. Potter]
+  if (res != text_in)
+    logging::info("[intent] frequency normalised: \"%s\" -> \"%s\"",
+                  text_in.c_str(), res.c_str());
   return res;
 }
 

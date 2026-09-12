@@ -280,6 +280,14 @@
     {
       "from": "room, charlie",
       "to": "romeo charlie"
+    },
+    {
+      "from": "decimal to ",
+      "to": "decimal two "
+    },
+    {
+      "from": "decimal too ",
+      "to": "decimal two "
     }
   ],
   "rules": [
@@ -497,6 +505,15 @@
       "confidence": 0.9,
       "any": [
         "traffic"
+      ],
+      "_note": "The whole predicate was the bare word 'traffic', so the AFIS acknowledgement the pilot reads back -- 'runway 01 in use, QNH 1016, NO REPORTED TRAFFIC' -- matched SELF_ANNOUNCE, was demoted to 0.30 at a towered field, went to the LM, and with the LM down drew 'garbled, say again' (user 2026-09-10, LFLU). Those are the CONTROLLER's own words about traffic; a self-announcement is the pilot describing his own position. [C. P. Potter]",
+      "none": [
+        "no reported traffic",
+        "no traffic",
+        "reported traffic",
+        "traffic in sight",
+        "in sight",
+        "qnh"
       ]
     },
     {
@@ -524,6 +541,45 @@
         "roger",
         "qnh",
         " via "
+      ]
+    },
+    {
+      "_note": "Backtracking is routine where the runway IS the taxiway (Valence, Annecy, most of the French AFIS network). No intent existed, so 'November Romeo Charlie, tracking back runway 19' was answered 'unable' -- a refusal of a manoeuvre nobody had to approve (2026-09-08). Voxtral renders 'backtrack' as 'tracking back' and even 'tracking pack', both of which are in the list. Guarded against the position report 'back on track'. [C. P. Potter]",
+      "intent": "REQUEST_BACKTRACK",
+      "confidence": 0.88,
+      "any": [
+        "backtrack",
+        "back track",
+        "back-track",
+        "tracking back",
+        "tracking pack",
+        "back tracking",
+        "backtracking"
+      ],
+      "none": [
+        "back on track",
+        "unable"
+      ]
+    },
+    {
+      "_note": "AT A FIELD WITH NO TOWER THE PILOT ANNOUNCES HIS OWN DEPARTURE. Nobody clears him: he states 'taking off runway 01' and the station acknowledges with the wind and the known traffic. No intent covered it, so a correct AFIS call was answered 'your transmission was garbled' (user 2026-09-10, LFLU). Guarded against the CLEARANCE readback ('cleared for takeoff'), which is a towered exchange and belongs to READBACK, and against a request. [C. P. Potter]",
+      "intent": "REPORT_TAKING_OFF",
+      "confidence": 0.88,
+      "any": [
+        "taking off",
+        "taking-off",
+        "rolling runway",
+        "now rolling",
+        "departing runway",
+        "lining up and rolling"
+      ],
+      "none": [
+        "cleared for takeoff",
+        "clear for takeoff",
+        "cleared for take off",
+        "request",
+        "ready for",
+        "report"
       ]
     },
     {
@@ -814,6 +870,16 @@
             }
           ],
           "_note": "The PARTICIPLE plus a facility name is a sector CHECK-IN, not a readback: 'Milan Radar, November 750XP, climbing to flight level 210' is how a pilot reports in on a new frequency, and INITIAL_CALL_CENTER owns it. Excluded here rather than merely demoted, because READBACK is evaluated first and would otherwise win outright. [C. P. Potter]"
+        },
+        "flight plan closed",
+        "bye bye",
+        "bye-bye",
+        "no reported traffic",
+        {
+          "all": [
+            "in use",
+            "runway"
+          ]
         }
       ],
       "_note_bare_freq": "A frequency readback WITHOUT the word 'contact' -- 'ground on 121 decimal 850' -- matched nothing and fell to INITIAL_CALL_GROUND at 0.30, so Tower answered a perfectly correct readback with 'contact Ground' (real flight LSGG 2026-08-21; the user had already reported that saying 'contact' works and omitting it does not). Real pilots drop the verb. 'on 1' is the discriminator: every VHF frequency starts with a 1, so the pair <facility> + 'on 1' is a frequency readback and nothing else. [C. P. Potter]",

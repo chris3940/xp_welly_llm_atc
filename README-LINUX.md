@@ -102,7 +102,7 @@ sudo apt install \
 
 ```bash
 git clone --recurse-submodules <repo-url>
-cd xp_welly_llm_atc
+cd xplane-ifr-atc
 
 make setup    # downloads SDK, ImGui, nlohmann/json, Catch2
 make build    # CMake Release -> build-pr/xp_wellys_atc.xpl

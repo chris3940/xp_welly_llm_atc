@@ -810,3 +810,90 @@ as Unknown.
    5 kHz, for 8.33 kHz channel designators.
 
 `tests/test_airport_overrides.cpp`.
+
+---
+
+## Q15 - Vectors to the IAF (mode 2): it arms now, and it is wrong - **OPEN, measured 2026-09-04**
+
+Attacked on the `replay-lowi` bench at the user's request. Two findings, one
+fixed and one not.
+
+**FIXED -- it could never arm at all.** `poll_vector_to_intercept` is called from
+`poll_arrival`, in state IFR_ARRIVAL. `poll_approach` clears `s_approach_faf` on
+EVERY frame the state is not APPROACH_CONTACT / APPROACH_DESCENT, so the
+precondition found an empty FAF every frame and bailed "precondition empty: faf".
+The poll now resolves the FAF itself (the cifp_reader lookup is cached, so it
+costs nothing). Without this nothing below could even be measured.
+
+**NOT FIXED -- the teardrop is unfinished, and the arm distance hides it.**
+`kVectorArmNm` is 2.5 NM: the route tracker sequences past the IAF before the
+plan is built, and the next frame bails "IAF ELMEM not ahead of tracker". Raising
+it to 15 NM makes it arm, and the bench then shows what the sequence actually
+does:
+
+```
+26 NM  turn right heading 311, vectors for the approach
+27 NM  turn right heading 311, vectors for the approach     <- same heading twice
+28 NM  cleared RNAV Zulu approach runway 08
+401 NM !! harness: runaway, 401 NM from the field
+```
+
+Three separate defects behind that:
+
+1. **Step 1 does not reverse.** The plan computes `rev1 = open_hdg + 90 * -side`
+   = 221 for an open of 311, and 311 is issued instead. Largest single turn: 0.
+2. **It opens far too early.** The teardrop is documented as opening AT the IAF
+   (step 0); it fired 26 NM from the field with ELMEM still 40 NM west.
+3. **Nothing recovers it.** The approach is cleared on top of the vectors and the
+   aircraft leaves on the open heading for ever; the final intercept measured
+   129 degrees against the axis, against an ICAO maximum of 45.
+
+`kVectorArmNm` is therefore left at 2.5, which keeps mode 2 dormant and the
+published procedure -- which flies end to end on all five replays -- in charge.
+A vectoring sequence that flies the aircraft 401 NM away is worse than no
+vectoring at all.
+
+**What the work is, when it is picked up:** the three defects above, on this
+bench, with `vectors issued` / `largest single turn` / `final intercept vs axis`
+as the acceptance. The machinery, the plan struct and the compliance monitor all
+exist; what has never been true is that the sequence flies.
+
+
+---
+
+## Q16 - The approach runway and the LANDING runway are not the same thing - **OPEN, noted 2026-09-09**
+
+Raised by the user after the LFLP arrival of 2026-09-08:
+
+> si la 22 avait ete en service, les IAF ouest auraient toujours ete actifs
+> jusqu'apres le FAF ou une VPT 22 serait executee
+
+That is the real operational model at a field with instrument procedures on one
+runway end only:
+
+- **The approach is always the published one.** Annecy publishes R04-Y and R04-Z
+  and nothing for 22, so the west transitions (COLLO, PIRUV, TOLNA) and the final
+  down to FP04Z are flown whichever runway is in use.
+- **The landing runway may be the other one.** With 22 in service the aircraft
+  breaks off after the FAF and flies a VPT -- a prescribed visual manoeuvre -- to
+  land on 22.
+
+The engine has no such distinction: `s_assigned_landing_runway = appr.runway`,
+so the landing runway IS the approach's. Two consequences today:
+
+1. The fix of 2026-09-09 (an arrival runway must have a published approach) is
+   right for the APPROACH and is what restores "expect RNAV Zulu approach runway
+   04" and the direct to an IAF. It does not model the landing runway.
+2. So with 22 in service the plugin would clear "RNAV Zulu approach runway 04"
+   (correct) and then say "runway 04, cleared to land" (wrong -- 22, via the
+   VPT). Before the fix it gave no approach at all, so this is strictly better,
+   but the conflation is now the thing standing in the way.
+
+**What the work is.** Split the two: an approach runway from the CIFP, a landing
+runway from the wind/configuration, equal in the ordinary case. Then the VPT
+segment itself -- which is NOT in the CIFP and needs an overlay, exactly as
+[[project_vpt_final_segment]] records for LFMN 04L/R RNP A. The phraseology for
+the break-off and the missed approach differ too.
+
+Until that exists, an arrival at a field whose reciprocal is in service is flown
+to the wrong threshold in the final clearance.

@@ -1,13 +1,26 @@
-# xp_wellys_atc — IFR by C. Potter
+# xplane-ifr-atc — IFR ATC for X-Plane 12
 
-IFR ATC for X-Plane 12, added by this fork on top of upstream's VFR plugin.
+**This is where IFR development continues.** The project it grew out of was
+archived on 2026-09-06 at v4.3.1 and is no longer developed; everything here is
+well past that point. If you arrived from that repository's archive banner, you
+are in the right place.
+
 Instrument flights are handled end to end: clearance delivery, taxi, departure
 with a SID, sector handoffs along the route, descent on a STAR, an instrument
 approach, and the transfer to Tower.
 
-Platform notes are in [README-LINUX.md](README-LINUX.md) /
-[README-WINDOWS.md](README-WINDOWS.md); the plugin itself is documented in the
-upstream [README.md](README.md).
+Built on **Welly's ATC for macOS** by **thWelly**, a VFR plugin for Apple
+Silicon — this project adds the whole IFR side and the Linux port. See
+[Credits](#credits).
+
+**Platforms.** Linux is the reference platform, where every flight test is
+flown. Windows is built by CI. macOS builds are preserved behind
+`#if defined(__APPLE__)` but are currently frozen and untested. Platform notes
+are in [README-LINUX.md](README-LINUX.md) / [README-WINDOWS.md](README-WINDOWS.md).
+
+**Looking for VFR?** The VFR flows bundled here are inherited from the original
+plugin and are kept working, not developed. Its author's VFR repositories are
+archived as well; this project does not continue that line.
 
 > **Read the [Limitations](#limitations) section before your first IFR flight.**
 > The IFR flows have been flown in one configuration only, and several behaviours
@@ -178,7 +191,8 @@ flights.
 
 ### Out of scope
 
-- VFR flows are inherited from upstream and are not maintained here.
+- VFR flows are inherited from the original plugin and are not maintained here.
+  They are kept working, not developed.
 - Traffic awareness beyond phase 1 (TCAS snapshot) is not implemented: no en-route
   advisories, taxi holds, landing or take-off sequencing.
 
@@ -186,10 +200,19 @@ flights.
 
 ## Credits
 
-The IFR feature set — state machine, procedure handling, airspace-driven sector
-handoffs, phraseology — was designed and built by **Christopher P. Potter**
-(GitHub [@chris3940](https://github.com/chris3940)), together with the Linux
-port, on top of **thWelly**'s xp_wellys_atc.
+This project is derived work. Its base is **Welly's ATC for macOS**
+(`xp_wellys_atc`) by **thWelly**, an AI-powered **VFR** ATC plugin for Apple
+Silicon — the plugin shell, the VFR state machine, the template engine and the
+local-inference pipeline come from there, and that work is what made this
+possible.
+
+The **IFR** feature set — state machine, procedure handling, airspace-driven
+sector handoffs, phraseology — was designed and built by **Christopher P.
+Potter** (GitHub [@chris3940](https://github.com/chris3940)), together with the
+**Linux port**. The original repository
+([rwellinger/xp_welly_llm_atc](https://github.com/rwellinger/xp_welly_llm_atc),
+archived 2026-09-06 at v4.3.1) is kept linked here as provenance, not as a
+source of updates. IFR development continues in this repository.
 
 It is developed and **validated over tens of hours of real instrument flights**
 in X-Plane 12, not against synthetic scenarios — the routes are listed under
@@ -205,5 +228,7 @@ in `src/` record who wrote what.
 ---
 
 Platform-specific caveats (cosmetic issues, shared-library notes) live in
-[README-LINUX.md](README-LINUX.md); everything about the plugin itself is in the
-upstream [README.md](README.md).
+[README-LINUX.md](README-LINUX.md). The plugin shell inherited from the original
+VFR project — installation, models, settings, the VFR flows — is documented in
+[README.md](README.md), which is kept as historical reference and describes the
+state at v4.3.1.

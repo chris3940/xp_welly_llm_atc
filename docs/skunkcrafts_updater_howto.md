@@ -1,7 +1,7 @@
 # SkunkCrafts Updater — Integrations-HOWTO
 
 Wie man ein X-Plane-Addon für den **SkunkCrafts Updater** updatefähig macht.
-Diese Anleitung dokumentiert jeden Schritt, der in `xp_welly_llm_atc`
+Diese Anleitung dokumentiert jeden Schritt, der in `xplane-ifr-atc`
 (Plugin-Ordner `xp_wellys_atc`) gemacht wurde, so dass sie sich 1:1 auf weitere
 Projekte übertragen lässt. **Projekt-spezifische Stellen sind mit 🔧 markiert**
 — das sind die einzigen Dinge, die du pro Projekt anpassen musst.
@@ -86,7 +86,7 @@ Plus Integration in `Makefile` (lokaler Build) und
 ```
 zone|custom
 liveries|false
-module|https://raw.githubusercontent.com/rwellinger/xp_welly_llm_atc/refs/heads/release/
+module|https://raw.githubusercontent.com/chris3940/xplane-ifr-atc/refs/heads/release/
 version|@VERSION@
 disabled|false
 name|Welly's AI ATC (IFR & VFR)
@@ -268,7 +268,7 @@ grep -c "data/settings.json" build/skunkcrafts/skunkcrafts_updater_whitelist.txt
 - Actions-Run grün? Step „Publish SkunkCrafts update tree" durchgelaufen?
 - `release`-Branch existiert und enthält den Baum + Kontrolldateien?
 - `module`-URL im Browser erreichbar:
-  `https://raw.githubusercontent.com/rwellinger/xp_welly_llm_atc/refs/heads/release/skunkcrafts_updater.cfg`
+  `https://raw.githubusercontent.com/chris3940/xplane-ifr-atc/refs/heads/release/skunkcrafts_updater.cfg`
 - Im SkunkCrafts-Updater-Client: Addon wird gelistet, Version stimmt.
 
 ---

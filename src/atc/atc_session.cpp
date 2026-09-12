@@ -150,7 +150,15 @@ static std::string current_tower_label() {
   // call). State is IDLE by then, so key on airborne-then-on-ground + GROUND freq.
   {
     const auto &cx0 = xplane_context::get();
-    if (cx0.on_ground && atc_state_machine::was_airborne() &&
+    // The was_airborne() condition was dropped on 2026-09-10: the IFR-closure
+    // branch clears that flag BEFORE its own transmission is spoken, so the
+    // very last line of the flight -- "IFR flight plan closed at 2013" -- was
+    // labelled "Tower" while the pilot sat on Annecy GROUND 121.730, three
+    // lines below a correct "Annecy Ground". The flag was never needed: a
+    // GROUND-typed frequency is a ground frequency before departure just as
+    // much as after landing, and "<airport> Ground" is the right speaker in
+    // both. [C. P. Potter]
+    if (cx0.on_ground &&
         cx0.frequency_type == xplane_context::FrequencyType::GROUND) {
       std::string apt = !cx0.nearest_airport_name.empty()
                             ? cx0.nearest_airport_name
@@ -190,9 +198,16 @@ static std::string current_tower_label() {
       if (airport_overrides::controller(icao, "delivery", &del_n, &del_f) &&
           del_f > 100.0f && std::fabs(acom - del_f) < 0.02f)
         return del_n; // on the ACC freq -> clearance controller (e.g. Lyon Control)
-      // AFIS "information" is a GROUND service -> keep that label ground-only.
+      // ON THE AFIS FREQUENCY, THE SPEAKER IS THE AFIS STATION -- in the air as
+      // much as on the ground. The label used to be ground-only, so the departure
+      // handoff spoken by Valence on 120.100 at 3400 ft came out as "Valence ATC"
+      // (2026-09-08) -- a station that does not exist, next to eight correct
+      // "Valence Information" lines in the same transcript. An AFIS serves its
+      // ATZ, it does not stop at the runway edge. [C. P. Potter]
+      if (info_f > 100.0f && std::fabs(acom - info_f) < 0.02f)
+        return info_n; // on the AFIS freq -> Valence Information
       if (cxa.on_ground)
-        return info_n; // AFIS field -> Valence Information
+        return info_n; // on the ground at an AFIS field, whatever the freq
     }
   }
   // For IFR airborne states: use the pending departure label stored when the
@@ -208,8 +223,15 @@ static std::string current_tower_label() {
   }
   // En-route IFR states: nearest airport is irrelevant to the sector —
   // return "Control" until the real centre label is populated by polling.
+  // IFR_DESCENT and IFR_ARRIVAL were missing from this list, so in descent the
+  // label fell through to the nearest airport -- which at FL110 over the Rhone
+  // valley was the scenery object XLF00AM, an air base. Lyon Control's handoff
+  // came out spoken by "Base ATC", twice (user 2026-09-10). Nothing airborne
+  // may be named after whatever happens to be underneath.
+  // [[feedback_nearest_airport_ifr]]
   if (st == AS::IFR_ENROUTE_CRUISE || st == AS::IFR_EN_ROUTE ||
       st == AS::IFR_FREQ_HANDOFF || st == AS::IFR_RADAR_CONTACT ||
+      st == AS::IFR_DESCENT || st == AS::IFR_ARRIVAL ||
       st == AS::IFR_APPROACH_CONTACT || st == AS::IFR_APPROACH_DESCENT ||
       st == AS::IFR_APPROACH_TOWER)
     return "Control";
@@ -371,19 +393,10 @@ static std::string expand_runways(std::string s) {
 // Altitudes in feet are deliberately left as cardinals ("two thousand five
 // hundred feet") per ICAO, so this only rewrites the flight-level phrase.
 // Applied to the SPOKEN text only; the transcript keeps the compact "210".
-static std::string spell_digits(const std::string &num) {
-  static const char *kDigit[] = {"zero", "one", "two",   "three", "four",
-                                  "five", "six", "seven", "eight", "nine"};
-  std::string out;
-  for (char c : num) {
-    if (!std::isdigit(static_cast<unsigned char>(c)))
-      continue;
-    if (!out.empty())
-      out += ' ';
-    out += kDigit[c - '0'];
-  }
-  return out;
-}
+// spell_digits / spell_frequency now live in atc_phonetic so the TTS frequency
+// expander and the STT bias share one implementation.
+using atc_phonetic::spell_digits;
+using atc_phonetic::spell_frequency;
 
 // Spell a speed in CARDINAL words the way ATC says it: 210 -> "two hundred
 // ten", 250 -> "two hundred fifty", 200 -> "two hundred". Speed is NOT spoken
@@ -421,25 +434,6 @@ static std::string spell_cardinal_speed(int kt) {
   return s;
 }
 
-// Spell a frequency digit-by-digit the way ATC says it, with "decimal" for the
-// dot (ICAO/EU): "120.230" -> "one two zero decimal two three zero",
-// "121.205" -> "one two one decimal two zero five". The pilot reads the handoff
-// frequency back this way, so the STT bias needs the spelled form alongside the
-// compact "120.230" (user 2026-07-25). See coding_atc_number_spelling.
-static std::string spell_freq(const std::string &mhz) {
-  const auto dot = mhz.find('.');
-  if (dot == std::string::npos)
-    return spell_digits(mhz);
-  const std::string whole = spell_digits(mhz.substr(0, dot));
-  const std::string frac = spell_digits(mhz.substr(dot + 1));
-  if (whole.empty() && frac.empty())
-    return {};
-  std::string s = whole;
-  s += (s.empty() ? "" : " ") + std::string("decimal");
-  if (!frac.empty())
-    s += " " + frac;
-  return s;
-}
 
 static std::string expand_flight_levels(std::string s) {
   auto lc = [](char c) {
@@ -580,7 +574,8 @@ speak_response(const std::string &text, model_manifest::VoiceRole role,
   tts_pending_ = true;
   ++total_inferences_; // TTS inference
 
-  std::string final_text = expand_navfix_names(expand_runways(expand_flight_levels(expand_squawk(text))));
+  std::string final_text = atc_phonetic::speak_frequencies(
+      expand_navfix_names(expand_runways(expand_flight_levels(expand_squawk(text)))));
 
   backends::tts::synthesize_async(
       final_text, role, length_scale,
@@ -639,7 +634,8 @@ static void speak_response_guarded(const std::string &text,
   tts_pending_ = true;
   ++total_inferences_;
 
-  std::string final_text = expand_navfix_names(expand_runways(expand_flight_levels(expand_squawk(text))));
+  std::string final_text = atc_phonetic::speak_frequencies(
+      expand_navfix_names(expand_runways(expand_flight_levels(expand_squawk(text)))));
 
   backends::tts::synthesize_async(
       final_text, role, length_scale,
@@ -1476,6 +1472,75 @@ static void submit_recording_to_stt() {
     }
   }
 
+  // == THE CURRENT VALUES, LAST, FOR THE FREEFORM PROMPT ==================
+  //
+  // Whisper and the OpenAI STT consume airport_ctx as a FREEFORM prompt, and
+  // it carried the VOCABULARY but not the VALUES: the words "QNH" and "squawk"
+  // were in it, their four digits were not, and neither was the spelled
+  // hand-off frequency nor the "direct <FIX>" phrase. Only Voxtral's separate
+  // context_bias[] had them. Measured on the LFLU->LFLP flight of 2026-09-10:
+  // CTX carried "runway zero four" and "cleared to land" but not "6214", not
+  // "one zero one seven", not "one two zero decimal two three zero" -- which
+  // is precisely where the read-backs broke.
+  //
+  // THEY GO AT THE END, AND THAT IS NOT COSMETIC. whisper.cpp keeps the TAIL
+  // of the prompt when it does not fit:
+  //
+  //   n_take = min(n_max_text_ctx, whisper_n_text_ctx(ctx)/2, prompt_past.size());
+  //   prompt.insert(prompt.begin() + 1, prompt_past.end() - n_take, prompt_past.end());
+  //                                     ^^^^^^^^^^^^^^^^^^^^^^^^^ the last n_take
+  //
+  // (whisper.cpp/src/whisper.cpp, the decoder prompt build). n_text_ctx is 448
+  // for base and small, so the budget is 224 TOKENS -- roughly a thousand
+  // characters of this kind of text. Our prompt is longer than that, so the
+  // head is already being dropped, and anything appended here is what actually
+  // reaches the model. The static NATO block at the front is the part the
+  // model can afford to lose; the squawk it is about to hear read back is not.
+  //
+  // Every token below is also a fresh context_bias[] entry on the Voxtral path
+  // (the string is whitespace-split there), so this helps both backends.
+  // [C. P. Potter] [[coding_bias_covers_readback]]
+  {
+    // Squawk: ATC spells it, the pilot reads it back spelled, and the compact
+    // form is what Voxtral tends to emit. Both.
+    const std::string &sq_ctx = atc_state_machine::session_squawk();
+    if (!sq_ctx.empty())
+      airport_ctx += " squawk " + sq_ctx + " squawk " + spell_digits(sq_ctx);
+
+    // QNH: same reasoning. The bare digits garble to "QLH".
+    if (ctx_for_whisper.qnh_hpa > 0) {
+      const std::string q_ctx = std::to_string(ctx_for_whisper.qnh_hpa);
+      airport_ctx += " QNH " + q_ctx + " QNH " + spell_digits(q_ctx);
+    }
+
+    // Hand-off frequency, spelled -- "one two zero decimal two three zero" is
+    // how the pilot says it back. ONLY while it is a NEW frequency to switch
+    // to: once he has checked in, keeping it anchored makes the STT substitute
+    // it for unrelated numbers (the "flight level 125.630" trap), which is why
+    // the context_bias path applies the same guard.
+    {
+      const float ph_ctx = engine::pending_handoff_freq();
+      const float acom_ctx = (ctx_for_whisper.active_com == 2)
+                                 ? ctx_for_whisper.com2_freq_mhz
+                                 : ctx_for_whisper.com1_freq_mhz;
+      if (ph_ctx > 100.0f && std::fabs(ph_ctx - acom_ctx) >= 0.010f) {
+        char fb_ctx[16];
+        std::snprintf(fb_ctx, sizeof(fb_ctx), "%.3f", ph_ctx);
+        airport_ctx += std::string(" ") + fb_ctx + " " + spell_frequency(fb_ctx);
+      }
+    }
+
+    // The station being called, and the one being left.
+    airport_ctx += " " + engine::pending_controller_label();
+    airport_ctx += " " + engine::current_controller_label();
+
+    // The VARIABLE content of the last transmission: the fix in "direct
+    // ELMEM", the procedure in "expect RNAV Zulu approach". Same source the
+    // context_bias uses.
+    for (const auto &a_ctx : atc_phonetic::readback_anchors(last_atc_response()))
+      airport_ctx += " " + a_ctx;
+  }
+
   // ── Voxtral context_bias: curated, READBACK-FIRST list of <=100 phrases ──
   // Rebuilt every PTT (like airport_ctx). Unlike the freeform prompt above,
   // Mistral Voxtral's context_bias is an ARRAY of <=100 whole-word OR multi-word
@@ -1568,7 +1633,7 @@ static void submit_recording_to_stt() {
       if (ph > 100.0f && std::fabs(ph - acom) >= 0.010f) {
         char fb[16];
         std::snprintf(fb, sizeof(fb), "%.3f", ph);
-        add(spell_freq(fb));
+        add(spell_frequency(fb));
         add(fb);
       }
     }

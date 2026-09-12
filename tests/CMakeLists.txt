@@ -24,6 +24,8 @@ add_executable(xp_wellys_atc_tests
     ${CATCH2_DIR}/catch_amalgamated.cpp
     test_smoke.cpp
     test_intent_parser.cpp
+    test_afis_frequency_guard.cpp
+    test_tts_frequency_speech.cpp
     test_intent_parser_eu.cpp
     test_intent_rules_schema.cpp
     test_runway_lock.cpp

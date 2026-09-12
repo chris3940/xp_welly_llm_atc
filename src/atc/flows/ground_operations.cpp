@@ -1157,6 +1157,30 @@ bool handle_afis_ground_flow(const PilotMessage &msg, const XPlaneContext &ctx,
     // [C. P. Potter]
     resp.next_state = ATCState::IFR_CLEARED;
     return true;
+  case PI::REQUEST_BACKTRACK:
+    // AN AFIS DOES NOT APPROVE, IT INFORMS. Backtracking is the normal way to
+    // reach the threshold where the runway is the only taxiway, and at a field
+    // with no Tower nobody clears it: the station gives the runway in use and
+    // the known traffic, and the pilot decides. Answering "unable" -- which is
+    // what happened for want of an intent (2026-09-08) -- refuses a manoeuvre
+    // that was never anyone's to refuse. [C. P. Potter]
+    resp.text = atc_templates::fill("{callsign}, " + info_name + ", roger, "
+                                    "runway " + rwy + " in use, wind {wind}, "
+                                    "no reported traffic.",
+                                    vars);
+    resp.next_state = internal::get_state_ref();
+    return true;
+  case PI::REPORT_TAKING_OFF:
+    // NOBODY CLEARS A DEPARTURE HERE EITHER. The pilot announces that he is
+    // rolling; the station acknowledges with the wind and the known traffic.
+    // Without an intent this drew "your transmission was garbled, say again"
+    // -- to a call that is the correct, and the only, thing to say at an AFIS
+    // field (user 2026-09-10, LFLU). [C. P. Potter]
+    resp.text = atc_templates::fill("{callsign}, " + info_name + ", roger, "
+                                    "wind {wind}, no reported traffic.",
+                                    vars);
+    resp.next_state = internal::get_state_ref();
+    return true;
   case PI::REPORT_HOLDING_SHORT:
     // Pilot reports holding short (before departure) -> AFIS INFO, never a takeoff
     // clearance. The pilot then self-announces line-up / rolling.
@@ -1504,6 +1528,16 @@ bool check_freq_precondition(const PilotMessage &msg, const XPlaneContext &ctx,
                       acc_n.c_str(), acc_f);
         resp.text = atc_templates::fill(tmpl, vars);
         resp.next_state = internal::get_state_ref();
+        // ANCHOR THE STATION WE ARE SENDING HIM TO. This redirect is the only
+        // handoff of the flight that did not go through a poll path, so it set
+        // neither the pending frequency nor the pending label -- and the STT
+        // bias carried neither "Lyon Control" nor 125.155 while the pilot read
+        // exactly those back. Voxtral heard "Lion Control", then "Your
+        // control" (user 2026-09-10, LFLU). Setting both here also promotes
+        // the label to CURRENT controller once he tunes the ACC, so the
+        // transcript names the right station too. [C. P. Potter]
+        engine::set_pending_handoff_freq(acc_f);
+        engine::set_pending_controller_label(acc_n);
         logging::info("AFIS departure: IFR clearance -> %s %.3f (not Tower)",
                       acc_n.c_str(), acc_f);
         return true;

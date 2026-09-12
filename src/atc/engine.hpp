@@ -89,6 +89,14 @@ float jump_switch_freq_mhz();
 // assigned_runway(), which is cleared post-landing.
 const std::string &assigned_landing_runway();
 
+// Runway the cleared APPROACH PROCEDURE serves (e.g. "04"). Same string as
+// assigned_landing_runway() for every approach that terminates on its own
+// runway; they separate only for a visual manoeuvre with prescribed track,
+// where the instrument segment serves one runway and the manoeuvre delivers
+// the aircraft to another. Use THIS one for anything geometric (final axis,
+// alignment, the spoken approach identity).
+const std::string &assigned_approach_runway();
+
 // Departure level-report altitude (MSL), CAPPED at the SID initial-climb level-off
 // the aircraft actually reaches (LIMF RW36 KUKE1Z: 2000, not the 3000 config it
 // never sees). Optionally reports the phraseology VERB via is_reaching (true =
@@ -404,6 +412,15 @@ int current_speed_restriction_kt();
 // Used by check_handoff_reissue() to re-state the instruction if the pilot
 // calls back on the wrong frequency.
 void set_pending_handoff_freq(float mhz);
+
+// Name of the station the pilot has just been told to call ("Lyon Control").
+// Promoted to the CURRENT controller label the moment the pilot's active COM
+// matches the pending frequency. Set it alongside set_pending_handoff_freq()
+// whenever a handoff is spoken outside the normal poll paths -- the STT bias
+// anchors both the station being left and the one being called, and a station
+// that is in neither garbles ("Lyon Control" -> "Lion Control" -> "Your
+// control", user 2026-09-10). [[coding_bias_covers_readback]]
+void set_pending_controller_label(const std::string &label);
 // Test hook: arm the pending sector check-in (the other half of a handoff).
 void set_sector_checkin_pending(bool v);
 float pending_handoff_freq();

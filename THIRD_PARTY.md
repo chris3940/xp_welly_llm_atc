@@ -142,10 +142,15 @@ BSD-style, BSL-1.0, freely redistributable SDK).
 
 ## Source availability
 
-This plugin is open source. The full source is at
-`https://github.com/rwellinger/xp_welly_llm_atc`. In line with GPLv3,
-binary releases include or link to the source repository in the
-release notes.
+This plugin is open source. The complete corresponding source for the
+binaries distributed from THIS project is at
+`https://github.com/chris3940/xplane-ifr-atc`. In line with GPLv3, every
+binary release links to that repository in its release notes.
+
+The project it derives from is `https://github.com/rwellinger/xp_welly_llm_atc`
+(archived 2026-09-06 at v4.3.1). That repository is the provenance of the VFR
+plugin this work is built on; it is not where the source of these binaries
+lives, and it receives no updates.
 
 For the bundled third-party static libraries (whisper.cpp, llama.cpp,
 Piper, espeak-ng), the source is publicly available at the project

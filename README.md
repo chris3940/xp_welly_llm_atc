@@ -1,5 +1,14 @@
 # Welly's ATC — AI Voice ATC for X-Plane 12
 
+> **Historical document.** This is the README of the plugin this project is
+> built on: **Welly's ATC for macOS** by thWelly, an AI-powered VFR ATC plugin,
+> archived 2026-09-06 at v4.3.1. It is kept because it still documents the
+> shell this project inherits — installation, the model downloader, settings,
+> and the VFR flows — but it describes the state at v4.3.1 and is not updated.
+>
+> **For the IFR plugin this repository actually is, read
+> [README-IFR.md](README-IFR.md).**
+
 ![Welly's ATC panel with ATIS broadcast at LSZB Bern-Belp](images/atc-atis-example.jpg)
 
 > **Cross-platform X-Plane 12 ATC plugin — runs on macOS, Windows and
@@ -618,7 +627,7 @@ offline. For **Windows** and **Linux** — both cloud-only — follow
 
 ```sh
 git clone --recurse-submodules <repo-url>
-cd xp_welly_llm_atc
+cd xplane-ifr-atc
 make setup     # X-Plane SDK, Dear ImGui, nlohmann/json, Catch2, spike submodules
 make build     # Universal Release build → build/xp_wellys_atc.xpl (arm64
                # with all three backends + x86_64 cloud-only, lipo'd into

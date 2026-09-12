@@ -47,7 +47,7 @@ LINT_EXCLUDE := $(LINT_EXCLUDE_WIN) src/audio/audio_input_coreaudio.cpp
 endif
 LINT_SOURCES := $(filter-out $(LINT_EXCLUDE),$(wildcard src/main.cpp src/*/*.cpp))
 
-.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay replay-star replay-lsgg replay-lowi test-nice test-restart test-depfield test-climb test-lineup test test-unit test-scenarios test-afis test-stars test-crossing ci-remote win-artifact skunkcrafts
+.PHONY: all help setup setup-cloud build install install-mac install-linux install-data package clean distclean format lint sanitize release release-build cleanup-tags cleanup-branches cleanup-runs cleanup-cache repl run-repl ifr-repl run-ifr-repl replay replay-star replay-lsgg replay-lowi replay-join test-nice test-restart test-depfield test-climb test-lineup test test-unit test-scenarios test-afis test-stars test-crossing ci-remote win-artifact skunkcrafts
 
 .DEFAULT_GOAL := help
 
@@ -463,6 +463,20 @@ DIST_BUILD_N  := $(shell m=$$(for f in dist/xp_wellys_atc-$(DIST_PLATFORM)-$(DIS
 DIST_NAME     := $(_DIST_BASE)-$(DIST_BUILD_N)
 DIST_STAGE    := dist/$(DIST_NAME)/xp_wellys_atc
 
+# A TEST BUILD MUST NOT OFFER ITSELF TO THE WORLD.
+#
+# The SkunkCrafts client acts on the cfg it finds in the plugin folder: with
+# `disabled|false` it will offer whatever sits on the `release` branch to every
+# copy of the plugin, a beta tester's included. The flag is therefore derived
+# from the version string rather than remembered -- a version carrying a
+# pre-release suffix IS a test build, and cannot be anything else. Override
+# deliberately with `make package SKUNK_DISABLED=false` when publishing a
+# release from a tree whose VERSION.txt is not yet clean. [C. P. Potter]
+SKUNK_DISABLED ?= $(if $(or $(findstring alpha,$(DIST_VERSION)),\
+                            $(findstring beta,$(DIST_VERSION)),\
+                            $(findstring -rc,$(DIST_VERSION)),\
+                            $(findstring dev,$(DIST_VERSION))),true,false)
+
 # Closed-loop replay of the DIK -> EDLW vectored arrival: the REPL flies it end
 # to end with a driver that obeys ATC, so an arrival change is judged on what the
 # ENGINE says, not on a reimplementation of its formulas in a scratch script.
@@ -521,6 +535,19 @@ test-climb: ifr-repl
 
 test-lineup: ifr-repl
 	@testscripts/ifr_real/lineup_prompt_regression.sh
+
+# The aircraft JOINS its route in mid-flight -- a saved situation near NANIT with
+# the route built from the departure fix 273 NM astern. Every other replay starts
+# the aircraft on its first navlog fix, so the tracker never had to catch up, and
+# a tracker frozen at index 0 reached a real flight (2026-09-04). This is the
+# shape the user actually flies. [C. P. Potter]
+replay-join: ifr-repl
+	@echo "=== Replay: JOIN mid-route near NANIT -> LOWI RNAV Z 08 ==="
+	@ATC_SEED=$(ATC_SEED) ATC_FMS=1 XP_ATC_HOLD_PCT=0 \
+	    ATC_RAW=build/replay-join-raw.log \
+	    python3 testscripts/ifr_real/fly.py testscripts/ifr_real/route_lowi_join.json
+	@echo
+	@grep -hE "\[route\] (NOT )?passed|route_idx" build/replay-join-raw.log | head -8 || true
 
 replay-lsgg: ifr-repl
 	@echo "=== Replay: BELU3R -> LSGG 22, CIFP-prescribed vectors, ILS ==="
@@ -585,6 +612,18 @@ endif
 	@# ── Hand-maintained overlays (additional airspace + per-airport overrides) ──
 	@[ -f Resources/airspace+.txt ] && cp "Resources/airspace+.txt" "$(DIST_STAGE)/Resources/" || true
 	@[ -f Resources/airport+.json ] && cp "Resources/airport+.json" "$(DIST_STAGE)/Resources/" || true
+	@# -- SkunkCrafts Updater hook ------------------------------------------
+	@# The client SCANS X-Plane for skunkcrafts_updater.cfg files: without one
+	@# inside the plugin folder the addon is invisible to the updater, however
+	@# well the server side is published. Shipping it in the package is what
+	@# makes a MANUALLY installed copy updatable. The `module` URL in the
+	@# template points at this project's `release` branch; `version` is filled
+	@# from VERSION.txt, which the updater compares against the cfg published
+	@# there. [C. P. Potter]
+	@sed -e 's|@VERSION@|$(DIST_VERSION)|' -e 's|@DISABLED@|$(SKUNK_DISABLED)|' \
+	    tools/skunkcrafts/skunkcrafts_updater.cfg.template \
+	    > "$(DIST_STAGE)/skunkcrafts_updater.cfg"
+	@echo "SkunkCrafts: version $(DIST_VERSION), disabled=$(SKUNK_DISABLED)"
 	@# ── Data files ──
 	@mkdir -p "$(DIST_STAGE)/data/atc_profiles/eu/vfr" \
 	          "$(DIST_STAGE)/data/atc_profiles/eu/ifr" \

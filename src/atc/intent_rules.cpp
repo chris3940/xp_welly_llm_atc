@@ -201,7 +201,11 @@ static bool starts_with_vhf_freq(const std::string &text) {
       !std::isdigit(static_cast<unsigned char>(text[5])) ||
       !std::isdigit(static_cast<unsigned char>(text[6])))
     return false;
-  return text.size() == 7 || text[7] == ' ';
+  // Anything that is not a digit ends the token: a space, but also the comma or
+  // full stop Voxtral leaves behind ("125.155, November Romeo Charlie"). The
+  // space-only test rejected exactly that. [C. P. Potter]
+  return text.size() == 7 ||
+         !std::isdigit(static_cast<unsigned char>(text[7]));
 }
 
 // Padded standalone-word match: normalize non-alnum runs to spaces, surround
@@ -476,9 +480,20 @@ void reload() { load_from_file(); }
 bool is_loaded() { return g_table.loaded; }
 
 std::string preprocess(const std::string &lowercased_text) {
+  // A FREQUENCY IS COLLAPSED TO ITS COMPACT FORM FIRST, whatever the pilot said.
+  //
+  // The rules recognise a bare frequency readback through starts_with_vhf_freq,
+  // which wants "125.155". Voxtral renders the same readback three ways --
+  // "one two five decimal one five five", "125, decimal 155", "120 decimal to
+  // 30" -- and only the fully spelled one was ever normalised, elsewhere in the
+  // pipeline. So a correct readback of a handoff frequency scored UNKNOWN and,
+  // with the LM down, drew "garbled, say again" three times in a row on the
+  // ground at Valence (2026-09-08). normalize_spoken_frequency already knows how
+  // to do this; it simply was not applied here. [C. P. Potter]
+  const std::string pre = intent_parser::normalize_spoken_frequency(lowercased_text);
   if (!g_table.loaded || g_table.normalizations.empty())
-    return lowercased_text;
-  std::string out = lowercased_text;
+    return pre;
+  std::string out = pre;
   for (const auto &[from, to] : g_table.normalizations) {
     if (from.empty())
       continue;

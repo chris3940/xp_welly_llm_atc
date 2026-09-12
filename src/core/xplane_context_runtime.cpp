@@ -1940,8 +1940,12 @@ void update() {
       // Same reason as the arrival override below: ifr_destination is empty on a
       // flight planned outside the sim, so the OFP is the fallback -- otherwise
       // the overlay is never consulted for the destination's own frequencies.
-      const std::string cand[3] = {ctx.nearest_airport_id, ctx.ifr_destination,
-                                   simbrief_ofp::get().destination_icao};
+      // ifr_destination is a display NAME more often than an ICAO (see the
+      // arrival override below); the overlay is keyed on ICAOs, so a name simply
+      // never matches. Harmless, but listed after the OFP so the real code wins.
+      const std::string cand[3] = {ctx.nearest_airport_id,
+                                   simbrief_ofp::get().destination_icao,
+                                   ctx.ifr_destination};
       for (const std::string &icao : cand) {
         if (icao.empty())
           continue;
@@ -2113,16 +2117,53 @@ void update() {
       // flipped between "Approach" and "Unknown" underneath it. The OFP knows the
       // destination whenever the FMS does not; it is the same source the engine
       // binds its own destination from. [C. P. Potter]
-      const std::string dest_icao =
-          !ctx.ifr_destination.empty() ? ctx.ifr_destination
-                                       : simbrief_ofp::get().destination_icao;
+      // THE OFP'S ICAO FIRST. ctx.ifr_destination is a DISPLAY string: the
+      // runtime fills it with the apt.dat name, then the OFP's destination_name,
+      // and only last with an ICAO. Taking it first wrote "Annecy Meythet" into
+      // nearest_airport_id -- an identifier that exists in no cache, so every
+      // frequency, runway and CIFP lookup keyed on the active airport missed,
+      // and the line below logged 214 times in one flight because the name can
+      // never equal the id it is compared against (LFLU -> LFLP, 2026-09-08).
+      // Accept ifr_destination only when it actually looks like an ICAO.
+      // [C. P. Potter]
+      auto looks_icao = [](const std::string &v) {
+        if (v.size() != 4)
+          return false;
+        for (char c : v)
+          if (!std::isalnum(static_cast<unsigned char>(c)))
+            return false;
+        return true;
+      };
+      std::string dest_icao = simbrief_ofp::get().destination_icao;
+      if (dest_icao.empty() && looks_icao(ctx.ifr_destination))
+        dest_icao = ctx.ifr_destination;
       if (cached_match_id.empty() && !ctx.on_ground && !dest_icao.empty() &&
           dest_icao != ctx.nearest_airport_id) {
+        // pos_cache_ holds the aerodromes parsed from the scenery apt.dat at
+        // init. The DESTINATION is not necessarily one of them -- on the flight
+        // of 2026-09-04 this lookup missed and the override never fired once,
+        // so the active airport still walked the helipads under the approach
+        // (LOIB Kitzbuhel, LOJI Medalp Imst) and the panel announced an
+        // UNCONTROLLED field with "tune to UNICOM and self-announce" while the
+        // aircraft was on an IFR arrival into Innsbruck. The OFP's navlog ends
+        // ON the destination aerodrome and always carries its coordinates: use
+        // it when the cache has nothing. [C. P. Potter]
+        double dlat = 0.0, dlon = 0.0;
         auto dst_it = pos_cache_.find(dest_icao);
         if (dst_it != pos_cache_.end()) {
-          const double d = traffic_geometry::distance_nm(
-              ctx.latitude, ctx.longitude, dst_it->second.first,
-              dst_it->second.second);
+          dlat = dst_it->second.first;
+          dlon = dst_it->second.second;
+        } else {
+          const auto ofp_d = simbrief_ofp::get();
+          if (ofp_d.valid && !ofp_d.navlog.empty()) {
+            dlat = ofp_d.navlog.back().lat;
+            dlon = ofp_d.navlog.back().lon;
+          }
+        }
+        if (dlat != 0.0 || dlon != 0.0) {
+          const double d = traffic_geometry::distance_nm(ctx.latitude,
+                                                         ctx.longitude,
+                                                         dlat, dlon);
           if (d <= kDestActiveNm) {
             if (ctx.nearest_airport_id != dest_icao) {
               char dlog[192];
@@ -2134,8 +2175,8 @@ void update() {
               XPLMDebugString(dlog);
             }
             ctx.nearest_airport_id = dest_icao;
-            ctx.airport_lat = dst_it->second.first;
-            ctx.airport_lon = dst_it->second.second;
+            ctx.airport_lat = dlat;
+            ctx.airport_lon = dlon;
           }
         }
       }
